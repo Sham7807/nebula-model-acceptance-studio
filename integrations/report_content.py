@@ -365,8 +365,11 @@ def _cc_checks(result):
                            "error_format": ["protocol"],
                            "usage_cache": ["cache"],
                            "tool_stream": ["tools", "protocol"],
-                           "prompt_injection": ["protocol"],
-                           "instruction_hierarchy": ["protocol"],
+                           # Security-behavior probes are deliberately kept
+                           # out of the protocol score: none of the six
+                           # capability dimensions represents prompt safety.
+                           "prompt_injection": [],
+                           "instruction_hierarchy": [],
                            "behavioral_consistency": ["reliability"],
                            "parameter_validation": ["max_tokens", "protocol"],
                        }.get(check_id, []),
@@ -426,7 +429,8 @@ def _kvv_metadata(node, detail):
         category, title = "输入 token 基线", "prompt_tokens 官方基线对照"
         # This card is labelled “缓存与 usage”: token baselines are usage
         # evidence, while cache hit/miss remains a separate interpretation.
-        metadata["dimensions"] = ["cache"]
+        metadata["dimensions"] = ["cache", "token_accounting"]
+        metadata["dimension_note"] = "usage token 基线；不等于缓存命中或计费核验"
         if variant:
             title += " · " + variant
         method = "发送官方 case %s 的原始消息、工具与其他参数，读取 usage.prompt_tokens，对照该 case 的官方断言。" % (variant or function)
@@ -443,6 +447,13 @@ def _kvv_metadata(node, detail):
                 metadata["dimensions"] = ["max_tokens"]
             elif function == "test_k3_video_url_multimodal":
                 metadata["dimensions"] = ["multimodal"]
+            elif function in {
+                "test_k3_dynamic_tool_in_system_calculator",
+                "test_k3_top_level_tool_calculator",
+                "test_k3_dynamic_tool_required",
+                "test_k3_dynamic_and_top_level_tools_coexist",
+            }:
+                metadata["dimensions"] = ["tools"]
         else:
             category = next((label for key, label in (("test_dynamic_tools.py", "K3 动态工具"), ("test_tool_choice.py", "K3 工具选择"), ("test_response_format.py", "K3 输出格式"), ("test_thinking_effort.py", "K3 思考控制")) if key in node), "K3 特性")
             title, expected = K3_CASES.get(function, (function, expected))
@@ -492,7 +503,7 @@ def _kvv_checks(result):
         elif "Schema" in category or "工具" in category:
             next_step = "核对 tools/tool_choice 与实际 tool_calls 的透传，依据该 case 的 Schema 检查 arguments；仅返回正文 JSON 不等于工具调用。"
         elif token or "token" in category:
-            meaning += "token 基线差异需结合消息序列化、工具描述、聊天模板和模型版本排查，不能据此认定计费作弊。"
+            meaning += "usage token 基线差异需结合消息序列化、工具描述、聊天模板和模型版本排查；它不等于缓存命中，也不能据此认定计费作弊。"
             next_step = "用同一 case 的消息、工具和思考参数对照请求与 usage；检查附加 system 内容、模板或 token 化版本差异，账单需另行核验。"
         if local:
             observed += "\n本地自检单独列出，不加入渠道远程用例通过数。"
@@ -545,37 +556,10 @@ REPORT_DIMENSIONS = (
     ("multimodal", "多模态能力"),
     ("tools", "工具调用"),
     ("max_tokens", "max_tokens / 长度控制"),
-    ("cache", "缓存与 usage"),
+    ("cache", "缓存、usage 与 token 计量"),
     ("protocol", "协议与错误"),
     ("reliability", "稳定性与性能"),
 )
-
-
-def _dimension_matches(check, key):
-    """Classify checks conservatively so generic words do not inflate a score."""
-    check_id = _text(check.get("id")).lower()
-    title = _text(check.get("title")).lower()
-    category = _text(check.get("category")).lower()
-    text = " ".join((check_id, title, category))
-    if key == "multimodal":
-        return any(term in text for term in ("multimodal", "image", "video", "audio", "图片", "视频", "音频", "视觉", "语音", "多模态"))
-    if key == "tools":
-        return ("工具" in category or "schema" in category or "tool_call_json_schema" in check_id
-                or "dynamic_tool" in check_id or "tool_choice" in check_id or "tool_stream" in check_id
-                or "工具" in title or "tool" in title)
-    if key == "max_tokens":
-        return any(term in text for term in ("max_tokens", "max token", "token 上限", "长度控制"))
-    if key == "cache":
-        return any(term in text for term in ("cache", "usage_cache", "缓存", "prompt_tokens", "token 基线"))
-    if key == "protocol":
-        return ("参数契约" in category or "response_format" in check_id or "协议" in category
-                or "error_format" in check_id or "错误" in title or "签名" in title
-                or "sse" in title or "协议" in title)
-    if key == "reliability":
-        return (("ccmax 协议验收" in category and any(term in text for term in
-                ("message_start", "message_stop", "connection", "stream_error", "timeout", "收尾", "响应流结束", "稳定")))
-                or any(term in text for term in ("connection", "message_stop", "message_start", "timeout", "并发", "收尾", "稳定性")))
-    return False
 
 
 def _report_score(checks, result):
@@ -593,14 +577,19 @@ def _report_score(checks, result):
         # Avoid double counting local-only helper checks in a capability score.
         matched = [check for check in matched if not check.get("local_only")]
         counts = _counts(matched)
-        covered = len(matched)
+        # Evidence gaps (skipped, not-covered, cancelled, or unknown) remain
+        # visible in counts but do not make a dimension look covered or pass.
+        # When mixed with observed checks they stay in the denominator as zero
+        # points, preventing an incomplete run from inflating its score.
+        observed = [c for c in matched if c.get("status") in ("passed", "failed", "inconclusive")]
+        covered = len(matched) if observed else 0
         points = sum(1.0 if c.get("status") == "passed" else 0.4 if c.get("status") == "inconclusive" else 0.0 for c in matched)
         score = round(points / covered * 100) if covered else 0
         if not covered:
             status = "not_covered"
         elif counts.get("failed", 0):
             status = "failed"
-        elif counts.get("inconclusive", 0) or counts.get("skipped", 0) or counts.get("not_covered", 0):
+        elif counts.get("inconclusive", 0) or counts.get("skipped", 0) or counts.get("not_covered", 0) or counts.get("cancelled", 0):
             status = "inconclusive"
         else:
             status = "passed"
