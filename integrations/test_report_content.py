@@ -26,6 +26,48 @@ def kvv(cases, requests=None, **extra):
 
 
 class ReportContentTests(unittest.TestCase):
+    def test_score_dimensions_do_not_infer_tools_or_max_tokens_from_generic_params(self):
+        nodes = [
+            "tests/params/test_params.py::test_no_param_succeeds[thinking]",
+            "tests/params/test_params.py::test_wrong_param_rejected[thinking-temperature=1.1]",
+            "tests/k3_features/test_response_format.py::test_json_object[nostream]",
+        ]
+        report = content.build_report_data(kvv([case(nodes[0]), case(nodes[1], "failed"), case(nodes[2])]))
+        score = {row["id"]: row for row in report["score"]["dimensions"]}
+        self.assertEqual(score["tools"]["covered"], 0)
+        self.assertEqual(score["max_tokens"]["covered"], 0)
+        self.assertEqual(score["protocol"]["covered"], 3)
+
+    def test_k3_calculator_probes_are_tools_and_json_output_is_protocol(self):
+        prefix = "tests/k3_features/test_workbench_capabilities.py::"
+        nodes = [
+            prefix + "test_k3_dynamic_tool_in_system_calculator[nostream]",
+            prefix + "test_k3_top_level_tool_calculator[nostream]",
+            prefix + "test_k3_dynamic_tool_required[nostream]",
+            prefix + "test_k3_dynamic_and_top_level_tools_coexist[nostream]",
+            "tests/k3_features/test_response_format.py::test_json_object[nostream]",
+        ]
+        report = content.build_report_data(kvv([case(node) for node in nodes]))
+        score = {row["id"]: row for row in report["score"]["dimensions"]}
+        self.assertEqual(score["tools"]["covered"], 4)
+        self.assertEqual(score["protocol"]["covered"], 1)
+
+    def test_prompt_token_baseline_is_usage_evidence_not_cache_hit_proof(self):
+        node = "tests/prompt_tokens/test_prompt_tokens.py::test_prompt_tokens_match_groundtruth[assistant_hello]"
+        report = content.build_report_data(kvv([case(node, "passed")]))
+        check = report["checks"][0]
+        self.assertEqual(check["metadata"]["dimensions"], ["cache", "token_accounting"])
+        self.assertIn("usage token 基线", check["metadata"]["dimension_note"])
+        self.assertIn("不等于缓存", check["meaning"])
+
+    def test_only_missing_statuses_leave_dimension_uncovered(self):
+        node = "tests/k3_features/test_workbench_capabilities.py::test_k3_video_url_multimodal[nostream]"
+        report = content.build_report_data(kvv([case(node, "skipped")]))
+        dimension = next(row for row in report["score"]["dimensions"] if row["id"] == "multimodal")
+        self.assertEqual(dimension["covered"], 0)
+        self.assertEqual(dimension["status"], "not_covered")
+        self.assertEqual(dimension["score"], 0)
+
     def test_cc_advanced_checks_have_professional_scope_and_limitations(self):
         source = {"suite": "ccmax_acceptance", "configuration": {"advanced": True},
                   "summary": {"total": 1, "completed": 1},
