@@ -101,6 +101,15 @@ SCHEMA_NAMES = {
 # taken from node IDs/detail; this table does not substitute one fixed contract
 # for every parameter, model, or test case.
 K3_CASES = {
+    # Project-local K3 capability probes (kept explicit so reports explain the
+    # exact request bodies instead of falling back to a raw pytest function).
+    "test_k3_dynamic_tool_in_system_calculator": ("动态工具 · system Calculator", "在 messages 的 system.tools 中动态声明 Calculator，模型应返回 tool_calls。"),
+    "test_k3_top_level_tool_calculator": ("顶层工具 · Calculator", "在顶层 tools 声明 Calculator，模型应返回可解析的 tool_calls。"),
+    "test_k3_dynamic_tool_required": ("动态工具 · required 强制调用", "动态工具与 tool_choice=required 同时发送，必须产生 Calculator 工具调用。"),
+    "test_k3_dynamic_and_top_level_tools_coexist": ("动态 + 顶层工具共存", "同时声明动态 Calculator 与顶层 WeatherQuery，检查两套工具是否均被透传。"),
+    "test_k3_max_tokens_one_is_enforced": ("max_tokens=1 长度上限", "发送 max_tokens=1，检查请求被接受且输出长度/finish_reason 受上限约束。"),
+    "test_k3_video_url_multimodal": ("视频 URL 多模态输入", "发送 video_url 内容块，验证接口是否接受视频输入并返回可读描述或结构化错误。"),
+    "test_k3_prompt_cache_repeatability": ("提示缓存重复请求", "使用完全相同的长提示重复请求，比较 usage 缓存字段及响应稳定性；不把结构字段当作账单命中证明。"),
     "test_text_default": ("默认文本输出", "返回非空文本，finish_reason=stop。"),
     "test_json_object": ("JSON 对象输出", "输出可解析为 JSON 对象且包含 city，finish_reason=stop。"),
     "test_json_schema_strict": ("严格 JSON Schema 输出", "输出为 JSON 对象，city 为字符串、temperature 为数值，finish_reason=stop。"),
@@ -157,6 +166,13 @@ K3_CASES = {
     "test_keep_all_preserves_history_reasoning": ("历史 reasoning 保留", "回答包含官方历史 reasoning 中埋入的全部数字；官方跳过时不产生渠道能力结论。"),
     "test_keep_all_prompt_tokens_include_reasoning": ("历史 reasoning 的 token 计入", "保留历史 reasoning 的 prompt_tokens 严格大于移除它的对照请求；保留官方跳过状态。"),
     "test_effort_stream_returns_reasoning_chunks": ("流式推理与文本分片", "同时收到非空 reasoning_content 分片和 content 分片，finish_reason=stop。"),
+    "test_k3_dynamic_tool_in_system_calculator": ("K3 动态 Calculator 工具", "system 消息内动态声明的 Calculator 应在计算请求中返回 tool_calls。"),
+    "test_k3_top_level_tool_calculator": ("K3 顶层 Calculator 工具", "顶层 tools 声明的 Calculator 应返回结构化 tool_calls。"),
+    "test_k3_dynamic_tool_required": ("K3 动态工具强制调用", "tool_choice=required 时必须调用动态 Calculator，不能静默返回普通文本。"),
+    "test_k3_dynamic_and_top_level_tools_coexist": ("K3 动态与顶层工具共存", "动态 Calculator 与顶层 WeatherQuery 同时声明时，计算请求应调用 Calculator。"),
+    "test_k3_max_tokens_one_is_enforced": ("K3 max_tokens=1 上限", "max_tokens=1 请求成功且 completion_tokens 不超过 1；忽略上限属于参数契约问题。"),
+    "test_k3_video_url_multimodal": ("K3 video_url 多模态", "video_url 内容块应被接受，并返回可见的视频描述文本。"),
+    "test_k3_prompt_cache_repeatability": ("K3 重复请求缓存观测", "相同固定前缀重复请求成功；若返回缓存 usage 字段，字段应为非负整数；未返回字段记为无法判定。"),
 }
 
 
@@ -392,9 +408,16 @@ def _kvv_metadata(node, detail):
         method = "发送官方 case %s 的原始消息、工具与其他参数，读取 usage.prompt_tokens，对照该 case 的官方断言。" % (variant or function)
         expected = "该请求的 prompt_tokens 满足官方用例对应的基线断言；没有数值证据时不推测具体范围。"
     elif "/k3_features/" in node:
-        category = next((label for key, label in (("test_dynamic_tools.py", "K3 动态工具"), ("test_tool_choice.py", "K3 工具选择"), ("test_response_format.py", "K3 输出格式"), ("test_thinking_effort.py", "K3 思考控制")) if key in node), "K3 特性")
-        title, expected = K3_CASES.get(function, (function, expected))
-        method += " 验证目标：" + title + "。"
+        if "test_workbench_capabilities.py" in node:
+            category = "K3 工作台扩展能力"
+            title, expected = K3_CASES.get(function, (function, expected))
+            method = "通过工作台扩展探针发送真实 OpenAI-compatible 请求，验证 " + title + "。"
+            if function == "test_k3_prompt_cache_repeatability":
+                expected += " 缓存计数缺失时只能判为无法判定，不把成功生成误报为命中缓存。"
+        else:
+            category = next((label for key, label in (("test_dynamic_tools.py", "K3 动态工具"), ("test_tool_choice.py", "K3 工具选择"), ("test_response_format.py", "K3 输出格式"), ("test_thinking_effort.py", "K3 思考控制")) if key in node), "K3 特性")
+            title, expected = K3_CASES.get(function, (function, expected))
+            method += " 验证目标：" + title + "。"
     if variant:
         method += " 参数化分支：" + variant + "。"
     token = _token_comparison(detail)
@@ -483,6 +506,69 @@ def _findings(checks, result):
     return findings
 
 
+# The score is a presentation aid, never a replacement for the stored pytest
+# verdict.  Each dimension is scored only from checks that actually provide
+# evidence for it; an uncovered dimension stays explicitly uncovered instead
+# of being silently treated as a pass.  This keeps KVV, CCMax and future
+# suites readable in the same report without inventing capabilities.
+REPORT_DIMENSIONS = (
+    ("multimodal", "多模态能力", ("multimodal", "image", "video", "audio", "图片", "视频", "音频", "视觉", "语音")),
+    ("tools", "工具调用", ("tool", "tools", "function", "工具", "schema")),
+    ("max_tokens", "max_tokens / 长度控制", ("max_tokens", "max token", "token 上限", "长度控制", "参数契约")),
+    ("cache", "缓存与 usage", ("cache", "usage", "缓存", "prompt_tokens", "token 基线")),
+    ("protocol", "协议与错误", ("protocol", "协议", "error", "错误", "参数", "response_format", "签名", "sse")),
+    ("reliability", "稳定性与性能", ("connection", "stream", "message_stop", "message_start", "timeout", "并发", "收尾", "流")),
+)
+
+
+def _report_score(checks, result):
+    """Return a transparent, dimensioned score for the HTML report.
+
+    Scores are weighted equally between dimensions and are intentionally
+    conservative: skipped/not-covered checks contribute no points, while an
+    inconclusive check contributes 0.4 of a pass to distinguish missing
+    evidence from a confirmed failure.  The raw counts remain alongside the
+    score so a reviewer can audit every number.
+    """
+    dimensions = []
+    all_text = lambda check: " ".join(_text(check.get(k)) for k in (
+        "id", "title", "category", "method", "expected", "metadata" )).lower()
+    for key, label, terms in REPORT_DIMENSIONS:
+        matched = [check for check in checks if any(term.lower() in all_text(check) for term in terms)]
+        # Avoid double counting local-only helper checks in a capability score.
+        matched = [check for check in matched if not check.get("local_only")]
+        counts = _counts(matched)
+        covered = len(matched)
+        points = sum(1.0 if c.get("status") == "passed" else 0.4 if c.get("status") == "inconclusive" else 0.0 for c in matched)
+        score = round(points / covered * 100) if covered else 0
+        if not covered:
+            status = "not_covered"
+        elif counts.get("failed", 0):
+            status = "failed"
+        elif counts.get("inconclusive", 0) or counts.get("skipped", 0) or counts.get("not_covered", 0):
+            status = "inconclusive"
+        else:
+            status = "passed"
+        dimensions.append({"id": key, "label": label, "score": score, "max_score": 100,
+                           "status": status, "covered": covered, "counts": counts,
+                           "check_ids": [_text(c.get("id")) for c in matched]})
+    covered_dims = [d for d in dimensions if d["covered"]]
+    total = round(sum(d["score"] for d in covered_dims) / len(covered_dims)) if covered_dims else 0
+    recommendations = []
+    for dimension in dimensions:
+        if dimension["status"] == "not_covered":
+            recommendations.append("补充“%s”专项请求后再评价该能力；本轮没有可计分证据。" % dimension["label"])
+        elif dimension["status"] == "failed":
+            recommendations.append("优先复核“%s”中的失败用例，并依据请求 ID 对照网关与上游日志。" % dimension["label"])
+        elif dimension["status"] == "inconclusive":
+            recommendations.append("补齐“%s”的超时、鉴权或断流证据，再重新运行未完成用例。" % dimension["label"])
+    if not recommendations:
+        recommendations.append("各已覆盖维度均有完整通过证据；仍建议扩大模型、输入和并发样本后复测。")
+    return {"total": total, "max_total": 100, "dimensions": dimensions,
+            "recommendations": recommendations,
+            "method": "等权维度；通过=100%，无法判定=40%，失败/跳过/未覆盖=0%。未覆盖维度不计入总分。"}
+
+
 def build_report_data(result):
     """Describe stored results without changing status or making new requests."""
     result = _dict(result)
@@ -527,8 +613,9 @@ def build_report_data(result):
         limitations += ["KVV 的通用 thinking 格式选项只作用于使用适配函数的用例；K3 原生特性测试保留官方硬编码字段，不保证所有后端均适用。",
                         "官方 skipped 状态和本地 tolerance_boundaries 自检按原样展示；不会补作已通过的渠道测试。",
                         "部分官方 token 用例读到 usage 即结束消费；client_closed/recorder_closed 不自动推翻已观察到的 token 断言。"]
+    score = _report_score(checks, result)
     return {"title": title, "engine": engine, "scope": scope, "checks": checks, "findings": _findings(checks, result),
             "limitations": limitations, "suite": suite, "status": _text(result.get("status")),
             "summary": deepcopy(summary), "verdict": deepcopy(_dict(result.get("verdict"))),
             "remote_case_counts": _counts(remote) if not cc else {}, "local_case_counts": _counts(local),
-            "configuration": deepcopy(_dict(result.get("configuration")))}
+            "configuration": deepcopy(_dict(result.get("configuration"))), "score": score}

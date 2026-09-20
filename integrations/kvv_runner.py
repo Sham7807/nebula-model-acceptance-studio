@@ -9,6 +9,15 @@ import time
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT / 'Kimi-Vendor-Verifier'
+K3_EXTENSIONS = [
+ 'tests/k3_features/test_workbench_capabilities.py::test_k3_dynamic_tool_in_system_calculator',
+ 'tests/k3_features/test_workbench_capabilities.py::test_k3_top_level_tool_calculator',
+ 'tests/k3_features/test_workbench_capabilities.py::test_k3_dynamic_tool_required',
+ 'tests/k3_features/test_workbench_capabilities.py::test_k3_dynamic_and_top_level_tools_coexist',
+ 'tests/k3_features/test_workbench_capabilities.py::test_k3_max_tokens_one_is_enforced',
+ 'tests/k3_features/test_workbench_capabilities.py::test_k3_video_url_multimodal',
+ 'tests/k3_features/test_workbench_capabilities.py::test_k3_prompt_cache_repeatability',
+]
 PRECHECK = [
  'tests/params/test_params.py::test_no_param_succeeds[non-thinking]',
  'tests/params/test_params.py::test_no_param_succeeds[thinking]',
@@ -24,9 +33,20 @@ PRECHECK = [
 ]
 FULL = ['tests/params', 'tests/tool_call_json_schema', 'tests/k3_features', 'tests/prompt_tokens']
 
+def _is_k3(config):
+    model = str(config.get('model') or '').strip().lower()
+    return model in {'kimi-k3', 'kimi_k3', 'kimi/k3'} or model.endswith('/kimi-k3')
+
 def command(config, directory, collect=False):
     args = [sys.executable, '-m', 'pytest', '-p', 'kvv_progress']
-    args += PRECHECK if config['suite'] == 'kvv11' else FULL
+    selected = PRECHECK if config['suite'] == 'kvv11' else FULL
+    # The 11-item verifier remains stable for other model IDs.  When the
+    # selected model is Kimi-K3, append the workbench capability probes so the
+    # report includes the requested dynamic-tools, max_tokens, video and cache
+    # evidence without pretending those K3-only contracts apply to every model.
+    if config['suite'] == 'kvv11' and _is_k3(config):
+        selected = selected + K3_EXTENSIONS
+    args += selected
     args += ['--think-mode', config.get('think_mode', 'kimi'), '--reruns', '0', '--force-reruns', '0', '-o', 'addopts=', '-q',
              '--tool-json-report=' + str(directory / 'schema.json')]
     if config.get('thinking', True): args += ['--thinking']
@@ -80,7 +100,8 @@ def run(config, emit, cancelled, directory):
     directory = Path(directory)
     event_path = directory / 'events.jsonl'
     stdout_path = directory / 'pytest.log'
-    cases, total = [], 11 if config['suite'] == 'kvv11' else None
+    extensions = config['suite'] == 'kvv11' and _is_k3(config)
+    cases, total = [], (11 + len(K3_EXTENSIONS) if extensions else 11) if config['suite'] == 'kvv11' else None
     with stdout_path.open('w', encoding='utf-8') as output:
         process = subprocess.Popen(command(config, directory), cwd=REPO, env=environment(config, directory),
                                    stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
@@ -116,6 +137,7 @@ def run(config, emit, cancelled, directory):
     classify_cases(cases, transport)
     return {'transport':transport,'suite': config['suite'], 'status': 'cancelled' if cancelled() else ('completed' if process.returncode in (0,1) else 'error'),
             'exit_code': process.returncode, 'source': 'MoonshotAI/Kimi-Vendor-Verifier',
+            'extensions': ['K3 渠道扩展能力：动态工具、max_tokens=1、video_url、多请求缓存 usage'] if extensions else [],
             'revision': '66092cf', 'summary': {'total': total, 'completed': len(cases),
                 'passed': sum(c['status']=='passed' for c in cases), 'failed': sum(c['status']=='failed' for c in cases),
                 'skipped': sum(c['status']=='skipped' for c in cases), 'inconclusive':sum(c['status']=='inconclusive' for c in cases)},
