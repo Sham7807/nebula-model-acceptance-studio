@@ -1,4 +1,5 @@
 import base64
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,15 @@ from auth_history import Store, hash_password, verify_password
 
 
 class HistoryStoreTests(unittest.TestCase):
+    def test_connection_context_closes_connection(self):
+        """The per-operation connection must not remain open after ``with``."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory) / 'history.sqlite3')
+            with store.connection() as db:
+                db.execute('SELECT 1')
+            with self.assertRaises(sqlite3.ProgrammingError):
+                db.execute('SELECT 1')
+
     def test_password_hash_and_session_persistence(self):
         with tempfile.TemporaryDirectory() as directory:
             auth = Path(directory) / 'auth.json'

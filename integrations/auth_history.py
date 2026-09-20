@@ -5,6 +5,7 @@ WORKBENCH_DB selects the database; media bytes live transactionally in the same 
 WORKBENCH_COOKIE_SECURE=0 is only intended for loopback HTTP development/tests.
 """
 import base64
+from contextlib import contextmanager
 import hashlib
 import hmac
 import json
@@ -150,12 +151,32 @@ class Store:
             db.execute('DELETE FROM sessions WHERE expires_at <= ?', (time.time(),))
         os.chmod(self.path, 0o600)
 
+    @contextmanager
     def connection(self):
+        """Yield a short-lived SQLite connection and always close it.
+
+        ``sqlite3.Connection`` implements a transaction context manager, but
+        its ``__exit__`` method only commits/rolls back; it does *not* close
+        the connection.  The history store opens a connection per operation,
+        so relying on ``with sqlite3.connect(...)`` leaves file descriptors
+        around until garbage collection and eventually exhausts the process
+        limit under sustained traffic.  Keep transaction semantics while
+        making the connection lifetime explicit and deterministic.
+        """
         connection = sqlite3.connect(self.path, timeout=15)
-        connection.row_factory = sqlite3.Row
-        connection.execute('PRAGMA foreign_keys=ON')
-        connection.execute('PRAGMA busy_timeout=15000')
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute('PRAGMA foreign_keys=ON')
+            connection.execute('PRAGMA busy_timeout=15000')
+            try:
+                yield connection
+            except BaseException:
+                connection.rollback()
+                raise
+            else:
+                connection.commit()
+        finally:
+            connection.close()
 
     @property
     def enabled(self):
