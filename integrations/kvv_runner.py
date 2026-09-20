@@ -44,9 +44,15 @@ def command(config, directory, collect=False):
     # selected model is Kimi-K3, append the workbench capability probes so the
     # report includes the requested dynamic-tools, max_tokens, video and cache
     # evidence without pretending those K3-only contracts apply to every model.
-    if config['suite'] in ('kvv11', 'kvvfull') and _is_k3(config):
-        selected = selected + K3_EXTENSIONS
+    k3 = config['suite'] in ('kvv11', 'kvvfull') and _is_k3(config)
+    # The extension file lives under tests/k3_features and would otherwise be
+    # picked up by the full directory suite for every model. Ignore it during
+    # directory collection, then append its explicit nodes only for Kimi-K3.
     args += selected
+    if config['suite'] == 'kvvfull':
+        args += ['--ignore=tests/k3_features/test_workbench_capabilities.py']
+    if k3:
+        args += K3_EXTENSIONS
     args += ['--think-mode', config.get('think_mode', 'kimi'), '--reruns', '0', '--force-reruns', '0', '-o', 'addopts=', '-q',
              '--tool-json-report=' + str(directory / 'schema.json')]
     if config.get('thinking', True): args += ['--thinking']
