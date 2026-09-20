@@ -48,6 +48,12 @@
   .mode-card .t{font-size:12px;font-weight:550;display:flex;justify-content:space-between;align-items:center;gap:8px}
   .mode-card .t span{font:10px ui-monospace,monospace;font-weight:400;color:#8a9b7d}
   .mode-card .d{font-size:10px;color:#839176;margin-top:3px;line-height:1.65}
+  .mode-plan{margin:-5px 0 18px;padding:11px 12px;border:1px solid #dfe8d9;border-radius:9px;background:#f7faf4}
+  .mode-plan-title{display:flex;align-items:center;gap:7px;font-size:10px;font-weight:600;color:#557448}
+  .mode-plan-title .dot{width:5px;height:5px;border-radius:50%;background:#83a268;flex:none}
+  .mode-plan-list{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+  .mode-plan-list span{display:inline-flex;align-items:center;padding:4px 7px;border:1px solid #dbe6d5;border-radius:999px;background:#fff;color:#637b58;font-size:9px;line-height:1.35}
+  .mode-plan-note{margin-top:8px;color:#8a987f;font-size:9px;line-height:1.6}
   .controls{display:flex;gap:8px;align-items:center}
   .btn{background:var(--accent);color:#fff;border:1px solid var(--accent);border-radius:7px;padding:10px 16px;font-size:11px;font-weight:500;cursor:pointer;transition:background .15s,border-color .15s;white-space:nowrap}
   .btn:hover:not(:disabled){background:#18553f;border-color:#18553f}
@@ -185,6 +191,11 @@
         <label class="mode-card" data-v="full"><input type="radio" name="mode" value="full">
           <div class="t">完整检测 <span>约 20–40 分钟</span></div><div class="d">45+ 项 · 参数边界、视频输入、缓存命中与深度检索</div></label>
       </div>
+      <section class="mode-plan" id="modePlan" aria-live="polite">
+        <div class="mode-plan-title"><span class="dot"></span><span id="modePlanTitle">标准检测 · 关键能力验收</span></div>
+        <div class="mode-plan-list" id="modePlanList"></div>
+        <p class="mode-plan-note" id="modePlanNote"></p>
+      </section>
       <div class="controls"><button class="btn" id="btnRun" onclick="runAll()">开始检测 ↗</button><button class="btn ghost" id="btnStop" onclick="stopRun()" disabled>中断检测</button></div>
       <p class="hint">耗时为参考值，实际取决于渠道响应速度。密钥不持久化保存；浏览器直连需要渠道允许 CORS。</p>
     </aside>
@@ -1115,6 +1126,18 @@ function stopRun(){
 
 /* ================= 主流程 ================= */
 const MODE_STEPS={quick:8,std:20,full:45};
+const MODE_PLAN={
+  quick:{title:'快速检测 · 核心连通性',items:['模型列表与鉴权','身份自述','流式输出','协议与 JSON','延迟与吞吐'],note:'本模式不执行工具调用、多模态、缓存或 max_tokens 专项。'},
+  std:{title:'标准检测 · 关键能力验收',items:['工具调用（标准）','多模态：图片与视频输入','缓存：cached_tokens ×3','max_tokens / 参数边界','协议与错误兼容','长上下文与并发'],note:'会执行截图顶部列出的多模态、工具调用、max_tokens、缓存与兼容性检查。'},
+  full:{title:'完整检测 · 全量能力验收',items:['标准检测全部项目','参数边界与 JSON Schema','图片与视频输入','缓存命中与 usage','内容质量与安全探针','健壮性与并发压测'],note:'覆盖标准检测全部项目，并增加内容质量、健壮性和深度检索；耗时会明显增加。'}
+};
+function updateModePlan(){
+  const mode=document.querySelector('input[name=mode]:checked')?.value||'std',plan=MODE_PLAN[mode]||MODE_PLAN.std;
+  const title=$('modePlanTitle'),list=$('modePlanList'),note=$('modePlanNote');
+  if(title)title.textContent=plan.title;
+  if(list){list.replaceChildren(...plan.items.map(item=>{const span=document.createElement('span');span.textContent=item;return span;}));}
+  if(note)note.textContent=plan.note;
+}
 async function runAll(){
   if(RUNNING)return;
   const c=readCfg();
@@ -1285,7 +1308,9 @@ document.querySelectorAll('.mode-card').forEach(el=>{
   el.addEventListener('click',()=>{
     document.querySelectorAll('.mode-card').forEach(x=>x.classList.remove('on'));
     el.classList.add('on');el.querySelector('input').checked=true;
+    updateModePlan();
   });
+  el.querySelector('input')?.addEventListener('change',updateModePlan);
 });
 /* 记住输入（Key 除外，安全考虑不持久化） */
 ['inBase','inModel','inTimeout','inConc','inBatch'].forEach(id=>{
@@ -1304,6 +1329,7 @@ for(const id of ['inBase','inKey'])$(id).addEventListener('input',()=>{
   $('loadGeneralModels').textContent='获取模型';
 });
 initCards();
+updateModePlan();
 /* Keep the embedded page in the workbench's normal scroll flow. */
 function resizeWorkbenchFrame(){
   try{
