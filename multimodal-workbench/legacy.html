@@ -23,6 +23,10 @@
   .hero h1{font-size:21px;font-weight:550;line-height:1.6;letter-spacing:0;margin:3px 0 6px}
   .hero .sub{color:#819173;font-size:12px;max-width:700px}
   .hero .badge{white-space:nowrap;font-size:10px;padding:6px 10px;border-radius:20px;background:var(--accent-soft);color:var(--accent2)}
+  .coverage-strip{display:flex;flex-wrap:wrap;gap:7px;padding:12px 28px;border-bottom:1px solid var(--border);background:linear-gradient(90deg,#fbfdf9,#f5f9f1)}
+  .coverage-pill{display:inline-flex;align-items:center;gap:5px;border:1px solid #dce8d5;border-radius:999px;padding:5px 9px;background:#fff;color:#66805b;font-size:10px;line-height:1}
+  .coverage-pill i{width:6px;height:6px;border-radius:50%;background:#83a268;box-shadow:0 0 0 3px #edf5e7;flex:none}
+  .coverage-pill strong{font-weight:600;color:#486b4a}
   .general-grid{display:grid;grid-template-columns:345px minmax(0,1fr);align-items:stretch}
   .general-config{padding:24px;border-right:1px solid var(--border);min-width:0}
   .config-title,.section-title{font-size:14px;font-weight:550;margin:0 0 18px}
@@ -132,7 +136,7 @@
   code{font:10px ui-monospace,Menlo,monospace;background:#eef3e8;padding:1px 5px;border-radius:4px;color:#577546;overflow-wrap:anywhere}
   footer{padding:15px 26px;border-top:1px solid var(--border);color:#8a987f;font-size:10px}
   @media(max-width:900px){.general-grid{grid-template-columns:310px minmax(0,1fr)}#cards{grid-template-columns:1fr}.output-heading{align-items:flex-start;flex-direction:column;gap:3px}.overall{align-items:flex-start;flex-direction:column}}
-  @media(max-width:700px){.hero{padding:20px;align-items:flex-start;flex-direction:column;gap:12px}.general-grid{grid-template-columns:1fr}.general-config{padding:20px;border-right:0;border-bottom:1px solid var(--border)}.general-output{padding:20px}.output-heading{flex-direction:row;align-items:center}.hero h1{font-size:21px}.panel{padding:14px}.overall{flex-direction:row;align-items:center;gap:14px}.score-circle{width:90px;height:90px}.score-circle .inner{width:76px;height:76px}.score-circle .num{font-size:26px}.verdict h2{font-size:13px}.verdict p{font-size:10px}footer{padding:16px 20px}#log{height:190px}}
+  @media(max-width:700px){.hero{padding:20px;align-items:flex-start;flex-direction:column;gap:12px}.coverage-strip{padding:11px 20px;gap:6px}.coverage-pill{font-size:9px;padding:5px 8px}.general-grid{grid-template-columns:1fr}.general-config{padding:20px;border-right:0;border-bottom:1px solid var(--border)}.general-output{padding:20px}.output-heading{flex-direction:row;align-items:center}.hero h1{font-size:21px}.panel{padding:14px}.overall{flex-direction:row;align-items:center;gap:14px}.score-circle{width:90px;height:90px}.score-circle .inner{width:76px;height:76px}.score-circle .num{font-size:26px}.verdict h2{font-size:13px}.verdict p{font-size:10px}footer{padding:16px 20px}#log{height:190px}}
   @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 </head>
@@ -141,8 +145,15 @@
   <header class="hero">
     <div><div class="eyebrow">CHANNEL ACCEPTANCE</div><h1>通用检测</h1>
       <p class="sub">从协议兼容到长上下文，检查文本模型的接口表现、输出质量与渠道稳定性。</p></div>
-    <span class="badge">12 个检测维度</span>
+  <span class="badge">13 个检测维度 · 4 层专项能力</span>
   </header>
+  <div class="coverage-strip" aria-label="本次通用检测覆盖范围">
+    <span class="coverage-pill"><i></i><strong>多模态</strong> 图像 / 视频输入</span>
+    <span class="coverage-pill"><i></i><strong>工具调用</strong> 标准 / 动态工具</span>
+    <span class="coverage-pill"><i></i><strong>max_tokens</strong> 截断 / 边界值</span>
+    <span class="coverage-pill"><i></i><strong>缓存</strong> cached_tokens / 命中率</span>
+    <span class="coverage-pill"><i></i><strong>兼容性</strong> 参数与错误处理</span>
+  </div>
   <div class="general-grid">
     <aside class="general-config" aria-label="通用检测配置">
       <h2 class="config-title">渠道配置</h2>
@@ -170,9 +181,9 @@
         <label class="mode-card" data-v="quick"><input type="radio" name="mode" value="quick">
           <div class="t">快速检测 <span>约 3 分钟</span></div><div class="d">约 8 项 · 日常连通性与核心能力检查</div></label>
         <label class="mode-card on" data-v="std"><input type="radio" name="mode" value="std" checked>
-          <div class="t">标准检测 <span>约 10 分钟</span></div><div class="d">约 16 项 · 协议、质量与渠道性能评估</div></label>
+          <div class="t">标准检测 <span>约 10 分钟</span></div><div class="d">约 20 项 · 多模态、工具调用、缓存与渠道性能</div></label>
         <label class="mode-card" data-v="full"><input type="radio" name="mode" value="full">
-          <div class="t">完整检测 <span>约 20–40 分钟</span></div><div class="d">35+ 项 · 参数、内容与多深度长文本检索</div></label>
+          <div class="t">完整检测 <span>约 20–40 分钟</span></div><div class="d">45+ 项 · 参数边界、视频输入、缓存命中与深度检索</div></label>
       </div>
       <div class="controls"><button class="btn" id="btnRun" onclick="runAll()">开始检测 ↗</button><button class="btn ghost" id="btnStop" onclick="stopRun()" disabled>中断检测</button></div>
       <p class="hint">耗时为参考值，实际取决于渠道响应速度。密钥不持久化保存；浏览器直连需要渠道允许 CORS。</p>
@@ -400,7 +411,13 @@ const responseText=v=>typeof v==='string'?v:Array.isArray(v)?v.map(x=>typeof x==
 const content=r=>responseText(r?.body?.choices?.[0]?.message?.content);
 const reasoning=r=>responseText(r?.body?.choices?.[0]?.message?.reasoning_content);
 const usage=r=>r?.body?.usage||{};
-const cachedTok=r=>{const v=usage(r)?.prompt_tokens_details?.cached_tokens;return typeof v==='number'&&Number.isFinite(v)?v:null;};
+const cacheTelemetry=r=>{
+  const u=usage(r)||{},d=u.prompt_tokens_details||u.input_tokens_details||{};
+  const read=[d.cached_tokens,d.cache_read_input_tokens,d.cache_read_tokens,u.cached_tokens].find(v=>typeof v==='number'&&Number.isFinite(v));
+  const created=[d.cache_creation_input_tokens,d.cache_creation_tokens,u.cache_creation_input_tokens].find(v=>typeof v==='number'&&Number.isFinite(v));
+  return {read:read??null,created:created??null,raw:d};
+};
+const cachedTok=r=>cacheTelemetry(r).read;
 const Q=q=>[{role:'user',content:q}];
 const malformed=r=>r&&r.ok&&r.body&&(!Array.isArray(r.body.choices)||r.body.choices.length===0);
 function makePng(r,g,b){const c=document.createElement('canvas');c.width=c.height=64;const x=c.getContext('2d');x.fillStyle=`rgb(${r},${g},${b})`;x.fillRect(0,0,64,64);return c.toDataURL('image/png');}
@@ -431,7 +448,7 @@ function expectBrand(model){
 /* ================= 维度卡 ================= */
 const DIMS=[
   {id:'proto',  name:'协议兼容性',          modes:['quick','std','full']},
-  {id:'params', name:'参数支持度',          modes:['full']},
+  {id:'params', name:'参数支持度',          modes:['std','full']},
   {id:'vision', name:'多模态能力',          modes:['std','full']},
   {id:'cache',  name:'上下文缓存',          modes:['std','full']},
   {id:'auth',   name:'真实性 / 血统',        modes:['quick','std','full']},
@@ -442,6 +459,7 @@ const DIMS=[
   {id:'conc',   name:'稳定性与并发',        modes:['std','full']},
   {id:'err',    name:'错误处理',            modes:['std','full']},
   {id:'robust', name:'工程健壮性/降智检测', modes:['full']},
+  {id:'tools',  name:'工具调用与动态加载',    modes:['std','full']},
 ];
 function initCards(){
   $('cards').innerHTML='';
@@ -560,17 +578,35 @@ async function tStream(){
 async function tCache(){
   const doc='你是文档分析助手。文档内容如下：'+'人工智能的发展历程与未来趋势。'.repeat(300);
   const p={model:cfg().model,max_tokens:1500,messages:[{role:'system',content:doc},{role:'user','content':'这份文档的主题是什么？一句话回答。'}]};
-  const cached=[];let fails=0;
+  const cached=[],created=[],raw=[];let fails=0;
   for(let i=0;i<3;i++){
     checkStop();
-    const r=await post(p);const ct=cachedTok(r);cached.push(ct);
+    const r=await post(p);const telemetry=cacheTelemetry(r),ct=telemetry.read;cached.push(ct);created.push(telemetry.created);raw.push(telemetry.raw);
     if(!r.ok){fails++;log(`缓存第${i+1}次: 请求失败 (${r.status==='timeout'?'超时':r.status})`,'bad');}
-    else log(`缓存第${i+1}次: ${r.dt.toFixed(1)}s cached=${ct??'未上报'}`,ct>0?'ok':'mid');
+    else log(`缓存第${i+1}次: ${r.dt.toFixed(1)}s cached=${ct??'未上报'}${telemetry.created!=null?` created=${telemetry.created}`:''}`,ct>0?'ok':'mid');
     if(i<2)await sleep(2000);
   }
   const hit=cached.some(v=>v>0);
-  detail('上下文缓存 ×3','cached_tokens: '+cached.map(v=>v??'—').join(' / ')+(fails?`（${fails}次失败）`:''),hit?'ok':'bad',hit?'✅ 命中':'❌ 无缓存');
-  return{hit,cached,fails};
+  const reported=raw.some(v=>v&&Object.keys(v).length);
+  detail('上下文缓存 ×3','读取: '+cached.map(v=>v??'—').join(' / ')+'；创建: '+created.map(v=>v??'—').join(' / ')+(reported?'（已返回缓存字段）':'（未上报缓存字段）')+(fails?`（${fails}次失败）`:''),hit?'ok':reported?'mid':'bad',hit?'✅ 命中':reported?'⚠️ 已上报但未命中':'❌ 无缓存');
+  return{hit,cached,created,raw,fails,reported};
+}
+
+/* 视频输入探针：文本模型返回明确不支持时记为“无法判定”，不将文本模型误判为失败。 */
+async function tVideoInput(){
+  const sample='https://sf1-cdn-tos.huoshanstatic.com/obj/media-fe/xgplayer_doc_video/mp4/xgplayer-demo-360p.mp4';
+  const r=await postSmart({model:cfg().model,stream:false,max_tokens:300,messages:[{role:'user',content:[
+    {type:'text',text:'请描述一下这个视频的内容，并指出一个象征意义。'},
+    {type:'video_url',video_url:{url:sample}}
+  ]}]});
+  const text=content(r),status=Number(r.status)||0;
+  const accepted=valid(r)&&text.trim().length>0;
+  const unsupported=!accepted&&(status===400||status===404||status===415||status===422||/video|multimodal|content type|unsupported|not support|invalid/i.test(JSON.stringify(r.body||r.err||'')));
+  const cls=accepted?'ok':unsupported?'mid':'bad';
+  const judge=accepted?'✅ 视频输入已处理':unsupported?'⚠️ 渠道未声明支持（不等同于文本模型故障）':'❌ 请求失败或响应异常';
+  detail('视频输入（video_url）',accepted?text.slice(0,90):`HTTP ${status||'网络'} ${String(r.err||r.body?.error?.message||'未返回有效内容').slice(0,90)}`,cls,judge);
+  log(`视频输入: ${accepted?'已识别':unsupported?'未支持 / 可判定':'请求异常'}${status?` HTTP ${status}`:''}`,cls);
+  return{accepted,unsupported,status,text:text.slice(0,240)};
 }
 
 async function tVision(){
@@ -620,6 +656,23 @@ async function tTools(){
   log(`Function Calling: ${ok?'✓ 触发 get_weather':'✗ 未触发'} (${r.dt.toFixed(1)}s)`,ok?'ok':'bad');
   detail('Function Calling',ok?JSON.stringify(tc[0].function.arguments):'未触发 / HTTP '+r.status,ok?'ok':'bad',ok?'✅':'❌');
   return ok;
+}
+
+/* Kimi K3 / 兼容网关动态工具加载探针。兼容其他模型：不支持动态 schema 时按“未声明支持”记录。 */
+async function tDynamicTools(){
+  const calculator={type:'function',function:{name:'Calculator',description:'计算器，只支持单个算术表达式的求值',parameters:{type:'object',properties:{expr:{type:'string',description:'算术表达式，支持四则运算、指数运算、对数函数、三角函数，使用 javascript 语法'}},required:['expr']}}};
+  const base=[{role:'system',content:'You are an AI assistant. Use tools when helpful.'},{role:'user',content:'帮我计算一下 23 * 47 的结果。'}];
+  const calls=[
+    {name:'动态工具加载',payload:{model:cfg().model,messages:[...base,{role:'system',tools:[calculator]}]}},
+    {name:'动态工具 + required',payload:{model:cfg().model,tool_choice:'required',messages:[...base,{role:'system',tools:[calculator]}]}},
+    {name:'动态 + 顶层工具并存',payload:{model:cfg().model,messages:[...base,{role:'system',tools:[calculator]}],tools:[{type:'function',function:{name:'WeatherQuery',description:'查询指定城市天气',parameters:{type:'object',properties:{city:{type:'string'}},required:['city']}}}]}}
+  ];
+  const rows=[];let supported=0,unknown=0;
+  for(const item of calls){checkStop();const r=await postSmart({...item.payload,max_tokens:500});const tc=r?.body?.choices?.[0]?.message?.tool_calls||[];const ok=tc.some(x=>x?.function?.name==='Calculator');const unsupported=!ok&&(Number(r.status)===400||Number(r.status)===422||/tool|schema|role|unsupported|invalid/i.test(JSON.stringify(r.body||r.err||'')));rows.push(`${item.name}: ${ok?'✅':unsupported?'⚠️ 未声明支持':'❌'}${r.status?` HTTP ${r.status}`:''}`);if(ok)supported++;else if(unsupported)unknown++;}
+  const cls=supported===calls.length?'ok':supported||unknown?'mid':'bad';
+  detail('动态工具加载（Kimi K3 兼容）',rows.join('；'),cls,supported===calls.length?'✅ 3/3':supported||unknown?'⚠️ 部分 / 未声明':'❌ 未触发');
+  log(`动态工具: ${supported}/${calls.length} 触发${unknown?`，${unknown} 项未声明支持`:''}`,cls);
+  return{supported,total:calls.length,unknown,rows};
 }
 
 async function tParallelTools(){
@@ -737,6 +790,10 @@ async function tParams(){
   const fr=mt.body?.choices?.[0]?.finish_reason;
   res.maxtok=mt.ok&&fr==='length';
   detail('max_tokens 截断',res.maxtok?'finish_reason=length ✓':'finish_reason='+(fr??('HTTP '+mt.status)),res.maxtok?'ok':'mid',res.maxtok?'✅':'⚠️');
+  const one=await post({model:m,max_tokens:1,stream:false,messages:[{role:'user',content:'hi'}]});
+  const oneFinish=one.body?.choices?.[0]?.finish_reason;
+  res.maxOne=one.ok&&oneFinish==='length';
+  detail('max_tokens=1 边界值',one.ok?`finish_reason=${oneFinish??'未返回'}${usage(one).completion_tokens!=null?` · completion_tokens=${usage(one).completion_tokens}`:''}`:'HTTP '+one.status,res.maxOne?'ok':one.status===400||one.status===422?'mid':'bad',res.maxOne?'✅ 严格截断':one.status===400||one.status===422?'⚠️ 渠道拒绝边界值':'❌ 未按预期截断');
   const n2=await post({model:m,max_tokens:1000,n:2,messages:Q('说一个数字')});
   res.n2=n2.ok&&(n2.body?.choices?.length===2);
   detail('n=2 多候选',res.n2?'返回 2 个 choices':(n2.ok?'只返回 '+(n2.body?.choices?.length??0)+' 个':'HTTP '+n2.status),res.n2?'ok':'mid',res.n2?'✅':'⚠️ 不支持');
@@ -1057,7 +1114,7 @@ function stopRun(){
 }
 
 /* ================= 主流程 ================= */
-const MODE_STEPS={quick:8,std:16,full:38};
+const MODE_STEPS={quick:8,std:20,full:45};
 async function runAll(){
   if(RUNNING)return;
   const c=readCfg();
@@ -1099,13 +1156,14 @@ async function runAll(){
       saveHistory();
       return;
     }
-    let idn=null,st=null,ca=null,vi=null,imgout=false,tools=false,json=false,needles=[],re=null,er=null,cc=null,pa=null,ct=null,rb=null,ptools=null,jschema=null;
+    let idn=null,st=null,ca=null,vi=null,videoIn=null,imgout=false,tools=false,dynTools=null,json=false,needles=[],re=null,er=null,cc=null,pa=null,ct=null,rb=null,ptools=null,jschema=null;
     phase('阶段 1 · 生态与身份');
     await tModels();setProgress('模型列表');
     idn=await tIdentity();setProgress('身份自述');
     phase('阶段 2 · 协议与流式');
     st=await tStream();setProgress('流式+假流式检测');
     tools=await tTools();setProgress('Function Calling');
+    if(has(DIMS[12])&&/kimi|k3/i.test(c.model)){dynTools=await tDynamicTools();setProgress('动态工具加载');}
     json=await tJson();setProgress('JSON Mode');
     if(has(DIMS[1])){
       ptools=await tParallelTools();
@@ -1114,6 +1172,7 @@ async function runAll(){
     if(has(DIMS[2])){
       phase('阶段 3 · 多模态');
       vi=await tVision();setProgress('视觉（3色+内容图）');
+      videoIn=await tVideoInput();setProgress('视频输入（video_url）');
       imgout=await tImgOut();setProgress('图片输出');
     }
     if(has(DIMS[3])){
@@ -1138,22 +1197,26 @@ async function runAll(){
     setCard('proto',(st.ok?2.5:0)+(st.fake?-0.5:0)+(tools?3:0)+(json?2.2:0)+(ptools==null?0:ptools?0.8:0)+(jschema==null?0:jschema?0.7:0),
       `流式 ${st.ok?(st.fake?'⚠️假流式':'✅'):'❌'} / Function Calling ${tools?'✅':'❌'} / JSON ${json?'✅':'❌'}${ptools!=null?` / 并行工具 ${ptools?'✅':'⚠️'}`:''}${jschema!=null?` / JSON Schema ${jschema?'✅':'⚠️'}`:''}`,
       (st.ok&&!st.fake&&tools&&json)?'<span class="tag pass">通过</span>':'<span class="tag warn">部分</span>');
+    if(dynTools){
+      const dscore=dynTools.supported===dynTools.total?10:dynTools.supported>0?6:dynTools.unknown?4:2;
+      setCard('tools',dscore,`动态工具 ${dynTools.supported}/${dynTools.total}；${dynTools.unknown?dynTools.unknown+' 项返回未声明支持。':'全部探针有 tool_calls。'}<br>标准工具调用与动态 system tools 分开记录，失败时保留 HTTP 与响应证据。`,dynTools.supported===dynTools.total?'<span class="tag pass">完整</span>':'<span class="tag warn">部分</span>');
+    }else setCard('tools',tools?8:2,`标准 Function Calling ${tools?'✅ 已触发':'❌ 未触发'}；动态 system tools 仅对 Kimi K3 兼容模型执行专项探针。`,tools?'<span class="tag pass">通过</span>':'<span class="tag warn">待确认</span>');
     if(pa){
-      const items=[pa.temp0,pa.stop,pa.maxtok,pa.n2,pa.pen,pa.seed,pa.logprobs];
+      const items=[pa.temp0,pa.stop,pa.maxtok,pa.maxOne,pa.n2,pa.pen,pa.seed,pa.logprobs];
       const n=items.filter(Boolean).length;
       setCard('params',Math.min(9,n*1.4),
-        `temp=0复现 ${pa.temp0?'✅':'⚠️'} / stop ${pa.stop?'✅':'⚠️'} / max_tokens截断 ${pa.maxtok?'✅':'⚠️'} / n=2 ${pa.n2?'✅':'⚠️'} / penalty ${pa.pen?'✅':'⚠️'} / seed ${pa.seed?'✅':'⚠️'} / logprobs ${pa.logprobs?'✅':'⚠️'}<br>被 400 拒绝 = 网关未透传；temp=0 不一致 = 站方可能改写参数`,
+        `temp=0复现 ${pa.temp0?'✅':'⚠️'} / stop ${pa.stop?'✅':'⚠️'} / max_tokens截断 ${pa.maxtok?'✅':'⚠️'} / max_tokens=1 ${pa.maxOne?'✅':'⚠️'} / n=2 ${pa.n2?'✅':'⚠️'} / penalty ${pa.pen?'✅':'⚠️'} / seed ${pa.seed?'✅':'⚠️'} / logprobs ${pa.logprobs?'✅':'⚠️'}<br>被 400 拒绝 = 网关未透传；temp=0 不一致 = 站方可能改写参数`,
         n>=5?'<span class="tag pass">透传好</span>':'<span class="tag warn">有阉割</span>');
     }
     if(vi){
-      const vScore=(vi.hits===3?(vi.cHit?9.5:8):vi.hits>0?3+vi.hits*1.5:2.5);
+      const vScore=(vi.hits===3?(vi.cHit?9.5:8):vi.hits>0?3+vi.hits*1.5:2.5)+(videoIn?.accepted?0.5:0);
       setCard('vision',Math.min(10,vScore+(imgout?0.5:0)),
-        `三色 ${vi.hits}/3 + 内容图 ${vi.cHit?'✅ 真看懂':'❌'}：${esc(vi.notes)}。图片输出 ${imgout?'✅':'❌'}。<br>注：先核对官方是否支持视觉，纯文本模型低分属正常。`,
+        `三色 ${vi.hits}/3 + 内容图 ${vi.cHit?'✅ 真看懂':'❌'}：${esc(vi.notes)}。视频输入 ${videoIn?.accepted?'✅':videoIn?.unsupported?'⚠️ 未声明支持':'❌'}。图片输出 ${imgout?'✅':'❌'}。<br>注：视频未声明支持按兼容性提示记录，不把文本模型误判为故障。`,
         (vi.hits===3&&vi.cHit)?'<span class="tag pass">真视觉</span>':vi.hits>0?'<span class="tag warn">部分</span>':'<span class="tag fail">不支持</span>');
     }
-    if(ca)setCard('cache',ca.hit?8.5:2,
-      ca.hit?`cached_tokens ${ca.cached.map(v=>v??'—').join(' → ')}，缓存生效`:`三次 cached_tokens 全 0${ca.fails?`（另 ${ca.fails} 次请求失败）`:''}。若官方支持缓存（如 GLM-5.3-Flash / DeepSeek）则属站方未透传/未配置`,
-      ca.hit?'<span class="tag pass">通过</span>':'<span class="tag fail">无缓存</span>');
+    if(ca)setCard('cache',ca.hit?8.5:ca.reported?4:2,
+      ca.hit?`缓存读取 ${ca.cached.map(v=>v??'—').join(' → ')}；创建 ${ca.created?.map(v=>v??'—').join(' / ')||'—'}，缓存生效`:`缓存读取 ${ca.cached.map(v=>v??'—').join(' → ')}${ca.reported?'（已上报字段但未命中）':''}${ca.fails?`（另 ${ca.fails} 次请求失败）`:''}。若官方支持缓存则需核对站方是否透传/配置`,
+      ca.hit?'<span class="tag pass">通过</span>':ca.reported?'<span class="tag warn">已上报未命中</span>':'<span class="tag fail">无缓存</span>');
     const authScore=idn.match===false?4:idn.match===null?6:8.5;
     setCard('auth',authScore,
       `${idn.match===false?'<b>自述与模型名品牌不符，警惕套壳</b>':idn.match===null?'品牌未识别，人工核对':'自述与模型品牌一致'}；思维链 ${idn.hasReasoning?'存在':'缺失'}${idn.retModel&&idn.retModel!==c.model?`；上游命名 <code>${esc(idn.retModel)}</code>`:''}`,
