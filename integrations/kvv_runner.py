@@ -44,7 +44,7 @@ def command(config, directory, collect=False):
     # selected model is Kimi-K3, append the workbench capability probes so the
     # report includes the requested dynamic-tools, max_tokens, video and cache
     # evidence without pretending those K3-only contracts apply to every model.
-    if config['suite'] == 'kvv11' and _is_k3(config):
+    if config['suite'] in ('kvv11', 'kvvfull') and _is_k3(config):
         selected = selected + K3_EXTENSIONS
     args += selected
     args += ['--think-mode', config.get('think_mode', 'kimi'), '--reruns', '0', '--force-reruns', '0', '-o', 'addopts=', '-q',
@@ -100,7 +100,7 @@ def run(config, emit, cancelled, directory):
     directory = Path(directory)
     event_path = directory / 'events.jsonl'
     stdout_path = directory / 'pytest.log'
-    extensions = config['suite'] == 'kvv11' and _is_k3(config)
+    extensions = config['suite'] in ('kvv11', 'kvvfull') and _is_k3(config)
     cases, total = [], (11 + len(K3_EXTENSIONS) if extensions else 11) if config['suite'] == 'kvv11' else None
     with stdout_path.open('w', encoding='utf-8') as output:
         process = subprocess.Popen(command(config, directory), cwd=REPO, env=environment(config, directory),
