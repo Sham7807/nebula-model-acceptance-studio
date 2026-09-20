@@ -197,6 +197,28 @@ test('relay image JSON accepts validated URL references through referenceUrls', 
   await assert.rejects(engine.build(config('relay-image-json', { referenceUrls: ['https://user:pass@cdn.example/a.png'] })), /公开.*http|账号密码/);
 });
 
+test('relay image JSON preserves local-file then URL reference order', async () => {
+  const { engine } = harness();
+  const file = new File([new Uint8Array([137, 80, 78, 71])], 'local.png', { type: 'image/png' });
+  const spec = await engine.build(config('relay-image-json', {
+    files: [file],
+    referenceUrls: ['https://cdn.example/remote.png'],
+  }));
+  assert.deepEqual(bodyOf(spec).image, [
+    'data:image/png;base64,iVBORw==',
+    'https://cdn.example/remote.png',
+  ]);
+});
+
+test('OpenAI multipart image edit explains that URL references are unsupported', async () => {
+  const { engine, calls } = harness();
+  await assert.rejects(
+    engine.build(config('openai-image-edit', { referenceUrls: ['https://cdn.example/reference.png'] })),
+    /multipart.*URL|不接受.*URL|切换到.*JSON/
+  );
+  assert.equal(calls.length, 0);
+});
+
 test('relay image JSON rejects missing or invalid reference uploads before fetch', async () => {
   const { engine, calls } = harness();
   await assert.rejects(engine.run(config('relay-image-json')), /参考图|图片|上传/);
