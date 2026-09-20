@@ -28,6 +28,18 @@ LOCK = threading.RLock()
 SUITES = {'kvv11', 'kvvfull', 'ccmax'}
 AUTH_STORE = Store(os.environ.get('WORKBENCH_DB', str(ROOT / 'workbench.sqlite3')), os.environ.get('WORKBENCH_AUTH_FILE') or None)
 
+
+class WorkbenchServer(ThreadingHTTPServer):
+    """Keep a burst of browser requests queued while worker threads start.
+
+    ``TCPServer`` defaults ``request_queue_size`` to 5.  A browser commonly
+    opens several API, script, stylesheet, and media connections together;
+    under that default the kernel rejects a short burst before the threaded
+    handler can accept it, which surfaces as intermittent gateway 502s.
+    """
+    request_queue_size = 256
+    allow_reuse_address = True
+
 def clean(value, key=''):
     if isinstance(value, dict):
         return {k: ('[已隐藏]' if re.fullmatch(r'(?i)(key|api[_-]?key|authorization|x-api-key|x-goog-api-key)', k) else clean(v,key)) for k,v in value.items()}
@@ -354,7 +366,7 @@ def restore_reports():
 def main():
     restore_reports()
     parser=argparse.ArgumentParser();parser.add_argument('--port',type=int,default=8877);parser.add_argument('--open',action='store_true');args=parser.parse_args()
-    server=ThreadingHTTPServer(('127.0.0.1',args.port),Handler)
+    server=WorkbenchServer(('127.0.0.1',args.port),Handler)
     print(f'工作台已启动：http://127.0.0.1:{server.server_port}',flush=True)
     if args.open:
         import webbrowser;webbrowser.open(f'http://127.0.0.1:{server.server_port}/')
