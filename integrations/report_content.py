@@ -351,7 +351,25 @@ def _cc_checks(result):
                        "meaning": _meaning(status, meaning), "next_step": next_step,
                        "request_ids": _unique(value for row in rows for value in row["request_ids"]), "sample_ids": sample_ids,
                        "counts": counts, "evidence_rows": rows, "category": "CCMax 协议验收", "local_only": False,
-                       "dimensions": (["tools"] if check_id == "tool_stream" else ["cache"] if check_id == "usage_cache" else ["protocol", "reliability"] if check_id in ("signature", "message_start", "message_stop", "connection", "stream_error", "error_format") else ["protocol"]),
+                       # Keep CCMax probes mapped explicitly.  Signature and
+                       # error-shape checks exercise protocol/error handling;
+                       # they do not measure runtime reliability.  The
+                       # parameter probe is also the only CCMax probe that
+                       # contributes to the max_tokens dimension.
+                       "dimensions": {
+                           "signature": ["protocol"],
+                           "message_start": ["protocol", "reliability"],
+                           "message_stop": ["protocol", "reliability"],
+                           "connection": ["reliability"],
+                           "stream_error": ["protocol", "reliability"],
+                           "error_format": ["protocol"],
+                           "usage_cache": ["cache"],
+                           "tool_stream": ["tools", "protocol"],
+                           "prompt_injection": ["protocol"],
+                           "instruction_hierarchy": ["protocol"],
+                           "behavioral_consistency": ["reliability"],
+                           "parameter_validation": ["max_tokens", "protocol"],
+                       }.get(check_id, []),
                        "raw": {"check": deepcopy(original), "sample_ids": sample_ids, "evidence": deepcopy(rows)}})
     return checks
 
@@ -406,7 +424,9 @@ def _kvv_metadata(node, detail):
         expected = "接口接受该 Schema，实际返回工具调用；function.arguments 是符合该选中 Schema 的 JSON。普通 content 中写出 JSON 不能替代 tool_calls。"
     elif "/prompt_tokens/" in node or "tokenization_groundtruth" in node:
         category, title = "输入 token 基线", "prompt_tokens 官方基线对照"
-        metadata["dimensions"] = ["token_accounting"]
+        # This card is labelled “缓存与 usage”: token baselines are usage
+        # evidence, while cache hit/miss remains a separate interpretation.
+        metadata["dimensions"] = ["cache"]
         if variant:
             title += " · " + variant
         method = "发送官方 case %s 的原始消息、工具与其他参数，读取 usage.prompt_tokens，对照该 case 的官方断言。" % (variant or function)
