@@ -244,7 +244,9 @@ function updateFields(){
   $('resolutionHint').textContent=/seedance/i.test($('model').value)?'部分 Seedance 渠道要求此项；请选择渠道支持的值，如 720p 或 1080p。':'独立于画面尺寸；可填写渠道支持的自定义值。';
   document.querySelectorAll('.video-only').forEach(el=>el.hidden=kind!=='video');
   $('fileGroup').hidden=!acceptsReferenceFiles();
-  const urlMode=p.id==='relay-image-json';$('imageUrlGroup').hidden=kind!=='image'||!urlMode;
+  const urlMode=kind==='image';$('imageUrlGroup').hidden=!urlMode;
+  $('imageUrlGroup').querySelector('label').firstChild.textContent=p.id==='relay-image-json'?'参考图片 URL ':'图片 URL（JSON 参考图协议） ';
+  $('imageUrlGroup').querySelector('small').innerHTML=p.id==='relay-image-json'?'每行一个公开的 http(s) 图片地址；会按顺序写入请求体的 <code>image</code> 字段，可与本地上传图片混合使用。':'当前协议主要使用本地上传；如渠道支持 URL 参考图，请切换到「中转站 · 参考图生成（JSON）」后再粘贴地址。';
   const supportsImages=['openai-image-edit','relay-image-json','gemini-image','openai-chat','openai-responses','anthropic','gemini','doubao-video'].includes(p.id);
   $('files').accept=audioChat?'.wav,.mp3,audio/wav,audio/mpeg':transcribe?'audio/*,video/mp4,video/webm':'image/*';$('files').multiple=kind==='text'||supportsImages;
   $('fileLabel').textContent=audioChat?'音频输入（可选）':transcribe?'上传音频（必选)':edit?'原始图片（可多张）':kind==='video'?'参考图片（可选）':p.id==='relay-image-json'?'参考图片（可多图，也可用 URL）':'参考图片（可选）';
@@ -405,17 +407,17 @@ function getConfig(model){
   let extra;try{extra=JSON.parse($('extra').value.trim()||'{}');}catch{throw new Error('附加参数不是有效 JSON，请检查逗号和引号。');}
   if(!extra||typeof extra!=='object'||Array.isArray(extra))throw new Error('附加参数必须是 JSON 对象。');
   if(Object.prototype.hasOwnProperty.call(extra,'model')&&(typeof extra.model!=='string'||!extra.model.trim()))throw new Error('附加 JSON 中的 model 必须是非空字符串。');
-  const imageUrls=$('imageUrls').value.split(/\r?\n/).map(value=>value.trim()).filter(Boolean);
-  if(imageUrls.length){
-    if($('preset').value!=='relay-image-json')throw new Error('图片 URL 需要选择「中转站 · 参考图生成（JSON）」协议。');
+  const referenceUrls=$('imageUrls').value.split(/\r?\n/).map(value=>value.trim()).filter(Boolean);
+  if(referenceUrls.length){
+    if($('preset').value!=='relay-image-json')throw new Error('图片 URL 需要选择「中转站 · 参考图生成（JSON）」协议；OpenAI multipart 图片编辑请先下载后上传。');
     if(Object.prototype.hasOwnProperty.call(extra,'image'))throw new Error('已填写参考图片 URL，请移除附加 JSON 中的 image 字段，避免重复发送。');
-    extra.image=imageUrls.length===1?imageUrls[0]:imageUrls;
+    for(const [index,value] of referenceUrls.entries()){let parsed;try{parsed=new URL(value);}catch{throw new Error(`第 ${index+1} 个参考图片 URL 无效。`);}if(!/^https?:$/.test(parsed.protocol)||parsed.username||parsed.password)throw new Error(`第 ${index+1} 个参考图片 URL 必须是公开的 http(s) 地址。`);referenceUrls[index]=parsed.href;}
   }
   if(!model)throw new Error('请填写模型名称。');
   if(!$('base').value.trim())throw new Error('请填写渠道地址。');
   if($('auth').value!=='none'&&!key)throw new Error('请填写 API Key。');
   const number=(id,min,max)=>{const v=Number($(id).value);if(!Number.isFinite(v)||v<min||v>max)throw new Error(`${$(id).previousElementSibling?.textContent||id}应在 ${min}–${max} 之间。`);return v;};
-  return {base:$('base').value.trim(),key,model,preset:$('preset').value,path:$('path').value.trim(),auth:$('auth').value,prompt:$('prompt').value,extra,files:activeReferenceFiles(),timeout:number('timeout',5,3600),pollInterval:kind==='video'?number('pollInterval',1,120):5,pollTimeout:kind==='video'?number('pollTimeout',5,7200):600,pollPath:$('pollPath').value.trim(),contentPath:$('contentPath').value.trim(),voice:$('voice').value.trim(),format:['openai-speech','openai-audio-chat'].includes($('preset').value)?$('format').value:undefined,speed:$('preset').value==='openai-speech'?number('speed',.25,4):1,size:$('size').value.trim(),resolution:['relay-video-json','doubao-video','custom-video'].includes($('preset').value)?$('resolution').value.trim():undefined,duration:kind==='video'?number('duration',1,120):4,language:$('language').value.trim(),fetchMedia:true};
+  return {base:$('base').value.trim(),key,model,preset:$('preset').value,path:$('path').value.trim(),auth:$('auth').value,prompt:$('prompt').value,extra,referenceUrls,files:activeReferenceFiles(),timeout:number('timeout',5,3600),pollInterval:kind==='video'?number('pollInterval',1,120):5,pollTimeout:kind==='video'?number('pollTimeout',5,7200):600,pollPath:$('pollPath').value.trim(),contentPath:$('contentPath').value.trim(),voice:$('voice').value.trim(),format:['openai-speech','openai-audio-chat'].includes($('preset').value)?$('format').value:undefined,speed:$('preset').value==='openai-speech'?number('speed',.25,4):1,size:$('size').value.trim(),resolution:['relay-video-json','doubao-video','custom-video'].includes($('preset').value)?$('resolution').value.trim():undefined,duration:kind==='video'?number('duration',1,120):4,language:$('language').value.trim(),fetchMedia:true};
 }
 function safeSnapshot(c){const {key,files,...rest}=c;return scrub({...rest,files:files.map(f=>({name:f.name,type:f.type,size:f.size}))});}
 function durationLabel(seconds){

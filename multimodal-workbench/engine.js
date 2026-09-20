@@ -36,10 +36,19 @@
     c.model = String(c.model || '').trim();
     c.prompt = String(c.prompt || '');
     c.files = Array.from(c.files || []);
+    c.referenceUrls = Array.from(c.referenceUrls || []);
     c.extra = c.extra == null ? {} : c.extra;
     if (!c.extra || Array.isArray(c.extra) || typeof c.extra !== 'object') throw new Error('额外 JSON 必须是对象');
     for (const k of Object.keys(c.extra)) if (['__proto__','prototype','constructor'].includes(k)) throw new Error('额外 JSON 含不支持的字段');
     return c;
+  }
+  function referenceUrl(value, index) {
+    const raw=String(value||'').trim();
+    if(!raw) throw new Error('参考图片 URL '+(Number(index)+1)+' 不能为空。');
+    let parsed;
+    try { parsed=new URL(raw); } catch { throw new Error('参考图片 URL '+(Number(index)+1)+' 不是有效的 URL。'); }
+    if(!/^https?:$/.test(parsed.protocol)||parsed.username||parsed.password) throw new Error('参考图片 URL '+(Number(index)+1)+' 必须是公开的 http:// 或 https:// 地址，不能包含账号密码。');
+    return parsed.href;
   }
   function baseUrl(base) {
     let u; try { u = new URL(base); } catch { throw new Error('渠道地址必须是完整的 http:// 或 https:// URL'); }
@@ -147,6 +156,8 @@
     if(pollPath) endpoint(c.base,pollPath,{id:'__task__',model:c.model});
     if(contentPath) endpoint(c.base,contentPath,{id:'__task__',model:c.model});
     const files=c.files;
+    const referenceUrls=c.referenceUrls.map(referenceUrl);
+    if(referenceUrls.length&&p.kind!=='image') throw new Error('参考图片 URL 只能用于图像模型接口。');
     const imageInputPresets=['openai-image-edit','relay-image-json','openai-video','doubao-video','gemini-image','gemini','anthropic','openai-chat','openai-responses'];
     if(p.id==='gemini-speech'&&files.length) throw new Error('Gemini 语音生成预设只接收文本；请清除上传文件。');
     if(p.id==='openai-image'&&files.length) throw new Error('当前图片生成预设只接收文本；带参考图请改用图片编辑、中转站参考图生成或 Gemini 图片协议。');
@@ -155,9 +166,11 @@
     if(p.id==='openai-audio-chat'&&files.length>1) throw new Error('音频对话一次只支持一个 WAV 或 MP3 文件。');
     if(p.id==='openai-audio-chat')for(const f of files)audioFileFormat(f);
     if(p.id==='relay-video-json'&&files.length) throw new Error('中转站 Videos（JSON）预设暂不接收本地参考文件。请清除上传文件；如渠道支持图片 URL，可按渠道文档在附加 JSON 中配置。');
-    if(['openai-image-edit','openai-transcription','openai-translation'].includes(p.id)&&!files.length) throw new Error('此接口需要先上传文件');
+    if(['openai-image-edit','openai-transcription','openai-translation'].includes(p.id)&&!files.length&&!referenceUrls.length) throw new Error('此接口需要先上传文件');
+    if(p.id==='openai-image-edit'&&referenceUrls.length) throw new Error('OpenAI 图片编辑的 multipart 接口不接受直接图片 URL；请切换到「中转站 · 参考图生成（JSON）」协议，或先下载 URL 图片后上传。');
     const extraImage=c.extra.image;
-    if(p.id==='relay-image-json'&&!files.length&&!(typeof extraImage==='string'&&extraImage.trim()||Array.isArray(extraImage)&&extraImage.length&&extraImage.every(v=>typeof v==='string'&&v.trim()))) throw new Error('参考图生成需要上传至少一张图片，或在附加 JSON 的 image 字段提供图片 URL。');
+    if(referenceUrls.length&&Object.prototype.hasOwnProperty.call(c.extra,'image')) throw new Error('参考图片 URL 与附加 JSON 的 image 字段冲突，请保留一种输入方式。');
+    if(p.id==='relay-image-json'&&!files.length&&!referenceUrls.length&&!(typeof extraImage==='string'&&extraImage.trim()||Array.isArray(extraImage)&&extraImage.length&&extraImage.every(v=>typeof v==='string'&&v.trim()))) throw new Error('参考图生成需要上传至少一张图片，或填写至少一个图片 URL。');
     if(['openai-transcription','openai-translation','openai-video'].includes(p.id)&&files.length>1) throw new Error('此接口一次只支持一个上传文件');
     if(imageInputPresets.includes(p.id))for(const file of files)imageFileMime(file);
     const attachmentFields={
@@ -174,7 +187,7 @@
       case 'openai-responses': fields.input=fileContents.length?[{role:'user',content:[{type:'input_text',text:c.prompt},...fileContents.map(f=>({type:'input_image',image_url:'data:'+f.mime+';base64,'+f.data}))]}]:c.prompt; break;
       case 'anthropic': fields.max_tokens=1024;fields.messages=[{role:'user',content:fileContents.length?[...fileContents.map(f=>({type:'image',source:{type:'base64',media_type:f.mime,data:f.data}})),{type:'text',text:c.prompt}]:c.prompt}];break;
       case 'gemini': case 'gemini-image': delete fields.model;fields.contents=[{role:'user',parts:[{text:c.prompt},...fileContents.map(f=>({inlineData:{mimeType:f.mime,data:f.data}}))]}];if(p.id==='gemini-image')fields.generationConfig={responseModalities:['TEXT','IMAGE']};break;
-      case 'openai-image': case 'openai-image-edit': case 'relay-image-json': fields.prompt=c.prompt;if(present(c.size))fields.size=c.size;if(present(c.format))fields.response_format=c.format;if(p.id==='relay-image-json'&&fileContents.length){const images=fileContents.map(f=>'data:'+f.mime+';base64,'+f.data);fields.image=images.length===1?images[0]:images;}break;
+      case 'openai-image': case 'openai-image-edit': case 'relay-image-json': fields.prompt=c.prompt;if(present(c.size))fields.size=c.size;if(present(c.format))fields.response_format=c.format;if(p.id==='relay-image-json'&&(fileContents.length||referenceUrls.length)){const images=[...fileContents.map(f=>'data:'+f.mime+';base64,'+f.data),...referenceUrls];fields.image=images.length===1?images[0]:images;}break;
       case 'relay-video-json': case 'openai-video': fields.prompt=c.prompt;if(present(c.size))fields.size=c.size;if(present(c.duration))fields.seconds=String(c.duration);break;
       case 'doubao-video': fields.content=[{type:'text',text:c.prompt},...fileContents.map(f=>({type:'image_url',image_url:{url:'data:'+f.mime+';base64,'+f.data}}))];if(present(c.duration))fields.duration=Number(c.duration);break;
       case 'custom-video': fields.prompt=c.prompt;if(present(c.duration))fields.duration=Number(c.duration);if(present(c.size))fields.size=c.size;break;

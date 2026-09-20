@@ -187,6 +187,16 @@ test('relay image JSON preserves an explicitly supplied image URL when no file i
   assert.equal(bodyOf(spec).quality, 'high');
 });
 
+test('relay image JSON accepts validated URL references through referenceUrls', async () => {
+  const { engine } = harness();
+  const spec = await engine.build(config('relay-image-json', {
+    referenceUrls: ['https://cdn.example/a.png', 'https://cdn.example/b.jpg'],
+  }));
+  assert.deepEqual(bodyOf(spec).image, ['https://cdn.example/a.png', 'https://cdn.example/b.jpg']);
+  await assert.rejects(engine.build(config('relay-image-json', { referenceUrls: ['javascript:alert(1)'] })), /公开.*http|有效.*URL/);
+  await assert.rejects(engine.build(config('relay-image-json', { referenceUrls: ['https://user:pass@cdn.example/a.png'] })), /公开.*http|账号密码/);
+});
+
 test('relay image JSON rejects missing or invalid reference uploads before fetch', async () => {
   const { engine, calls } = harness();
   await assert.rejects(engine.run(config('relay-image-json')), /参考图|图片|上传/);
