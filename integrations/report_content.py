@@ -573,7 +573,11 @@ def build_report_data(result):
     """Describe stored results without changing status or making new requests."""
     result = _dict(result)
     suite = _text(result.get("suite"))
-    cc = suite == "ccmax_acceptance"
+    # ``ccmax`` is the UI/configuration name while ``ccmax_acceptance`` is the
+    # persisted result name.  Treat both as the same suite so every export
+    # uses identical report semantics even when a result is rendered before
+    # the service normalises its name.
+    cc = suite in ("ccmax", "ccmax_acceptance")
     checks = _cc_checks(result) if cc else _kvv_checks(result)
     summary = _dict(result.get("summary"))
     remote = [check for check in checks if not check.get("local_only")]
@@ -614,8 +618,25 @@ def build_report_data(result):
                         "官方 skipped 状态和本地 tolerance_boundaries 自检按原样展示；不会补作已通过的渠道测试。",
                         "部分官方 token 用例读到 usage 即结束消费；client_closed/recorder_closed 不自动推翻已观察到的 token 断言。"]
     score = _report_score(checks, result)
+    # Keep the visual shell shared by all suites while making the intent of
+    # each suite explicit.  These are scope labels, not extra test results.
+    if cc:
+        focus = [
+            "Anthropic Messages / SSE 协议：消息起始、增量、收尾和响应流结束。",
+            "渠道验收重点：伪造签名拒绝、流中错误、非法模型、usage/缓存字段与工具调用 JSON。",
+            "启用高级探针时增加提示词泄露、指令层级和重复一致性（蒸馏风险启发式）检查。",
+        ]
+    elif suite in ("kvv11", "kvvfull", "kvv_full", "kvv"):
+        focus = [
+            "OpenAI 兼容接口与官方 KVV 用例：参数、错误映射、响应格式、Schema 和 token 基线。",
+            "多模态与工具重点：K3 动态/顶层工具、tool_choice、max_tokens、video_url 和缓存 usage 观测。",
+            "thinking 分支、官方 skipped、网络/超时与本地容差自检分开统计，不能把未覆盖记为通过。",
+        ]
+    else:
+        focus = ["本次运行的测试重点由已保存的检查项和请求证据决定。"]
     return {"title": title, "engine": engine, "scope": scope, "checks": checks, "findings": _findings(checks, result),
             "limitations": limitations, "suite": suite, "status": _text(result.get("status")),
             "summary": deepcopy(summary), "verdict": deepcopy(_dict(result.get("verdict"))),
             "remote_case_counts": _counts(remote) if not cc else {}, "local_case_counts": _counts(local),
-            "configuration": deepcopy(_dict(result.get("configuration"))), "score": score}
+            "configuration": deepcopy(_dict(result.get("configuration"))), "score": score,
+            "focus": focus}

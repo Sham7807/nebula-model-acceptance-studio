@@ -1,7 +1,10 @@
 """Acceptance verdicts distinguish observed failures from missing evidence."""
 
 def decorate(result):
-    entries = result.get('checks') if result.get('suite') == 'ccmax_acceptance' else result.get('cases')
+    # ``ccmax`` is the UI suite name; completed runs are persisted as
+    # ``ccmax_acceptance``.  Both must use the CCMax check collection so a
+    # standalone render cannot accidentally count its checks as KVV cases.
+    entries = result.get('checks') if result.get('suite') in ('ccmax', 'ccmax_acceptance') else result.get('cases')
     entries = entries or []
     local = [x for x in entries if 'tolerance_boundaries' in x.get('id','')]
     remote = [x for x in entries if x not in local]

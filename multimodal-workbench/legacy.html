@@ -603,21 +603,58 @@ async function tCache(){
   return{hit,cached,created,raw,fails,reported};
 }
 
-/* 视频输入探针：文本模型返回明确不支持时记为“无法判定”，不将文本模型误判为失败。 */
+/* 视频输入探针：先按常见 OpenAI 多模态协议发送远程 URL；如果渠道明确要求 Base64 Data URL，
+   自动尝试把同一个公开样例转为 data: URL 重试。这样“格式不兼容”不会被误判成“模型不支持视频”。 */
+async function videoDataUrl(url){
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000);
+  try{
+    const response=await fetch(url,{signal:controller.signal,cache:'no-store',mode:'cors'});
+    if(!response.ok)throw new Error(`样例视频下载 HTTP ${response.status}`);
+    const blob=await response.blob();
+    const maxBytes=8*1024*1024;
+    if(blob.size>maxBytes)throw new Error(`样例视频 ${Math.ceil(blob.size/1024/1024)}MB，超过 8MB 探针上限`);
+    const bytes=new Uint8Array(await blob.arrayBuffer()),parts=[];
+    for(let i=0;i<bytes.length;i+=0x8000)parts.push(String.fromCharCode(...bytes.subarray(i,i+0x8000)));
+    return `data:${blob.type||'video/mp4'};base64,${btoa(parts.join(''))}`;
+  }finally{clearTimeout(timer);}
+}
 async function tVideoInput(){
   const sample='https://sf1-cdn-tos.huoshanstatic.com/obj/media-fe/xgplayer_doc_video/mp4/xgplayer-demo-360p.mp4';
-  const r=await postSmart({model:cfg().model,stream:false,max_tokens:300,messages:[{role:'user',content:[
+  const basePayload={model:cfg().model,stream:false,max_tokens:300,messages:[{role:'user',content:[
     {type:'text',text:'请描述一下这个视频的内容，并指出一个象征意义。'},
     {type:'video_url',video_url:{url:sample}}
-  ]}]});
-  const text=content(r),status=Number(r.status)||0;
-  const accepted=valid(r)&&text.trim().length>0;
-  const unsupported=!accepted&&(status===400||status===404||status===415||status===422||/video|multimodal|content type|unsupported|not support|invalid/i.test(JSON.stringify(r.body||r.err||'')));
-  const cls=accepted?'ok':unsupported?'mid':'bad';
-  const judge=accepted?'✅ 视频输入已处理':unsupported?'⚠️ 渠道未声明支持（不等同于文本模型故障）':'❌ 请求失败或响应异常';
-  detail('视频输入（video_url）',accepted?text.slice(0,90):`HTTP ${status||'网络'} ${String(r.err||r.body?.error?.message||'未返回有效内容').slice(0,90)}`,cls,judge);
-  log(`视频输入: ${accepted?'已识别':unsupported?'未支持 / 可判定':'请求异常'}${status?` HTTP ${status}`:''}`,cls);
-  return{accepted,unsupported,status,text:text.slice(0,240)};
+  ]}]};
+  let r=await postSmart(basePayload),attempts=[];
+  const firstText=content(r),firstStatus=Number(r.status)||0;
+  const firstError=String(r.err||r.body?.error?.message||'未返回有效内容');
+  const acceptedFirst=valid(r)&&firstText.trim().length>0;
+  attempts.push({kind:'remote_url',status:firstStatus,text:firstText.slice(0,240),error:firstError});
+  const formatRequired=!acceptedFirst&&/base64\s*(?:data\s*)?url|data\s*url|must be.*base64/i.test(firstError);
+  let fallback=null,fallbackError='';
+  if(!acceptedFirst&&formatRequired){
+    log('视频输入: 渠道要求 Base64 Data URL，正在转换同一样例并重试…','mid');
+    try{
+      const dataUrl=await videoDataUrl(sample);
+      const fallbackPayload={...basePayload,messages:[{role:'user',content:[
+        {type:'text',text:'请描述一下这个视频的内容，并指出一个象征意义。'},
+        {type:'video_url',video_url:{url:dataUrl}}
+      ]}]};
+      fallback=await postSmart(fallbackPayload);
+      const fallbackText=content(fallback),fallbackStatus=Number(fallback.status)||0;
+      attempts.push({kind:'base64_data_url',status:fallbackStatus,text:fallbackText.slice(0,240),error:String(fallback.err||fallback.body?.error?.message||'')});
+      if(valid(fallback)&&fallbackText.trim()){r=fallback;}
+    }catch(error){fallbackError=error?.message||'Base64 转换失败';attempts.push({kind:'base64_data_url',status:0,text:'',error:fallbackError});}
+  }
+  const text=content(r),status=Number(r.status)||0,accepted=valid(r)&&text.trim().length>0;
+  const errorText=String(r.err||r.body?.error?.message||firstError);
+  const explicitUnsupported=!accepted&&!formatRequired&&(/unsupported|not support|does not support|视频.*不支持|video.*not available/i.test(errorText)||[404,415,422].includes(status));
+  const unsupported=explicitUnsupported;
+  const cls=accepted?'ok':formatRequired?'mid':unsupported?'mid':'bad';
+  const resultText=accepted?text.slice(0,180):formatRequired?`远程 URL：HTTP ${firstStatus||'网络'} ${firstError.slice(0,100)}；${fallback?`Base64 重试：HTTP ${Number(fallback.status)||'网络'}${fallbackError?'（'+fallbackError+'）':''}`:fallbackError||'未能完成 Base64 重试'}`:`HTTP ${status||'网络'} ${errorText.slice(0,130)}`;
+  const judge=accepted?'✅ 视频已被模型处理（已区分 URL / Base64 格式）':formatRequired?'⚠️ 渠道要求 Base64 Data URL；当前结果只能说明 URL 格式不兼容，不能判定模型不支持视频':unsupported?'⚠️ 渠道明确拒绝视频输入':'❌ 请求失败或响应异常';
+  detail('视频输入（video_url）',resultText,cls,judge);
+  log(`视频输入: ${accepted?'已识别':formatRequired?'URL 格式受限 / 已尝试 Base64':unsupported?'明确不支持':'请求异常'}${status?` HTTP ${status}`:''}`,cls);
+  return{accepted,unsupported,formatRequired,status,text:text.slice(0,240),attempts};
 }
 
 async function tVision(){
