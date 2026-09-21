@@ -39,6 +39,15 @@ def _is_k3(config):
 
 def command(config, directory, collect=False):
     args = [sys.executable, '-m', 'pytest', '-p', 'kvv_progress']
+    if config.get('think_mode') == 'openai':
+        from kvv_openai_cases import PRECHECK as OPENAI_PRECHECK
+        cases = str(ROOT / 'kvv_openai_cases.py')
+        args += [cases+'::'+name for name in OPENAI_PRECHECK] if config['suite']=='kvv11' else [cases, 'tests/tool_call_json_schema']
+        if config['suite']=='kvvfull':
+            args += ['--think-mode','none','--tool-json-report='+str(directory/'schema.json')]
+        args += ['--reruns','0','--force-reruns','0','-o','addopts=','-q']
+        args += ['--collect-only'] if collect else ['--junitxml='+str(directory/'results.xml')]
+        return args
     selected = PRECHECK if config['suite'] == 'kvv11' else FULL
     # The 11-item verifier remains stable for other model IDs.  When the
     # selected model is Kimi-K3, append the workbench capability probes so the
@@ -89,6 +98,8 @@ def classify_cases(cases, transport):
     for case in cases:
         case['pytest_status'] = case.get('pytest_status', case['status'])
         case['status'] = case['pytest_status']
+        if 'kvv_openai_cases.py' in case['id'] and case['pytest_status']=='skipped':
+            case['status']='not_covered'
         prefix = '渠道调用失败，无法据此判断模型能力或参数契约。\n'
         case['detail'] = case.get('detail', '').removeprefix(prefix)
         requests = [r for r in transport.get('requests', []) if r.get('case_id') == case['id']]
@@ -106,7 +117,10 @@ def run(config, emit, cancelled, directory):
     directory = Path(directory)
     event_path = directory / 'events.jsonl'
     stdout_path = directory / 'pytest.log'
-    extensions = config['suite'] in ('kvv11', 'kvvfull') and _is_k3(config)
+    openai = config.get('think_mode') == 'openai'
+    if openai:
+        from kvv_openai_cases import OPENAI_CASE_SPECS
+    extensions = not openai and config['suite'] in ('kvv11', 'kvvfull') and _is_k3(config)
     cases, total = [], (11 + len(K3_EXTENSIONS) if extensions else 11) if config['suite'] == 'kvv11' else None
     with stdout_path.open('w', encoding='utf-8') as output:
         process = subprocess.Popen(command(config, directory), cwd=REPO, env=environment(config, directory),
@@ -126,7 +140,11 @@ def run(config, emit, cancelled, directory):
                     if event['type'] in ('request_start','request_finish','transport_summary'):
                         emit({**event,'total':total,'completed':len(cases)});continue
                     if event['type'] == 'collected': total = event['total']
-                    elif event['type'] == 'case': event = merge_case(cases, event)
+                    elif event['type'] == 'case':
+                        if openai:
+                            spec=OPENAI_CASE_SPECS.get(event['id'].split('::')[-1].split('[',1)[0],{})
+                            if spec:event['title']=spec['title']
+                        event = merge_case(cases, event)
                     emit({'type': 'progress', 'total': total, 'completed': len(cases), 'case': event})
         while process.poll() is None:
             drain()
@@ -142,11 +160,15 @@ def run(config, emit, cancelled, directory):
     transport = load_transport(directory)
     classify_cases(cases, transport)
     return {'transport':transport,'suite': config['suite'], 'status': 'cancelled' if cancelled() else ('completed' if process.returncode in (0,1) else 'error'),
-            'exit_code': process.returncode, 'source': 'MoonshotAI/Kimi-Vendor-Verifier',
+            'exit_code': process.returncode, 'source': ('Workbench OpenAI compatibility + KVV Schema' if config['suite']=='kvvfull' else 'Workbench OpenAI compatibility') if openai else 'MoonshotAI/Kimi-Vendor-Verifier',
+            'request_format': 'openai' if openai else 'native',
+            'compatibility': {'profile':'openai-chat-completions', 'scope':['参数与协议','工具与 JSON Schema','多模态及能力扩展','usage / token 与缓存'],
+                'native_not_applicable':['Kimi system.tools 动态加载语义：使用标准顶层工具覆盖对应工作流，不视为原生动态加载通过。','Kimi thinking / keep 与思考字段优先级：OpenAI 模式使用 reasoning_effort 独立能力探针。','Kimi 固定 tokenizer 数值基准：改为 usage 计数一致性与缓存观测，不作原生数值匹配结论。'],
+                'official_schema_matrix': config['suite']=='kvvfull'} if openai else None,
             'extensions': ['K3 渠道扩展能力：动态工具、max_tokens=1、video_url、多请求缓存 usage'] if extensions else [],
             'revision': '66092cf', 'summary': {'total': total, 'completed': len(cases),
                 'passed': sum(c['status']=='passed' for c in cases), 'failed': sum(c['status']=='failed' for c in cases),
-                'skipped': sum(c['status']=='skipped' for c in cases), 'inconclusive':sum(c['status']=='inconclusive' for c in cases)},
+                'skipped': sum(c['status']=='skipped' for c in cases), 'not_covered':sum(c['status']=='not_covered' for c in cases), 'inconclusive':sum(c['status']=='inconclusive' for c in cases)},
             'cases': cases, 'log': stdout_path.read_text(errors='replace')[-100000:]}
 
 

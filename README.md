@@ -68,7 +68,9 @@ uv pip install --python integrations/.venv/bin/python -r integrations/requiremen
 
 ### CCMax 渠道验收
 
-CCMax 指 Claude / Anthropic Messages 兼容渠道，使用独立检测器，不运行 KVV。默认启用 12 类检查：
+CCMax 用于 Claude 渠道验收，使用独立检测器，不运行 KVV。可选择 **Anthropic Messages** 或 **OpenAI Chat Completions** 请求格式；两者分别解析对应响应和 SSE，选择 Bearer 鉴权本身不会改变原生请求体。
+
+默认原生格式启用 12 类检查：
 
 - 伪造 thinking 签名
 - `message_start` 唯一性
@@ -85,6 +87,8 @@ CCMax 指 Claude / Anthropic Messages 兼容渠道，使用独立检测器，不
 
 快速验收默认执行 11 次请求（1 次签名、3 次 SSE、1 次强制工具、1 次非法模型和 5 次高级探针）；批量验收默认执行 62 次请求（5 次签名、50 次 SSE、其余 7 次固定探针）。次数可在页面自定义，实际请求数以报告为准并可能产生渠道费用。
 
+OpenAI 格式使用 `/v1/chat/completions` 与 Bearer，检查 `choices`、`delta.tool_calls`、`finish_reason`、`[DONE]`、响应体结束及 `prompt_tokens_details.cached_tokens`，同时保留高级行为探针。原生签名契约不适用，不发请求、不计通过、不计入评分分母；默认快速 / 批量模式分别发送 10 / 57 次请求。
+
 高级探针只记录固定输入下的本轮行为，不会索取隐藏系统提示词、用户数据或渠道密钥。提示词泄露、指令覆盖、重复响应差异不能单独证明模型身份、官方来源、蒸馏事实或稳定可利用漏洞；401、429、超时和网络错误会标为“无法判定”。
 
 ### Kimi Vendor Verifier
@@ -95,6 +99,15 @@ Kimi KVV 由同一个本地服务调用 [MoonshotAI/Kimi-Vendor-Verifier](https:
 - **全套验证**：运行官方 `tests/params`、`tests/tool_call_json_schema`、`tests/k3_features`、`tests/prompt_tokens`。当前固定版本收集 611 个 pytest 项，包含官方跳过项和本地边界检查；用例数量不等于 API 请求数量。
 
 KVV 会分别记录 pytest 结果和传输证据。网络、鉴权或上游传输错误不会被误记为模型能力不合格，也不会把“无法判定”算作通过。全套验证不包含 OCRBench、MMMU、AIME、BEAM 或 DeepSWE 等独立 benchmark。
+
+对于使用 OpenAI 格式转发的 Kimi 或其他模型，在 **验收请求格式** 选择 **OpenAI 兼容格式 · 全范围适配**，再选择预检或全套。该选项覆盖四个检测层面，不仅调整 Thinking 字段：
+
+| 范围 | OpenAI 兼容测试内容 |
+| --- | --- |
+| 11 项预检 | 非流式、SSE / usage、`max_tokens=1`、非法上限、强制 / 禁止 / 多工具、JSON 输出、内置图片识别、缓存重复观测、token 计数一致性 |
+| 全套兼容验证 | 22 项专项探针（增加工具闭环、具名 / 并行调用、严格 JSON Schema、推理参数、多图、视频 URL 扩展和参数边界）＋固定版 KVV 的 408 项工具 Schema 矩阵，共 430 项 |
+
+兼容模式使用独立断言：顶层工具工作流不冒充 Kimi 原生 `system.tools` 动态加载，usage 计数也不套用 Kimi 固定 tokenizer 数值。视频 URL 属于渠道扩展；未上报推理证据、未观察到缓存命中等结果会标为未覆盖。完整 Schema 矩阵可能超出部分模型支持的子集。报告记录具体方法、实测值、请求证据、限制和建议；如需官方原生契约验证，可切回 Kimi 原生格式。
 
 ## 报告、历史与隐私
 

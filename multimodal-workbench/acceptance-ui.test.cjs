@@ -70,7 +70,7 @@ async function fixture(browser, options = {}) {
       if (url.pathname === '/api/runs' && req.method() === 'POST') {
         const body = JSON.parse(req.postData());state.posts.push(body);
         if (state.job) previousJobs.set(state.job.id, state.job);
-        state.job = running(body.suite, body.suite === 'ccmax' ? body.signature_samples + body.sse_samples + 7 : undefined);
+        state.job = running(body.suite, body.suite === 'ccmax' ? (body.request_format === 'openai' ? 0 : body.signature_samples) + body.sse_samples + 7 : undefined);
         if (options.uniqueRunIds) state.job.id = 'fixture-run-' + state.posts.length;
         return send({ id: state.job.id });
       }
@@ -122,7 +122,8 @@ async function assertSuiteIdentity(page, name, status = 'connected', revision = 
   } else {
     assert.match(description, /网页.*自动调用已集成.*官方 KVV/);
     assert.match(description, /无需另开项目/);
-    assert.match(footnote, /自动调用已集成的官方 KVV/);
+    assert.match(footnote, /官方/);
+    assert.match(footnote, /证据|本地检查/);
   }
   const expected = status === 'file' ? '需要本地验收服务' : status === 'connecting' ? '正在连接本地验收服务' : status === 'offline' ? '本地验收服务未连接' : cc ? '本地验收服务已连接' : '本地服务已连接 · ' + (revision ? '集成 KVV ' + revision : 'KVV 版本未提供');
   assert.equal(await page.locator('#acceptanceService').innerText(), expected);
@@ -216,6 +217,95 @@ async function download(page, format, bytes) {
     {
       const f = await fixture(browser); const { page, state } = f;
       try {
+        await suite(page, 'ccmax');await fill(page, 'claude-compatible');
+        await page.locator('#acceptanceFormat').selectOption('openai');
+        assert.equal(await page.locator('#acceptanceAuth').inputValue(), 'bearer');
+        assert.equal(await page.locator('#acceptanceAuth').isDisabled(), true);
+        assert.equal(await page.locator('#acceptanceSignatureGroup').isVisible(), false);
+        assert.equal(await page.locator('#acceptancePlan li').count(), 11);
+        assert.match(await page.locator('#acceptancePlan h3').innerText(), /OpenAI 兼容/);
+        assert.match(await page.locator('#acceptancePlan').innerText(), /finish_reason.*\[DONE\]/);
+        assert.doesNotMatch(await page.locator('#acceptancePlan ol').innerText(), /thinking 签名|message_start|message_stop/);
+        assert.match(await page.locator('#acceptanceCcFormatHelp').innerText(), /\/v1\/chat\/completions.*Bearer.*不发送请求、不计入评分/);
+        assert.match(await page.locator('#acceptanceRequestHint').innerText(), /计划 10 次/);
+        await page.locator('#acceptanceSampling').selectOption('batch');
+        assert.match(await page.locator('#acceptanceRequestHint').innerText(), /计划 57 次/);
+        await page.locator('#acceptanceFormat').selectOption('anthropic');
+        assert.equal(await page.locator('#acceptanceAuth').isEnabled(), true);
+        assert.equal(await page.locator('#acceptanceSignatureGroup').isVisible(), true);
+        assert.equal(await page.locator('#acceptancePlan li').count(), 12);
+        assert.match(await page.locator('#acceptanceRequestHint').innerText(), /计划 62 次/);
+        assert.match(await page.locator('#acceptanceCcFormatHelp').innerText(), /\/v1\/messages.*Bearer 仅改变鉴权/);
+        await page.locator('#acceptanceAuth').selectOption('anthropic');
+        await page.locator('#acceptanceFormat').selectOption('openai');
+        await page.locator('#acceptanceSse').fill('7');
+        assert.match(await page.locator('#acceptanceRequestHint').innerText(), /计划 14 次/);
+        assert.equal(state.posts.length, 0, 'format and sampling selection never starts billable work');
+        await screenshot(page, 'desktop-ccmax-openai-plan.png');
+        await page.locator('#acceptanceRun').click();
+        await page.waitForFunction(() => document.getElementById('acceptanceCount').textContent === '0 / 14');
+        assert.equal(state.posts.length, 1);
+        assert.equal(state.posts[0].suite, 'ccmax');
+        assert.equal(state.posts[0].request_format, 'openai');
+        assert.equal(state.posts[0].auth, 'bearer');
+        assert.equal(state.posts[0].sse_samples, 7);
+        assert.equal(await page.locator('#acceptanceFormat').isDisabled(), true);
+        const completed = result('ccmax', 'completed');
+        completed.checks = [{ id: 'signature', title: '无效 thinking 签名', status: 'skipped', applicable: false, samples: 0, skip_reason: 'OpenAI 兼容协议不适用，不发送签名请求。' }];
+        state.job = { ...state.job, status: 'completed', completed: 14, result: completed };
+        await page.waitForFunction(() => document.getElementById('acceptanceStage').textContent.includes('已完成'));
+        const signature = page.locator('.acceptance-case').filter({ hasText: '无效 thinking 签名' });
+        assert.match(await signature.locator('b').innerText(), /不适用/);
+        assert.doesNotMatch(await signature.locator('b').innerText(), /通过/);
+        await signature.locator('summary').click();
+        assert.match(await signature.innerText(), /0 样本.*不发送签名请求/s);
+        assert.equal(await page.locator('#acceptanceAuth').isDisabled(), true, 'completed OpenAI run keeps Bearer locked');
+        await page.setViewportSize({ width: 390, height: 844 });await noOverflow(page);
+        await screenshot(page, 'mobile-ccmax-openai-result.png');
+        passed.push('CCMax OpenAI selection locks Bearer, omits signature requests, restores native plan and submits compatible format with explicit non-applicable evidence');
+      } finally { await f.close(); }
+    }
+    {
+      const f = await fixture(browser); const { page, state } = f;
+      try {
+        await suite(page, 'kimi');await fill(page, 'kimi-compatible');
+        await page.locator('#acceptanceThinkMode').selectOption('openai');
+        assert.match(await page.locator('#acceptancePlan h3').innerText(), /11 项 OpenAI 兼容预检/);
+        assert.equal(await page.locator('#acceptancePlan li').count(), 11);
+        for (const item of ['强制工具调用', 'max_tokens=1 限制', '内置样例图片识别', '重复前缀缓存观测', 'Token 计数一致性']) {
+          assert.match(await page.locator('#acceptancePlan ol').innerText(), new RegExp(item));
+        }
+        assert.doesNotMatch(await page.locator('#acceptancePlan ol').innerText(), /Dynamic tools|Prompt Tokens · 基础/);
+        assert.match(await page.locator('#acceptanceFormatHelp').innerText(), /固定 Kimi token 基准不参与兼容评分/);
+        assert.match(await page.locator('#acceptanceRequestHint').innerText(), /计划 11 个兼容测试项/);
+        await page.locator('#acceptanceScope').selectOption('kvvfull');
+        assert.match(await page.locator('#acceptancePlan h3').innerText(), /OpenAI 全范围兼容验证/);
+        assert.deepEqual(await page.locator('#acceptancePlan li span').allTextContents(), [
+          '参数与协议 · 标准兼容断言', '工具与 JSON Schema · 兼容矩阵',
+          '多模态与能力扩展 · 独立记录支持情况', 'Token / usage / 缓存 · 计数一致性',
+        ]);
+        assert.match(await page.locator('#acceptanceFootnote').innerText(), /不冒充官方原生验证通过/);
+        await screenshot(page, 'desktop-kvv-openai-full-plan.png');
+        await page.locator('#acceptanceScope').selectOption('kvv11');
+        assert.equal(state.posts.length, 0);
+        await page.locator('#acceptanceRun').click();
+        await page.waitForFunction(() => document.getElementById('acceptanceCount').textContent === '0 / 11');
+        assert.equal(state.posts.length, 1);
+        for (const [key, value] of Object.entries({ suite: 'kvv11', think_mode: 'openai', request_format: 'openai', thinking: false, auth: 'bearer' })) assert.equal(state.posts[0][key], value);
+        state.job = { ...state.job, status: 'completed', completed: 11, result: result('kvv11', 'completed') };
+        await page.waitForFunction(() => document.getElementById('acceptanceStage').textContent.includes('已完成'));
+        await page.locator('#acceptanceScope').selectOption('kvvfull');
+        await page.locator('#acceptanceRun').click();
+        await page.waitForFunction(() => document.getElementById('acceptanceStage').textContent.includes('KVV 全套验证 · 运行中'));
+        assert.equal(state.posts.length, 2);
+        for (const [key, value] of Object.entries({ suite: 'kvvfull', think_mode: 'openai', request_format: 'openai', thinking: false, auth: 'bearer' })) assert.equal(state.posts[1][key], value);
+        assert.equal(await page.locator('#acceptancePlan li').count(), 4);
+        passed.push('KVV OpenAI quick/full plans cover 11 compatibility checks and four full layers; both submissions disable native thinking and use Bearer');
+      } finally { await f.close(); }
+    }
+    {
+      const f = await fixture(browser); const { page, state } = f;
+      try {
         await suite(page, 'ccmax');await fill(page);
         await page.locator('#acceptanceAuth').selectOption('bearer');
         await page.locator('#acceptanceSignature').fill('2');await page.locator('#acceptanceSse').fill('7');
@@ -223,6 +313,7 @@ async function download(page, format, bytes) {
         await page.waitForFunction(() => document.getElementById('acceptanceCount').textContent === '0 / 16');
         assert.equal(state.posts.length, 1);assert.equal(state.posts[0].suite, 'ccmax');
         assert.equal(state.posts[0].auth, 'bearer');
+        assert.equal(state.posts[0].request_format, 'anthropic', 'Bearer selection alone retains native Messages format');
         assert.equal(state.posts[0].signature_samples, 2);assert.equal(state.posts[0].sse_samples, 7);
         assert.match(await page.locator('#acceptanceEta').innerText(), /等待足够样本/);
         assert.match(await page.locator('#acceptanceSummary').innerText(), /实际 API 请求 0 次/);
@@ -268,6 +359,7 @@ async function download(page, format, bytes) {
         await page.locator('#acceptanceRun').click();
         await page.waitForFunction(() => document.getElementById('acceptanceCount').textContent === '0 / 11');
         assert.equal(state.posts[0].suite, 'kvv11');assert.equal(state.posts[0].think_mode, 'opensource');
+        assert.equal(state.posts[0].request_format, 'native');assert.equal(state.posts[0].thinking, true);
         state.job = { ...state.job, status: 'completed', completed: 11, elapsed: 55, result: result('kvv11', 'completed') };
         await page.waitForFunction(() => document.getElementById('acceptanceStage').textContent.includes('已完成'));
         assert.equal(await page.locator('#acceptanceBar').getAttribute('value'), '100');
@@ -494,6 +586,36 @@ async function download(page, format, bytes) {
         assert.equal(state.posts.length, 0);
       } finally { await f.close(); }
     }
+    for (const restoredSuite of ['ccmax', 'kvv11', 'kvvfull']) {
+      const cc = restoredSuite === 'ccmax';
+      const configuration = { request_format: 'openai', auth: 'bearer', timeout: 95, ...(cc ? { signature_samples: 5, sse_samples: 50 } : { think_mode: 'openai', thinking: false }), key: 'never-restore-this-fixture-key' };
+      const f = await fixture(browser, { latest: restoredSuite, ...(cc ? { total: 57 } : {}), configuration });const { page, state } = f;
+      try {
+        await page.waitForFunction(() => document.getElementById('acceptanceStage').textContent.includes('已完成'));
+        assert.equal(await page.locator('#acceptanceTimeout').inputValue(), '95');
+        assert.equal(await page.locator('#acceptanceKey').inputValue(), '', 'OpenAI configuration restoration excludes channel keys');
+        if (cc) {
+          assert.equal(await page.locator('#acceptanceFormat').inputValue(), 'openai');
+          assert.equal(await page.locator('#acceptanceAuth').inputValue(), 'bearer');
+          assert.equal(await page.locator('#acceptanceAuth').isDisabled(), true);
+          assert.equal(await page.locator('#acceptanceSignatureGroup').isVisible(), false);
+          assert.equal(await page.locator('#acceptanceSampling').inputValue(), 'batch');
+          assert.equal(await page.locator('#acceptancePlan li').count(), 11);
+          assert.match(await page.locator('#acceptanceRequestHint').innerText(), /计划 57 次/);
+        } else {
+          assert.equal(await page.locator('#acceptanceThinkMode').inputValue(), 'openai');
+          assert.equal(await page.locator('#acceptanceScope').inputValue(), restoredSuite);
+          assert.equal(await page.locator('#acceptancePlan li').count(), restoredSuite === 'kvv11' ? 11 : 4);
+          assert.match(await page.locator('#acceptancePlan h3').innerText(), /OpenAI/);
+        }
+        await page.reload();
+        await page.waitForFunction(() => document.getElementById('acceptanceStage').textContent.includes('已完成'));
+        assert.equal(await page.locator(cc ? '#acceptanceFormat' : '#acceptanceThinkMode').inputValue(), 'openai');
+        assert.equal(await page.locator('#acceptanceKey').inputValue(), '');
+        assert.equal(state.posts.length, 0, 'restoring compatible reports never starts an upstream test');
+      } finally { await f.close(); }
+    }
+    passed.push('completed CCMax and KVV quick/full reports restore OpenAI format, compatible plans and non-sensitive configuration across reload');
     {
       const f = await fixture(browser, { active: 'ccmax', total: 57 });const { page, state } = f;
       try {

@@ -206,11 +206,13 @@ def render_report(result, directory=None):
         ('运行状态',STATUS.get(result.get('status'),result.get('status','未记录'))),('本轮耗时',elapsed_text),
         ('执行进度',f'{summary.get("completed",0)} / {summary.get("total","未记录")} '+('请求样本' if cc else 'pytest 项')),
         ('单次超时',str(config['timeout'])+' 秒' if config.get('timeout') is not None else '未记录')]
+    openai=result.get('request_format')=='openai' or config.get('request_format')=='openai' or (not cc and config.get('think_mode')=='openai')
+    runtime_info.append(('请求格式','OpenAI Chat Completions · /v1/chat/completions' if openai else 'Anthropic Messages · /v1/messages' if cc else 'Kimi 原生契约 · Chat Completions'))
     if cc:
-        runtime_info.extend([('采样设置',f'签名 {config.get("signature_samples","未记录")} 次 · 普通 SSE {config.get("sse_samples","未记录")} 次 · 工具与非法模型各 1 次'),
+        runtime_info.extend([('采样设置',('签名不适用 · ' if openai else f'签名 {config.get("signature_samples","未记录")} 次 · ')+f'普通 SSE {config.get("sse_samples","未记录")} 次 · 工具与非法模型各 1 次'),
             ('并发 / 鉴权',str(config.get('concurrency','未记录'))+' / '+('x-api-key' if config.get('auth')=='anthropic' else config.get('auth','未记录')))])
     else:
-        runtime_info.extend([('KVV 版本',result.get('revision','未记录')),('thinking 配置',str(config.get('think_mode','未记录'))+'；仅影响适用用例')])
+        runtime_info.extend([('KVV Schema / 原生版本',result.get('revision','未记录')),('格式范围','全部四个检测层面使用兼容断言，原生专项另行说明' if openai else str(config.get('think_mode','未记录'))+'；原生 K3 专项保留官方字段')])
     info='<dl class="key-value">'+''.join('<dt>'+esc(k)+'</dt><dd>'+esc(v)+'</dd>' for k,v in runtime_info)+'</dl>'
     scopes='<ul class="scope-list">'+''.join('<li>'+prose(x)+'</li>' for x in data.get('scope',[]))+'</ul>'
     focus_items=data.get('focus') or []

@@ -10,6 +10,9 @@ let displayedRunId='',pollGeneration=0,restoring=false;
 const statuses={passed:'通过',failed:'未通过',skipped:'已跳过',inconclusive:'无法判定',error:'运行错误',cancelled:'已取消',completed:'测试已完成',running:'运行中',not_covered:'未覆盖'};
 const ccItems=['无效 thinking 签名','message_start 唯一性','message_stop 完整收尾','连接及时关闭','流中错误事件','错误状态与格式','usage / 缓存字段','工具参数 JSON 增量','系统提示词注入与金丝雀泄露','指令层级与越权覆盖','重复行为一致性（蒸馏风险启发式）','非法参数拒绝与错误诊断'];
 const quickItems=['基础请求 · non-thinking','基础请求 · thinking','非法温度 · non-thinking','非法温度 · thinking','Tool Schema · 非流式','Tool Schema · 流式','Dynamic tools','JSON Object 输出','tool_choice required','Prompt Tokens · 基础','Prompt Tokens · 工具'];
+const openaiQuickItems=['非流式基础请求','SSE 收尾与 usage','max_tokens=1 限制','非法 max_tokens 拒绝','强制工具调用','禁止工具调用','多个顶层工具选择','JSON 对象输出','内置样例图片识别','重复前缀缓存观测','Token 计数一致性'];
+const openaiFullItems=['参数与协议 · 标准兼容断言','工具与 JSON Schema · 兼容矩阵','多模态与能力扩展 · 独立记录支持情况','Token / usage / 缓存 · 计数一致性'];
+const openaiCcItems=['响应 ID 与流式增量','finish_reason 与 [DONE] 收尾','[DONE] 后响应流结束','流中错误事件','非法模型错误状态与格式','usage / cached_tokens 字段','delta.tool_calls JSON 增量','系统提示词注入与金丝雀泄露','指令层级与越权覆盖','重复行为一致性（蒸馏风险启发式）','非法 max_tokens 拒绝'];
 const fullItems=['参数约束 · 全量','Tool JSON Schema · 全量','K3 特性契约 · 全量','Prompt Token · 文本与视觉'];
 function message(text,error=false){el('acceptanceMessage').hidden=!text;el('acceptanceMessage').textContent=text;el('acceptanceMessage').className='notice'+(error?' error':'');}
 function updateServiceBadge(){
@@ -20,25 +23,34 @@ function updateServiceBadge(){
   badge.textContent='正在连接本地验收服务';badge.title='正在检查网页与本地验收服务的连接。';
  }else if(serviceState==='connected'){
   badge.textContent=kimi?'本地服务已连接 · '+(kvvRevision?'集成 KVV '+kvvRevision:'KVV 版本未提供'):'本地验收服务已连接';
-  badge.title=kimi?'仅表示网页已连接本地服务；开始 Kimi 验收后会调用已集成的官方 KVV，启动结果以任务日志为准。':'网页已连接本地服务，CCMax 由独立的 Anthropic Messages 检测器执行。';
+  badge.title=kimi?'仅表示网页已连接本地服务；开始 Kimi 验收后会调用已集成的官方 KVV，启动结果以任务日志为准。':'网页已连接本地服务，CCMax 按所选请求格式运行独立检测器。';
  }else{
   badge.textContent='本地验收服务未连接';badge.title='请检查本地验收服务是否运行，恢复服务后刷新页面重新连接。';
  }
 }
-function config(){return {suite:selected==='ccmax'?'ccmax':el('acceptanceScope').value,base:el('acceptanceBase').value.trim(),key:el('acceptanceKey').value.trim(),model:el('acceptanceModel').value.trim(),timeout:Number(el('acceptanceTimeout').value),signature_samples:Number(el('acceptanceSignature').value),sse_samples:Number(el('acceptanceSse').value),concurrency:2,auth:el('acceptanceAuth').value,think_mode:el('acceptanceThinkMode').value,thinking:el('acceptanceThinkMode').value!=='none',advanced:selected==='ccmax'};}
-function updatePlan(){
- const cc=selected==='ccmax',full=el('acceptanceScope').value==='kvvfull';
- el('acceptanceTitle').textContent=cc?'CCMax渠道验收':'Kimi Vendor Verifier';
- el('acceptanceDescription').textContent=cc?'使用独立的 Anthropic Messages 检测器，检查流式可靠性、参数校验和工具调用，保留每次样本证据。':'网页通过同一个本地服务自动调用已集成的 MoonshotAI 官方 KVV，提供 11 项预检和四套完整 API 验证，无需另开项目。';
- el('acceptanceFootnote').textContent=cc?'CCMax 使用独立的 Anthropic Messages 检测器，结果按请求样本与检查类别分别汇总。本地服务保存脱敏证据。':'本地服务自动调用已集成的官方 KVV。预检是用例抽样，全套是四套 API 验证，不包含 OCRBench、MMMU、AIME、BEAM 或 DeepSWE 能力评测。';
- el('acceptanceKimiFields').hidden=cc;el('acceptanceCcFields').hidden=!cc;
- const items=cc?ccItems:full?fullItems:quickItems;
- const root=el('acceptancePlan');root.replaceChildren(make('h3','',cc?'12 类渠道验收检查（含 4 项安全与一致性探针）':full?'全套 API verifier':'11 项代表性预检'));
- const list=make('ol','acceptance-plan-list');items.forEach((text,i)=>{const item=make('li');item.append(make('i','',String(i+1).padStart(2,'0')),make('span','',text));list.append(item);});root.append(list);
- const note=cc?'包含协议、流式、工具、错误映射，以及系统提示词金丝雀、指令层级、固定令牌重复性和非法参数探针。安全探针只记录本轮观察，不证明模型身份或蒸馏事实；401、429、网络错误记为无法判定。':full?'当前版本收集 611 个 pytest 项，含官方跳过项和本地检查。逐项执行，不自动重试失败请求；用例内可能有多次 API 请求。':'复用现有 11 项预检清单；这是官方用例的抽样组合，不是 Kimi 官方认证。非法参数遇到鉴权或网络错误不会记为通过。';
- root.append(make('p','acceptance-plan-note',note));
- el('acceptanceRequestHint').textContent=cc?`计划 ${Number(el('acceptanceSignature').value)+Number(el('acceptanceSse').value)+7} 次请求（含 1 次强制工具、1 次非法模型，以及 5 次安全/一致性/参数探针），按渠道计费。`:full?'全量执行数百次请求，按渠道计费；完成时间取决于模型速度。':'计划 11 个测试项，不自动重试；请求按渠道计费。';
+function config(){
+ const requestFormat=selected==='ccmax'?el('acceptanceFormat').value:el('acceptanceThinkMode').value==='openai'?'openai':'native';
+ return {suite:selected==='ccmax'?'ccmax':el('acceptanceScope').value,base:el('acceptanceBase').value.trim(),key:el('acceptanceKey').value.trim(),model:el('acceptanceModel').value.trim(),timeout:Number(el('acceptanceTimeout').value),signature_samples:Number(el('acceptanceSignature').value),sse_samples:Number(el('acceptanceSse').value),concurrency:2,auth:requestFormat==='openai'?'bearer':el('acceptanceAuth').value,request_format:requestFormat,think_mode:el('acceptanceThinkMode').value,thinking:!['none','openai'].includes(el('acceptanceThinkMode').value),advanced:selected==='ccmax'};
 }
+function updatePlan(){
+ const cc=selected==='ccmax',full=el('acceptanceScope').value==='kvvfull',openai=cc?el('acceptanceFormat').value==='openai':el('acceptanceThinkMode').value==='openai';
+ el('acceptanceTitle').textContent=cc?'CCMax渠道验收':'Kimi Vendor Verifier';
+ el('acceptanceDescription').textContent=cc?(openai?'使用 OpenAI Chat Completions 请求与响应格式，检查 Claude 兼容渠道的流式、工具、错误及安全行为。':'使用独立的 Anthropic Messages 检测器，检查流式可靠性、参数校验和工具调用，保留每次样本证据。'):(openai?'四个检测层面统一使用 OpenAI 兼容请求。预检运行 11 个兼容用例；全套增加能力探针及 KVV 工具 Schema 矩阵。':'网页通过同一个本地服务自动调用已集成的 MoonshotAI 官方 KVV，提供原生预检和完整 API 验证，无需另开项目。');
+ el('acceptanceKimiFields').hidden=cc;el('acceptanceCcFields').hidden=!cc;
+ el('acceptanceAuth').disabled=cc&&openai;
+ el('acceptanceSignatureGroup').hidden=cc&&openai;
+ el('acceptanceFormatHelp').textContent=openai&&!cc?'OpenAI 模式覆盖参数、工具 Schema、能力特性和 Token / 缓存。原生动态工具改用顶层工具工作流；固定 Kimi token 基准不参与兼容评分，报告会列明未验证的原生语义。':'Kimi 原生格式保留官方断言；开源 / 不传 thinking 选项仍仅调整参数和 Schema 用例，其他专项保留 Kimi 原生约定。';
+ el('acceptanceCcFormatHelp').textContent=openai?'请求发送到 /v1/chat/completions，使用 Bearer 鉴权；签名校验不适用于此协议，不发送请求、不计入评分。':'请求发送到 /v1/messages；Bearer 仅改变鉴权，不改变原生 Messages 请求体。';
+ const items=cc?(openai?openaiCcItems:ccItems):openai?(full?openaiFullItems:openaiQuickItems):full?fullItems:quickItems;
+ const title=cc?(openai?'11 类 OpenAI 兼容验收检查':'12 类渠道验收检查（含 4 项安全与一致性探针）'):openai?(full?'OpenAI 全范围兼容验证':'11 项 OpenAI 兼容预检'):full?'全套 API verifier':'11 项代表性预检';
+ const root=el('acceptancePlan');root.replaceChildren(make('h3','',title));
+ const list=make('ol','acceptance-plan-list');items.forEach((text,i)=>{const item=make('li');item.append(make('i','',String(i+1).padStart(2,'0')),make('span','',text));list.append(item);});root.append(list);
+ const note=cc?(openai?'按 OpenAI delta / tool_calls / [DONE] 验证流式响应；Claude 专属签名项明确列为不适用。安全和一致性探针只记录本轮行为，不能证明模型来源或蒸馏事实。':'包含协议、流式、工具、错误映射及安全与一致性探针。401、429、网络错误记为无法判定。'):openai?'兼容模式使用独立断言，不冒充官方原生验证通过。视频 URL、reasoning 等扩展不被支持、未观察到缓存命中时会记录限制；完整 Schema 矩阵可能超出部分渠道支持的子集。':full?'官方全套逐项执行，保留官方跳过项和本地检查。实际用例数量以收集结果为准，不自动重试失败请求。':'这是官方用例的抽样组合，Kimi-K3 会另外追加工作台能力探针；非法参数遇到鉴权或网络错误不会记为通过。';
+ root.append(make('p','acceptance-plan-note',note));
+ el('acceptanceFootnote').textContent=note+' 本地服务保存脱敏请求证据；未执行和不适用项不会记为通过。';
+ el('acceptanceRequestHint').textContent=cc?`计划 ${(openai?0:Number(el('acceptanceSignature').value))+Number(el('acceptanceSse').value)+7} 次请求，按渠道计费。`:full?'全量可能执行数百次请求，实际数量取决于收集结果；按渠道计费。':openai?'计划 11 个兼容测试项，部分项目包含多次请求；不自动重试，按渠道计费。':'计划 11 个官方预检项，Kimi-K3 另有扩展项；不自动重试，按渠道计费。';
+}
+
 async function api(path,options={}){
  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),path==='/api/models'?30000:12000);
  try{const r=await fetch(path,{...options,signal:controller.signal,cache:'no-store',headers:{'Content-Type':'application/json','X-Workbench-Token':token,...options.headers}});if(!r.ok){let text;try{text=(await r.json()).error;}catch{}const error=new Error(text||'本地服务错误 '+r.status);error.status=r.status;throw error;}return r;}finally{clearTimeout(timer);}
@@ -94,15 +106,16 @@ function restoreConfiguration(job){
   if(Number.isFinite(value)&&value>=min&&value<=max&&(field==='timeout'||Number.isInteger(value))){el(id).value=String(value);restored[field]=value;}
  }
  if(['anthropic','bearer'].includes(saved.auth))el('acceptanceAuth').value=saved.auth;
- if(['kimi','opensource','none'].includes(saved.think_mode))el('acceptanceThinkMode').value=saved.think_mode;
+ if(['anthropic','openai'].includes(saved.request_format)&&job.suite==='ccmax')el('acceptanceFormat').value=saved.request_format;
+ if(['kimi','opensource','none','openai'].includes(saved.think_mode))el('acceptanceThinkMode').value=saved.think_mode;
  if(restored.signature_samples!==undefined&&restored.sse_samples!==undefined){
   const signature=restored.signature_samples,sse=restored.sse_samples;
   el('acceptanceSampling').value=signature===1&&sse===3?'quick':signature===5&&sse===50?'batch':'custom';
  }
 }
 function renderCase(item){
- const row=make('div','acceptance-case '+item.status);row.append(make('b','',statuses[item.status]||item.status),make('span','',(item.label||item.id||item.probe||'测试项')+(Number.isInteger(item.samples)?`（${item.samples} 样本 / ${item.failures||0} 异常）`:'')));
- const detail=item.detail||item.details||item.issues||item.notes;if(detail&&(typeof detail==='string'||detail.length)){
+ const row=make('div','acceptance-case '+item.status);row.append(make('b','',item.applicable===false?'不适用':statuses[item.status]||item.status),make('span','',(item.title||item.label||item.id||item.probe||'测试项')+(Number.isInteger(item.samples)?`（${item.samples} 样本 / ${item.failures||0} 异常）`:'')));
+ const detail=item.skip_reason||item.detail||item.details||item.issues||item.notes||item.observations;if(detail&&(typeof detail==='string'||detail.length)){
  const details=make('details'),summary=make('summary','','查看详情');details.append(summary,make('pre','',typeof detail==='string'?detail:JSON.stringify(detail,null,2)));row.append(details);}
  return row;
 }
@@ -119,7 +132,7 @@ function render(data,id){
  el('acceptanceEta').textContent=data.status!=='running'?'本次运行已结束':done>=3&&total>done?'按已完成用例估计剩余约 '+duration((data.elapsed||0)/done*(total-done))+'，仅供参考':'预计剩余：等待足够样本';
  const result=data.result,summary=result?.summary||data.summary;
  const verdict=result?.verdict;el('acceptanceVerdict').hidden=!verdict;if(verdict){el('acceptanceVerdict').className='acceptance-verdict '+verdict.status;el('acceptanceVerdict').replaceChildren(make('b','',verdict.label),make('p','',verdict.detail));}
- el('acceptanceSummary').textContent=summary?`${data.suite==='ccmax'?'请求样本':'用例'}：通过 ${summary.passed||0} · 未通过 ${summary.failed||0} · 跳过 ${summary.skipped||0} · 无法判定 ${summary.inconclusive||0}`:'';
+ el('acceptanceSummary').textContent=summary?`${data.suite==='ccmax'?'请求样本':'用例'}：通过 ${summary.passed||0} · 未通过 ${summary.failed||0} · 跳过 ${summary.skipped||0} · 未覆盖 ${summary.not_covered||0} · 无法判定 ${summary.inconclusive||0}`:'';
  const actualRequests=result?.transport?.request_count??data.request_count;if(actualRequests!==undefined)el('acceptanceSummary').textContent+=` · 实际 API 请求 ${actualRequests} 次`;
  if(result?.error)message(result.error,true);
  const events=data.events||[],cases=result?(result.cases||result.checks||[]):latestEventCases(events);
@@ -173,6 +186,8 @@ async function connect(){
 }
 for(const b of document.querySelectorAll('[data-suite]'))b.addEventListener('click',()=>selectSuite(b.dataset.suite));
 el('acceptanceScope').addEventListener('change',updatePlan);
+el('acceptanceThinkMode').addEventListener('change',updatePlan);
+el('acceptanceFormat').addEventListener('change',()=>{if(el('acceptanceFormat').value==='openai')el('acceptanceAuth').value='bearer';invalidateModels();updatePlan();});
 el('acceptanceSampling').addEventListener('change',()=>{const mode=el('acceptanceSampling').value;if(mode!=='custom'){el('acceptanceSignature').value=mode==='batch'?5:1;el('acceptanceSse').value=mode==='batch'?50:3;}updatePlan();});
 for(const id of ['acceptanceSignature','acceptanceSse'])el(id).addEventListener('input',()=>{el('acceptanceSampling').value='custom';updatePlan();});
 el('acceptanceRun').addEventListener('click',start);

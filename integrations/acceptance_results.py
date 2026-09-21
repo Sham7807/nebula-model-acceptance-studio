@@ -7,7 +7,8 @@ def decorate(result):
     entries = result.get('checks') if result.get('suite') in ('ccmax', 'ccmax_acceptance') else result.get('cases')
     entries = entries or []
     local = [x for x in entries if 'tolerance_boundaries' in x.get('id','')]
-    remote = [x for x in entries if x not in local]
+    not_applicable = [x for x in entries if x.get('applicable') is False]
+    remote = [x for x in entries if x not in local and x not in not_applicable]
     counts = {status: sum(x.get('status') == status for x in remote) for status in ('passed','failed','inconclusive','skipped','not_covered')}
     unknown = sum(x.get('status') not in counts for x in remote)
     transport = result.get('transport') or {}
@@ -22,5 +23,5 @@ def decorate(result):
         status,label,detail='inconclusive','证据不足 · 无法确认通过','存在调用错误、未执行项或无法判定项，不能把本次运行视为通过。'
     else:
         status,label,detail='passed','本轮已执行检查通过','仅对本轮采样负责；不代表模型身份认证或长期稳定性保证。'
-    result['verdict']={'status':status,'label':label,'detail':detail,'counts':counts,'skipped':counts['skipped'],'untested':untested,'local_checks':len(local),'transport_failures':len(transport_bad),'unclassified':unknown}
+    result['verdict']={'status':status,'label':label,'detail':detail,'counts':counts,'skipped':counts['skipped'],'not_applicable':len(not_applicable),'untested':untested,'local_checks':len(local),'transport_failures':len(transport_bad),'unclassified':unknown}
     return result

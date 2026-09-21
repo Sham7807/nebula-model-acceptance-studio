@@ -32,8 +32,12 @@ def pytest_collection_finish(session):
 
 def pytest_runtest_logreport(report):
     if report.when == 'call' or (report.when == 'setup' and report.outcome != 'passed') or (report.when == 'teardown' and report.outcome == 'failed'):
-        event({'type': 'case', 'id': report.nodeid, 'status': report.outcome,
-               'phase': report.when, 'duration': report.duration, 'detail': str(report.longrepr) if report.longrepr else ''})
+        data={'type': 'case', 'id': report.nodeid, 'status': report.outcome,
+               'phase': report.when, 'duration': report.duration, 'detail': str(report.longrepr) if report.longrepr else ''}
+        observations=dict(getattr(report,'user_properties',[]) or []).get('workbench_observations')
+        if observations:
+            data['observations']=RECORDER.redact(observations) if RECORDER else observations
+        event(data)
 
 
 @pytest.hookimpl(hookwrapper=True)

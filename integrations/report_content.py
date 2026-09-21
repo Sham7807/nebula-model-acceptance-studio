@@ -250,6 +250,8 @@ def _cc_evidence(sample, check_id, assessment):
     fields = {"message_start": ("message_start_count", "message_ids"),
               "message_stop": ("message_stop_count", "message_delta_count", "stop_reasons", "malformed_events", "sequence_errors", "incomplete_event"),
               "stream_error": ("errors",), "usage_cache": ("usage",), "tool_stream": ("tools", "tool_errors")}
+    if sse.get('protocol')=='openai_chat_completions':
+        fields.update(message_start=('chunk_count','response_id_count','message_ids'),message_stop=('done_count','finish_reasons','malformed_events','sequence_errors','incomplete_event'))
     for key in fields.get(check_id, ()):
         if key in sse:
             data[key] = deepcopy(sse[key])
@@ -334,6 +336,13 @@ def _cc_checks(result):
     for check_id in _unique([*CC_METHODS, *supplied]):
         original = supplied.get(check_id, {})
         title, method, expected, meaning, next_step = CC_METHODS.get(check_id, (_text(original.get("label") or check_id), "执行结果中保留的渠道检查。", "以原检查定义与断言为准。", "仅解释当前记录。", "查看原始断言与请求证据。"))
+        openai = _dict(result.get('configuration')).get('request_format')=='openai'
+        if openai:
+            title=_text(original.get('title') or original.get('label') or check_id)
+            method=_text(original.get('method') or '执行 OpenAI Chat Completions 协议检查。')
+            expected=_text(original.get('expected') or '以本次兼容断言与请求证据为准。')
+            meaning=_text(original.get('meaning') or '仅评价所选协议下本轮已执行请求。')
+            next_step=_text(original.get('next_step') or '核对 Chat Completions 请求、响应与渠道转发映射。')
         rows = [_cc_evidence(sample, check_id, row) for sample in samples for row in _list(sample.get("assessments")) if _dict(row).get("check") == check_id]
         if not rows:
             rows = [{"sample_id": _text(row.get("sample_id")), "status": _status(row.get("status")), "detail": _text(row.get("detail")), "request_ids": []}
@@ -346,8 +355,12 @@ def _cc_checks(result):
             grace = _dict(result.get("configuration")).get("close_grace")
             expected += " 本轮关闭宽限：%s。" % ("%s 秒" % grace if grace is not None else "结果未记录，不能推定")
         observed += "\n" + ("\n".join(_evidence_line(row) for row in rows) if rows else "没有可用的样本判定记录。")
+        if original.get('applicable') is False:
+            observed=_text(original.get('skip_reason') or '此协议不适用，不发送请求，不计入评分。')
+            next_step='若需验证原生签名契约，请切换 Anthropic Messages 格式。'
+        observed_summary=observed if original.get('applicable') is False else ("涉及 %s 个样本；%s。" % (len(sample_ids),_count_text(counts)) if openai else _cc_observed_summary(check_id, rows, counts))
         checks.append({"id": check_id, "title": title, "status": status, "method": method, "expected": expected,
-                       "observed": observed, "observed_summary": _cc_observed_summary(check_id, rows, counts),
+                       "observed": observed, "observed_summary": observed_summary, "applicable":original.get('applicable',True),
                        "meaning": _meaning(status, meaning), "next_step": next_step,
                        "request_ids": _unique(value for row in rows for value in row["request_ids"]), "sample_ids": sample_ids,
                        "counts": counts, "evidence_rows": rows, "category": "CCMax 协议验收", "local_only": False,
@@ -385,7 +398,15 @@ def _kvv_metadata(node, detail):
     expected = "按该官方 node 的原始断言验证；本报告未改写用例参数。"
     method = "执行官方用例 %s。" % node
     metadata = {"function": function, "variant": variant, "dimensions": []}
-    if local:
+    if 'kvv_openai_cases.py' in node:
+        from kvv_openai_cases import OPENAI_CASE_SPECS
+        spec=OPENAI_CASE_SPECS.get(function,{})
+        category=spec.get('category','OpenAI 兼容能力')
+        title=spec.get('title',function)
+        method=spec.get('method','发送 OpenAI 兼容请求并按当前用例校验实际响应。')
+        expected=spec.get('expected','满足本项兼容断言；不套用 Kimi 原生 token 基准。')
+        metadata.update(dimensions=spec.get('dimensions',[]),source='workbench-openai-compat',next_step=spec.get('next_step','核对渠道的 OpenAI 兼容范围与本次原始请求。'))
+    elif local:
         category, title = "本地判定器自检", "prompt token 容差边界自检"
         method = "在本地对官方容差函数运行参数化边界值，不向渠道发送请求。"
         expected = "本地函数的返回值与该参数化边界预期一致；不属于模型或渠道通过数。"
@@ -481,10 +502,12 @@ def _kvv_checks(result):
         request_ids = _unique((request.get("request_id") or request.get("id") for request in matching) if matching else _list(case.get("request_ids")))
         transport_checks = [check for check in _list(transport.get("checks")) if _dict(check).get("case_id") == node or (not _dict(check).get("case_id") and _dict(check).get("request_id") in request_ids)]
         evidence = _assertion(detail)
-        observed = "官方用例状态：%s；当前报告状态：%s；关联 %s 条请求证据。" % (case.get("pytest_status", case.get("status", "未记录")), STATUS_NAMES[status], len(matching))
+        observed = "%s用例状态：%s；当前报告状态：%s；关联 %s 条请求证据。" % ('兼容' if metadata.get('source')=='workbench-openai-compat' else '官方',case.get("pytest_status", case.get("status", "未记录")), STATUS_NAMES[status], len(matching))
         if case.get("duration") is not None:
             duration = case["duration"]
             observed += " 用例耗时：%s 秒。" % ("%.2f" % duration if isinstance(duration, (int, float)) else _text(duration))
+        if case.get('observations'):
+            observed += '\n本轮实测：\n'+_text(case['observations'])
         if evidence:
             observed += "\n原始断言/原因：\n" + evidence
         else:
@@ -512,6 +535,9 @@ def _kvv_checks(result):
             next_step = "保留上述官方跳过原因；该能力未在本轮获得验证，不能以跳过替代通过。"
         elif status in ("inconclusive", "cancelled"):
             next_step = "先解决证据中的鉴权、限流、网络、超时或取消原因；恢复可执行条件后再单独复测该 case。"
+        if metadata.get('source')=='workbench-openai-compat':
+            next_step=(next_step+' ' if status in ('inconclusive','cancelled') else '')+metadata['next_step']
+            meaning+=' 本项使用 OpenAI 兼容断言，不代表 Kimi 原生专项通过。'
         warning = ""
         if status == "passed" and "rejected" in metadata["function"] and any(request.get("infrastructure_error") for request in matching):
             warning = "用例记录为通过，但关联请求含基础设施错误；超时/网络/服务故障不能证明参数被正确拒绝，需复核原始判定。"
@@ -575,7 +601,7 @@ def _report_score(checks, result):
     for key, label in REPORT_DIMENSIONS:
         matched = [check for check in checks if key in (_list(_dict(check.get("metadata")).get("dimensions")) or _list(check.get("dimensions")))]
         # Avoid double counting local-only helper checks in a capability score.
-        matched = [check for check in matched if not check.get("local_only")]
+        matched = [check for check in matched if not check.get("local_only") and check.get('applicable') is not False]
         counts = _counts(matched)
         # Evidence gaps (skipped, not-covered, cancelled, or unknown) remain
         # visible in counts but do not make a dimension look covered or pass.
@@ -611,7 +637,7 @@ def _report_score(checks, result):
     return {"total": total, "max_total": 100, "dimensions": dimensions,
             "covered_dimensions": len(covered_dims), "dimension_count": len(dimensions),
             "recommendations": recommendations,
-            "method": "等权维度；通过=100%，无法判定=40%，失败/跳过/未覆盖=0%。未覆盖维度不计入已覆盖维度平均分。总分只代表本轮已覆盖能力。"}
+            "method": "等权维度；通过=100%，无法判定=40%，失败/跳过/未覆盖=0%。协议不适用项不计入分母；未覆盖维度不计入已覆盖维度平均分。总分只代表本轮已覆盖能力。"}
 
 
 def build_report_data(result):
@@ -623,6 +649,7 @@ def build_report_data(result):
     # uses identical report semantics even when a result is rendered before
     # the service normalises its name.
     cc = suite in ("ccmax", "ccmax_acceptance")
+    openai = result.get('request_format')=='openai' or _dict(result.get('configuration')).get('request_format')=='openai' or (not cc and _dict(result.get('configuration')).get('think_mode')=='openai')
     checks = _cc_checks(result) if cc else _kvv_checks(result)
     summary = _dict(result.get("summary"))
     remote = [check for check in checks if not check.get("local_only")]
@@ -631,6 +658,9 @@ def build_report_data(result):
     completed = summary.get("completed")
     engine = "CCMax 协议与渠道验收" if cc else "MoonshotAI / Kimi Vendor Verifier"
     title = "CCMax渠道验收报告" if cc else "Kimi KVV %s报告" % ("11 项预检" if suite == "kvv11" else "全套测试" if suite in ("kvvfull", "kvv_full", "kvv") else "验收")
+    if openai:
+        engine='CCMax / OpenAI Chat Completions' if cc else 'OpenAI 兼容用例 / KVV Schema' if suite=='kvvfull' else 'OpenAI 兼容用例'
+        title='CCMax OpenAI兼容验收报告' if cc else 'OpenAI兼容%s报告' % ('11 项预检' if suite=='kvv11' else '全套测试')
     if cc:
         advanced = bool(_dict(result.get("configuration")).get("advanced"))
         scope = ["覆盖签名拒绝、message_start、SSE 收尾、响应流结束、流中错误、非法模型、usage/缓存与工具 JSON 共 8 类基础探针。"]
@@ -642,7 +672,13 @@ def build_report_data(result):
         scope = [
             "保留每个已记录的官方 pytest node，按参数契约、工具 Schema、K3 特性及 token 基线分类。",
             "官方来源：%s；记录版本：%s。" % (_text(result.get("source")) or "结果未记录", _text(result.get("revision")) or "结果未记录")]
-    scope.append("本轮计划 %s 项%s，已有 %s 项结果；没有结果的项目不视为通过。" % (total if total is not None else "未记录", "请求样本" if cc else "官方用例", completed if completed is not None else "未记录"))
+    if openai:
+        scope=['所有实际请求使用 OpenAI Chat Completions 请求体、Bearer 鉴权与对应的响应 / SSE 断言。']
+        if cc:
+            scope += ['执行流式 ID、finish_reason / [DONE]、响应流结束、流中错误、非法模型、usage / 缓存与工具 JSON 检查；启用时另执行安全与一致性探针。','Claude 原生 thinking 签名在该协议下不适用，不发送样本、不计通过、不计入评分分母。']
+        else:
+            scope += ['覆盖参数与协议、工具与 Schema、能力特性、token / usage / 缓存四个检测层面。兼容预检为 11 项，全套增加专项用例并执行官方 Schema 兼容矩阵。','用例来源：工作台 OpenAI 兼容用例；全套的 Schema 矩阵来自固定版本 KVV。兼容结果不等于官方原生 K3 全套验证。']
+    scope.append("本轮计划 %s 项%s，已有 %s 项结果；没有结果的项目不视为通过。" % (total if total is not None else "未记录", "请求样本" if cc else "兼容 / Schema 用例" if openai else "官方用例", completed if completed is not None else "未记录"))
     if not cc:
         scope.append("远程用例记录 %s 条：%s。本地容差自检 %s 条，独立列出。" % (len(remote), _count_text(_counts(remote)), len(local)))
         request_count = _dict(result.get("transport")).get("request_count")
@@ -658,14 +694,19 @@ def build_report_data(result):
     if cc:
         limitations += ["响应流结束检查关注当前 HTTP 响应体 EOF，允许复用 TCP 连接；不要求每次生成后断开 TCP。",
                         "缓存字段结构检查不证明缓存命中或账单正确；完整原始样本与 request ID 是进一步核验依据。"]
-    else:
+    elif not openai:
         limitations += ["KVV 的通用 thinking 格式选项只作用于使用适配函数的用例；K3 原生特性测试保留官方硬编码字段，不保证所有后端均适用。",
                         "官方 skipped 状态和本地 tolerance_boundaries 自检按原样展示；不会补作已通过的渠道测试。",
                         "部分官方 token 用例读到 usage 即结束消费；client_closed/recorder_closed 不自动推翻已观察到的 token 断言。"]
+    if openai and not cc:
+        limitations += _list(_dict(result.get('compatibility')).get('native_not_applicable'))
+        limitations += ['兼容模式不验证 Kimi 原生 system.tools 动态加载、thinking/keep 专属语义或固定 tokenizer 数值基准。','reasoning_effort、视频 URL 等能力由具体模型与渠道决定；缓存未命中只说明本轮未观察到命中，不证明渠道没有缓存。','完整工具 Schema 矩阵包含部分渠道不支持的 JSON Schema 子集，失败只反映该案例的兼容范围。']
     score = _report_score(checks, result)
     # Keep the visual shell shared by all suites while making the intent of
     # each suite explicit.  These are scope labels, not extra test results.
-    if cc:
+    if openai:
+        focus=['实际协议：OpenAI Chat Completions；请求体、工具声明、usage、choices 与 SSE 收尾按所选协议验证。', 'CCMax 侧重 Claude 兼容渠道的流式可靠性、工具和安全行为。' if cc else '覆盖参数、工具 Schema、多模态、长度限制、token 与缓存观测；保留每项方法、实测值与建议。','协议不适用与本轮未验证能力独立说明，不能替代通过。']
+    elif cc:
         focus = [
             "Anthropic Messages / SSE 协议：消息起始、增量、收尾和响应流结束。",
             "渠道验收重点：伪造签名拒绝、流中错误、非法模型、usage/缓存字段与工具调用 JSON。",

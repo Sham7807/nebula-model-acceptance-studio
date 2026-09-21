@@ -68,10 +68,14 @@ def validate(data):
         except (ValueError,TypeError): raise ValueError(name+' 必须为整数')
         if not low <= n <= high: raise ValueError(f'{name} 超出范围 {low}–{high}')
         c[name] = n
-    c['think_mode'] = data.get('think_mode','kimi')
-    if c['think_mode'] not in ('kimi','opensource','none'): raise ValueError('thinking 格式无效')
+    c['think_mode'] = data.get('think_mode','openai' if data.get('request_format')=='openai' and c['suite']!='ccmax' else 'kimi')
+    if c['think_mode'] not in ('kimi','opensource','none','openai'): raise ValueError('thinking 格式无效')
+    c['request_format'] = data.get('request_format', 'anthropic' if c['suite']=='ccmax' else 'openai' if c['think_mode']=='openai' else 'native')
+    if c['request_format'] not in (('anthropic','openai') if c['suite']=='ccmax' else ('native','openai')): raise ValueError('请求格式不适用于当前套件')
+    if c['suite']!='ccmax' and (c['request_format']=='openai') != (c['think_mode']=='openai'): raise ValueError('KVV 请求格式与 thinking 配置不一致')
     c['auth'] = data.get('auth','anthropic')
     if c['auth'] not in ('anthropic','bearer'): raise ValueError('CCmax 鉴权方式无效')
+    if c['request_format']=='openai': c['auth']='bearer'
     c['thinking'] = bool(data.get('thinking',True))
     advanced = data.get('advanced', True if c['suite'] == 'ccmax' else False)
     if not isinstance(advanced, bool): raise ValueError('高级 CCMax 探针开关必须为布尔值')

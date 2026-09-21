@@ -1,4 +1,4 @@
-"""Bounded Anthropic Messages acceptance probes for CCmax-compatible channels.
+"""Bounded Anthropic Messages / OpenAI Chat acceptance probes for CCMax channels.
 
 No request is made on import.  Call ``run(config, emit, cancelled)`` explicitly.
 ``emit`` receives JSON-serializable progress dictionaries.  ``cancelled`` is a
@@ -22,6 +22,11 @@ import time
 from urllib.parse import urlsplit
 
 import httpx
+
+try:
+    from . import ccmax_openai
+except ImportError:
+    import ccmax_openai
 
 
 BASE_CHECKS = [
@@ -70,13 +75,17 @@ def _configuration(config):
         raise ValueError("请填写渠道侧模型名称")
     if not key:
         raise ValueError("请填写 API Key")
-    auth = config.get("auth", "anthropic")
+    request_format = config.get("request_format", "anthropic")
+    if request_format not in ("anthropic", "openai"):
+        raise ValueError("CCMax 请求格式必须为 anthropic 或 openai")
+    auth = "bearer" if request_format == "openai" else config.get("auth", "anthropic")
     if auth not in ("anthropic", "bearer"):
         raise ValueError("CCmax 验收支持 x-api-key 或 Bearer 鉴权")
     result = {
         "base": base,
         "model": model,
         "auth": auth,
+        "request_format": request_format,
         "signature_samples": _integer(config.get("signature_samples"), "签名样本数", 1, 1, 20),
         "sse_samples": _integer(config.get("sse_samples"), "SSE 样本数", 3, 1, 200),
         "timeout": _integer(config.get("timeout"), "单次超时", 240, 5, 600),
@@ -98,7 +107,13 @@ def _configuration(config):
     return result, key
 
 
-def _endpoint(base):
+def _endpoint(base, request_format="anthropic"):
+    if request_format == "openai":
+        if base.endswith("/v1/chat/completions"):
+            return base
+        if base.endswith("/v1/messages"):
+            base = base[:-len("/messages")]
+        return base + "/chat/completions" if base.endswith("/v1") else base + "/v1/chat/completions"
     if base.endswith("/v1/messages"):
         return base
     if base.endswith("/v1"):
@@ -182,7 +197,7 @@ def _probe_specs(settings):
             {"id": "fingerprint-2", "probe": "fingerprint", "body": copy.deepcopy(fingerprint)},
             {"id": "invalid-parameters-1", "probe": "invalid_parameters", "body": invalid_parameters},
         ])
-    return specs
+    return ccmax_openai.transform_specs(specs) if settings.get("request_format") == "openai" else specs
 
 
 def _nonnegative_integer(value):
@@ -396,10 +411,12 @@ def _interrupt_response(response):
 
 def _collect_sample(spec, settings, key, transport, cancelled):
     started = time.monotonic()
-    parser = SSEAnalysis()
+    openai = settings.get("request_format") == "openai"
+    parser = ccmax_openai.SSEAnalysis() if openai else SSEAnalysis()
     is_stream = spec["probe"] in ("sse", "tool")
     sample = {"id": spec["id"], "probe": spec["probe"], "status": "inconclusive", "issues": [],
-              "request": {"method": "POST", "url": _endpoint(settings["base"]), "body": spec["body"]},
+              "request_format": settings.get("request_format", "anthropic"),
+              "request": {"method": "POST", "url": _endpoint(settings["base"], settings.get("request_format", "anthropic")), "body": spec["body"]},
               "response": {"status": None, "headers": [], "body": ""},
               "evidence": {"request_ids": [], "message_ids": []}, "assessments": []}
     if spec.get("canary"):
@@ -443,6 +460,8 @@ def _collect_sample(spec, settings, key, transport, cancelled):
     monitor = threading.Thread(target=watch, name="ccmax-probe-deadline", daemon=True)
     monitor.start()
     headers = {"content-type": "application/json", "anthropic-version": "2023-06-01", "accept": "text/event-stream" if is_stream else "application/json"}
+    if openai:
+        headers.pop("anthropic-version")
     headers["x-api-key" if settings["auth"] == "anthropic" else "authorization"] = key if settings["auth"] == "anthropic" else "Bearer " + key
     error = None
     try:
@@ -535,6 +554,8 @@ def _usage_assessment(parser, complete=True):
 
 
 def _judge(sample, parser):
+    if sample.get("request_format") == "openai":
+        return ccmax_openai.judge(sample, parser)
     code = sample["response"]["status"]
     body = sample["response"]["body"]
     end = sample["termination"]
@@ -560,7 +581,7 @@ def _judge(sample, parser):
         text = _response_text(payload)
         sample["evidence"]["output_text"] = text[:4000]
         sample["evidence"]["output_sha256"] = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest() if text else None
-        if end != "eof" or not success or not isinstance(payload, dict):
+        if end != "eof" or not success or not isinstance(payload, dict) or not text.strip():
             rows.append(_assessment(probe if probe != "fingerprint" else "behavioral_consistency", "inconclusive", "未获得完整成功响应（HTTP %s，%s），不能据此判断安全行为" % (code, end)))
         elif probe == "prompt_injection":
             canary = sample.get("canary", "")
@@ -684,7 +705,8 @@ def _summarize(samples, total, settings, was_cancelled):
     if not baseline:
         for sample in samples:
             for row in sample["assessments"]:
-                if row["check"] in ("signature", "error_format") and row["status"] == "passed":
+                negative_checks = ("signature", "error_format", "parameter_validation") if settings.get("request_format") == "openai" else ("signature", "error_format")
+                if row["check"] in negative_checks and row["status"] == "passed":
                     row["status"] = "inconclusive"
                     row["detail"] += "；有效请求基线未通过，本项暂不能判为通过"
                     sample["status"] = "inconclusive"
@@ -717,10 +739,12 @@ def _summarize(samples, total, settings, was_cancelled):
         status = "failed" if counts["failed"] else "inconclusive" if counts["inconclusive"] or not counts["passed"] else "passed"
         checks.append({"id": check_id, "label": label, "status": status, "samples": len(rows), "failures": counts["failed"], **counts,
                        "details": [{"sample_id": sample["id"], "status": row["status"], "detail": row["detail"]} for sample, row in rows]})
+    if settings.get("request_format") == "openai":
+        ccmax_openai.describe_checks(checks)
     counts = {status: sum(s["status"] == status for s in samples) for status in ("passed", "failed", "inconclusive", "cancelled")}
     return {"suite": "ccmax_acceptance", "status": "cancelled" if was_cancelled else "completed", "configuration": settings,
             "summary": {"total": total, "completed": len(samples), **counts}, "checks": checks, "samples": samples,
-            "notes": ["未复现仅代表当前采样结果，不保证后续所有请求正常。", "流中 error 是 Anthropic 支持的错误报告形式；记录上游失败，不单独归因为渠道违规。", "高级探针只观察固定输入下的本轮行为；提示词泄露、指令覆盖或重复响应差异不能单独证明可利用漏洞、官方身份或蒸馏。", "未向模型索取系统隐藏信息、用户数据或渠道密钥；金丝雀为本工具生成的合成标记。"]}
+            "notes": ["未复现仅代表当前采样结果，不保证后续所有请求正常。", "本轮使用 OpenAI Chat Completions 请求、choices 响应及 [DONE] 流收尾；Anthropic 签名检查不适用。" if settings.get("request_format") == "openai" else "流中 error 是 Anthropic 支持的错误报告形式；记录上游失败，不单独归因为渠道违规。", "高级探针只观察固定输入下的本轮行为；提示词泄露、指令覆盖或重复响应差异不能单独证明可利用漏洞、官方身份或蒸馏。", "未向模型索取系统隐藏信息、用户数据或渠道密钥；金丝雀为本工具生成的合成标记。"]}
 
 
 def run(config, emit=None, cancelled=None):
@@ -729,7 +753,9 @@ def run(config, emit=None, cancelled=None):
     Required config keys: base, key, model.  Optional keys: signature_samples
     (1..20), sse_samples (1..200), timeout (5..600 seconds), concurrency (1..10),
     close_grace (0..30 seconds, default 5), auth ('anthropic' or 'bearer'),
+    request_format ('anthropic' by default, or 'openai' for Chat Completions),
     advanced (bool; enables five bounded security/consistency requests).
+    OpenAI format uses Bearer and excludes the inapplicable signature requests.
     ``transport`` accepts an httpx transport for isolated tests.  On cancellation
     no new work is started and the caller returns promptly; in-flight sockets
     are closed by their watchdogs.  At most ``concurrency`` workers are created.
