@@ -38,7 +38,7 @@
 - 登录后页面使用 HttpOnly、SameSite=Strict 会话 Cookie；除 `/api/session` 外的 API 还需要页面令牌。`/api/history/*/media/*` 允许浏览器原生媒体元素只凭会话 Cookie 读取。
 - 仅放行外部 HTTPS 端口；18878 保持只监听环回地址。
 
-文本、图片、视频和音频基础请求仍由浏览器直连渠道，渠道需要允许 CORS，并在 HTTPS 页面下提供 HTTPS 接口。CCMax / KVV 请求由服务器发起。
+所有检测入口的模型列表统一由登录会话保护的 `/api/models` 获取，支持 Bearer、Anthropic、Gemini 和无鉴权模式；渠道 API Key 不写入数据库。页面每次获取列表会刷新页面令牌，服务失败时显示原因，不自动切回浏览器直连。文本、图片、视频和音频的实际基础测试请求，以及通用深度检测的模型调用仍由浏览器直连渠道，渠道需要允许 CORS，并在 HTTPS 页面下提供 HTTPS 接口。CCMax / KVV 请求由服务器发起。
 
 ## IP 证书续期
 

@@ -313,12 +313,14 @@ class Handler(BaseHTTPRequestHandler):
                 length=int(self.headers.get('Content-Length','0'))
                 if self.headers.get_content_type()!='application/json' or not 0<length<65536:raise ValueError('请求格式无效')
                 data=json.loads(self.rfile.read(length))
-                base=normalized_base(data.get('base',''));key=str(data.get('key','')).strip();auth=data.get('auth','bearer')
-                if not key or any(x in key for x in ('\n','\r')) or auth not in ('bearer','anthropic'):raise ValueError('请输入有效密钥与鉴权方式')
+                if not isinstance(data,dict):raise ValueError('请求必须为 JSON 对象')
+                base=str(data.get('base','')).strip();key=str(data.get('key','')).strip();auth=data.get('auth','bearer')
                 from channel_discovery import fetch_models
                 return self.send_json(200,fetch_models(base,key,auth))
             except Exception as exc:
-                return self.send_json(400,{'error':str(exc).replace(locals().get('key','__no_key__'),'[已隐藏]')})
+                from httpx import TimeoutException, RequestError
+                message='获取模型列表超时，请检查渠道连通性后重试。' if isinstance(exc,TimeoutException) else '服务器无法连接渠道，请检查渠道地址、TLS 证书和网络设置。' if isinstance(exc,RequestError) else str(exc)
+                return self.send_json(400,{'error':clean(message,locals().get('key',''))})
         if path!='/api/runs':return self.send_json(404,{'error':'Not found'})
         try:
             if self.headers.get_content_type()!='application/json': raise ValueError('请求必须为 JSON')

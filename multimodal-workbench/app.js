@@ -625,7 +625,7 @@ async function loadModels(){
   modelFetchController?.abort();const epoch=++modelFetchEpoch,identity=discoveryIdentity(c),ctrl=new AbortController();modelFetchController=ctrl;modelFetchState='loading';modelFetchError='';
   updateModelFetchUI();openModelMenu();notify('');
   try{
-    const result=await E.listModels(c,{signal:ctrl.signal});
+    const result=await window.ModelDiscovery.list(c,{signal:ctrl.signal});
     if(epoch!==modelFetchEpoch||identity!==discoveryIdentity()||ctrl.signal.aborted)return;
     const list=Array.isArray(result)?result:result.models;
     if(!Array.isArray(list))throw new Error('模型列表响应格式无法识别');

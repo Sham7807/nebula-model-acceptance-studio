@@ -8,6 +8,7 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 import httpx
 import kvv_runner
 import server
@@ -23,6 +24,45 @@ class RejectProvider(BaseHTTPRequestHandler):
         self.send_response(self.status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(payload)));self.end_headers();self.wfile.write(payload)
 
 class ServiceTests(unittest.TestCase):
+    def test_model_discovery_service_auth_validation_and_errors(self):
+        from auth_history import Store, hash_password
+        import channel_discovery
+        with tempfile.TemporaryDirectory() as temp:
+            auth_file=Path(temp)/'auth.json'
+            auth_file.write_text(json.dumps({'username':'fixture','password_hash':hash_password('fixture-password')}))
+            store=Store(Path(temp)/'history.sqlite3',auth_file)
+            with patch.object(server,'AUTH_STORE',store), patch.dict('os.environ',{'WORKBENCH_COOKIE_SECURE':'0'}):
+                srv=ThreadingHTTPServer(('127.0.0.1',0),server.Handler)
+                threading.Thread(target=srv.serve_forever,daemon=True).start()
+                try:
+                    url=f'http://127.0.0.1:{srv.server_port}'
+                    with httpx.Client(trust_env=False) as client:
+                        payload={'base':'https://relay.test/v1','key':'fixture-secret','auth':'bearer'}
+                        self.assertEqual(client.post(url+'/api/models',json=payload).status_code,401)
+                        self.assertEqual(client.post(url+'/api/auth/login',json={'username':'fixture','password':'fixture-password'}).status_code,200)
+                        token=client.get(url+'/api/session').json()['token']
+                        headers={'X-Workbench-Token':token}
+                        self.assertEqual(client.post(url+'/api/models',json=payload).status_code,403)
+                        self.assertEqual(client.post(url+'/api/models',headers={**headers,'Origin':'https://untrusted.test'},json=payload).status_code,403)
+                        for body in [[], 'invalid', {'base':'file:///tmp/models','key':'fixture-secret'}, {**payload,'key':'bad\nheader'}]:
+                            response=client.post(url+'/api/models',headers=headers,json=body)
+                            self.assertEqual(response.status_code,400)
+                            self.assertNotIn('fixture-secret',response.text)
+                        for exception, expected in [(httpx.ReadTimeout('fixture-secret'), '超时'), (httpx.ConnectError('fixture-secret'), '无法连接'), (ValueError('upstream fixture-secret'), '[已隐藏]')]:
+                            with patch.object(channel_discovery,'fetch_models',side_effect=exception):
+                                response=client.post(url+'/api/models',headers=headers,json=payload)
+                            self.assertEqual(response.status_code,400)
+                            self.assertIn(expected,response.json()['error'])
+                            self.assertNotIn('fixture-secret',response.text)
+                        for auth in ['bearer','anthropic','gemini','none']:
+                            body={**payload,'auth':auth,'key':'' if auth=='none' else 'fixture-secret'}
+                            with patch.object(channel_discovery,'fetch_models',return_value={'models':['fixture-model'],'total':1}) as fetch:
+                                response=client.post(url+'/api/models',headers=headers,json=body)
+                            self.assertEqual(response.status_code,200)
+                            self.assertEqual(response.json(),{'models':['fixture-model'],'total':1})
+                            fetch.assert_called_once_with(body['base'],body['key'],auth)
+                finally:srv.shutdown();srv.server_close()
+
     def test_normalization_validation(self):
         self.assertEqual(server.normalized_base('https://relay.test/prefix/'),'https://relay.test/prefix/v1')
         for value in ['file:///tmp/foo','https://key@relay.test','https://relay.test?api_key=x']:

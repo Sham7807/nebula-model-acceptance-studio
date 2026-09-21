@@ -11,6 +11,11 @@ await page.route('**/*',async route=>{
  const request=route.request(),url=new URL(request.url());
  if(url.hostname==='history.test'){
   if(url.pathname==='/api/session')return route.fulfill({status:failSession?503:200,contentType:'application/json',body:JSON.stringify(failSession?{error:'暂时离线'}:{token:'history-test-csrf',history_enabled:historyEnabled})});
+  if(url.pathname==='/api/models'){
+   assert.equal(request.headers()['x-workbench-token'],'history-test-csrf');
+   assert.match(JSON.parse(request.postData()).base,/^https:\/\/relay\.test(?:\/v1)?$/);
+   return route.fulfill({contentType:'application/json',body:JSON.stringify({models:['text-test'],total:1})});
+  }
   if(url.pathname==='/api/history'&&request.method()==='POST'){
    assert.equal(request.headers()['x-workbench-token'],'history-test-csrf');const payload=JSON.parse(request.postData());saved.push(payload);
    return route.fulfill({status:failSave?503:200,contentType:'application/json',body:JSON.stringify(failSave?{error:'稍后重试'}:{id:payload.client_id})});

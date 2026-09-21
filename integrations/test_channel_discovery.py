@@ -35,6 +35,61 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(calls[0].headers['anthropic-version'], '2023-06-01')
         self.assertNotIn('authorization', calls[0].headers)
 
+    def test_gemini_catalog_uses_native_path_header_and_model_names(self):
+        value, calls = self.fetch({'models': [{'name': 'models/gemini-fixture'}]}, auth='gemini')
+        self.assertEqual(value['models'], ['gemini-fixture'])
+        self.assertEqual(str(calls[0].url), 'https://offline-relay.test/prefix/v1beta/models')
+        self.assertEqual(calls[0].headers['x-goog-api-key'], KEY)
+        self.assertNotIn('authorization', calls[0].headers)
+        self.assertNotIn('x-api-key', calls[0].headers)
+
+    def test_unauthenticated_catalog_does_not_forward_a_key(self):
+        calls = []
+        def handle(request):
+            calls.append(request)
+            return httpx.Response(200, json={'data': [{'id': 'local-model'}]})
+        value = fetch_models('https://offline-relay.test', '', 'none', transport=httpx.MockTransport(handle))
+        self.assertEqual(value['models'], ['local-model'])
+        self.assertEqual(str(calls[0].url), 'https://offline-relay.test/v1/models')
+        for header in ('authorization', 'x-api-key', 'x-goog-api-key'):
+            self.assertNotIn(header, calls[0].headers)
+
+    def test_root_prefix_and_protocol_version_are_normalized_once(self):
+        cases = [
+            ('https://offline-relay.test', 'bearer', '/v1/models'),
+            ('https://offline-relay.test/v1/', 'bearer', '/v1/models'),
+            ('https://offline-relay.test/prefix/', 'bearer', '/prefix/v1/models'),
+            ('https://offline-relay.test/prefix/v1', 'bearer', '/prefix/v1/models'),
+            ('https://offline-relay.test/prefix/v1beta', 'bearer', '/prefix/v1/models'),
+            ('https://offline-relay.test', 'gemini', '/v1beta/models'),
+            ('https://offline-relay.test/prefix/v1/', 'gemini', '/prefix/v1beta/models'),
+            ('https://offline-relay.test/prefix/v1beta/', 'gemini', '/prefix/v1beta/models'),
+        ]
+        for base, auth, expected in cases:
+            with self.subTest(base=base, auth=auth):
+                calls = []
+                def handle(request):
+                    calls.append(request)
+                    return httpx.Response(200, json={'data': []})
+                fetch_models(base, KEY, auth, transport=httpx.MockTransport(handle))
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0].url.path, expected)
+
+    def test_invalid_addresses_fail_before_the_network(self):
+        cases = ('file:///tmp/models', 'ftp://offline-relay.test',
+                 'https://user:password@offline-relay.test',
+                 'https://offline-relay.test?key=secret',
+                 'https://offline-relay.test#fragment', 'not-a-url')
+        for base in cases:
+            with self.subTest(base=base):
+                calls = []
+                def handle(request):
+                    calls.append(request)
+                    return httpx.Response(200, json={'data': []})
+                with self.assertRaises(ValueError):
+                    fetch_models(base, KEY, transport=httpx.MockTransport(handle))
+                self.assertEqual(calls, [])
+
     def test_supported_envelopes_and_names_preserve_model_ids(self):
         for payload in ([{'id': 'a'}, {'name': 'b'}], {'models': [{'name': 'a'}, {'id': 'b'}]}):
             with self.subTest(payload=payload):
