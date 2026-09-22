@@ -140,6 +140,7 @@
   #detailSection,#intelSection,#batchSection{display:none;margin-top:18px}
   .intel{background:var(--soft);border-left:2px solid #8daa70;border-radius:0 6px 6px 0;padding:10px 12px;margin:10px 0;font-size:11px;overflow-wrap:anywhere;color:#627657}
   .intel b{color:var(--accent2)}
+  .gpt-preview{margin-top:12px;padding:12px;background:#fff;border:1px solid #dfe8d9;border-radius:9px}.gpt-preview summary{cursor:pointer;font-size:11px;color:var(--accent)}.gpt-preview p{margin:8px 0;font-size:10px;color:var(--muted)}.gpt-preview-frame{display:block;width:100%;height:420px;border:1px solid var(--border);border-radius:7px;background:#fff}
   code{font:10px ui-monospace,Menlo,monospace;background:#eef3e8;padding:1px 5px;border-radius:4px;color:#577546;overflow-wrap:anywhere}
   footer{padding:15px 26px;border-top:1px solid var(--border);color:#8a987f;font-size:10px}
   @media(max-width:900px){.general-grid{grid-template-columns:310px minmax(0,1fr)}#cards{grid-template-columns:1fr}.output-heading{align-items:flex-start;flex-direction:column;gap:3px}.overall{align-items:flex-start;flex-direction:column}}
@@ -187,6 +188,8 @@
           <div class="t">标准检测 <span>约 10 分钟</span></div><div class="d">约 20 项 · 多模态、工具调用、缓存与渠道性能</div></label>
         <label class="mode-card" data-v="full"><input type="radio" name="mode" value="full">
           <div class="t">完整检测 <span>约 20–40 分钟</span></div><div class="d">45+ 项 · 参数边界、视频输入、缓存命中与深度检索</div></label>
+        <label class="mode-card" data-v="gpt"><input type="radio" name="mode" value="gpt">
+          <div class="t">GPT 生成专项 <span>约 1–3 分钟</span></div><div class="d">HTML / SVG 鹈鹕骑自行车 2D 动画 · 降智观察 · Token 账本</div></label>
       </div>
       <section class="mode-plan" id="modePlan" aria-live="polite">
         <div class="mode-plan-title"><span class="dot"></span><span id="modePlanTitle">标准检测 · 关键能力验收</span></div>
@@ -238,7 +241,7 @@ function requestScope(){
   const timer=setTimeout(()=>ctrl.abort(),cfg().timeout);
   return{ctrl,clear(){clearTimeout(timer);ACTIVE_CONTROLLERS.delete(ctrl);}};
 }
-const S={logs:[],details:[],intel:[],scores:{},fp:new Set(),batch:[],requests:[],t0:null,tEnd:null,total:null,mode:''};
+const S={logs:[],details:[],intel:[],scores:{},fp:new Set(),batch:[],requests:[],t0:null,tEnd:null,total:null,mode:'',gptEvaluation:null};
 const historyResponses=new WeakMap();
 
 function historySafe(value){
@@ -265,10 +268,10 @@ function historyResponse(response,body){const row=historyResponses.get(response)
 function publishGeneralHistory(outcome,error=''){
   if(!S.historyId)return;
   const plain=html=>{const template=document.createElement('template');template.innerHTML=html;return template.content.textContent||'';};
-  const checks=S.details.map(item=>({name:item.name,result:item.result,status:item.cls==='bad'?'failed':item.cls==='ok'?'passed':'inconclusive',judge:item.judge,model:item.model||S.config?.model||''}));
+  const checks=S.details.map(item=>({...item,name:item.name,result:item.result,status:item.cls==='bad'?'failed':item.cls==='ok'?'passed':'inconclusive',judge:item.judge,model:item.model||S.config?.model||''}));
   const batchFailed=S.batch.some(item=>!item.stream||!item.tools||!item.json||item.conc!=='3/3');
   const status=outcome==='cancelled'?'cancelled':outcome==='failed'?'failed':batchFailed||checks.some(item=>item.status==='failed')?'failed':!checks.length||checks.some(item=>item.status==='inconclusive')?'inconclusive':'passed';
-  const data=historySafe({client_id:S.historyId,kind:'general',source:'general',title:'通用深度检测 · '+(S.config.models.length?S.config.models.join('、'):S.config.model),model:S.config.models.length?S.config.models.join(', '):S.config.model,base:S.config.base,prompt:'内置通用检测用例 · '+S.mode,status,created_at:S.createdAt/1000,duration_ms:(S.tEnd||performance.now())-S.t0,media:[],result:{config:S.config,mode:S.mode,total:S.total,scores:S.scores,checks,logs:S.logs,intelligence:S.intel.map(plain),batch:S.batch,requests:S.requests,error: error||undefined}});
+  const data=historySafe({client_id:S.historyId,kind:'general',source:'general',title:'通用深度检测 · '+(S.config.models.length?S.config.models.join('、'):S.config.model),model:S.config.models.length?S.config.models.join(', '):S.config.model,base:S.config.base,prompt:'内置通用检测用例 · '+S.mode,status,created_at:S.createdAt/1000,duration_ms:(S.tEnd||performance.now())-S.t0,media:[],result:{config:S.config,mode:S.mode,total:S.total,scores:S.scores,checks,logs:S.logs,intelligence:S.intel.map(plain),batch:S.batch,requests:S.requests,error: error||undefined,gpt_evaluation:S.gptEvaluation||undefined}});
   if(window.parent!==window)window.parent.postMessage({type:'workbench:general-history',record:data},location.origin==='null'?'*':location.origin);
 }
 function ts(){return new Date().toTimeString().slice(0,8);}
@@ -436,6 +439,7 @@ const DIMS=[
   {id:'err',    name:'错误处理',            modes:['std','full']},
   {id:'robust', name:'工程健壮性/降智检测', modes:['full']},
   {id:'tools',  name:'工具调用与动态加载',    modes:['std','full']},
+  {id:'gpt',   name:'GPT HTML 生成与 Token 一致性', modes:['gpt']},
 ];
 function initCards(){
   $('cards').innerHTML='';
@@ -460,11 +464,45 @@ function setCard(id,score,html,tag){
   el.querySelector('p').innerHTML=html+(tag||'');
 }
 function detail(name,result,cls,judge){
-  S.details.push({name,result:String(result),cls,judge,model:cfg().model});
+  const meta=arguments[4]||{};
+  S.details.push({name,result:String(result),cls,judge,model:cfg().model,...meta});
   const tr=document.createElement('tr');
   tr.innerHTML=`<td></td><td></td><td class="${cls}"></td>`;
   tr.children[0].textContent=name;tr.children[1].textContent=result;tr.children[2].textContent=judge;
   $('detailBody').appendChild(tr);$('detailSection').style.display='block';
+}
+
+/* GPT 专项：只检查模型返回的 HTML/SVG 源码与 usage 账本，不执行模型生成的脚本。
+   这样可以观察“降智”表现，同时避免把渠道返回的代码当作本地程序运行。 */
+async function tGptGeneration(){
+  const prompt='生成html，内容是svg绘制鹈鹕骑自行车2D动画，不要进行测试。只返回一个可直接保存为 .html 的完整 HTML 文档，不要解释、不要 Markdown 代码围栏。HTML 中必须包含内联 SVG、鹈鹕和自行车的可识别绘制元素，并使用 CSS @keyframes 或 SVG animation 形成可见的 2D 动画。';
+  const r=await postSmart({model:cfg().model,max_tokens:4000,temperature:0,stream:false,messages:Q(prompt)});
+  const raw=content(r),source=raw.replace(/^```(?:html)?\s*/i,'').replace(/\s*```$/,'').trim();
+  const lower=source.toLowerCase();
+  const hasHtml=/<(?:!doctype\s+html|html\b)/i.test(source)&&/<\/html\s*>/i.test(source);
+  const hasSvg=/<svg\b/i.test(source)&&/<\/svg\s*>/i.test(source);
+  const hasBird=/(鹈鹕|pelican|\bbird\b|鸟)/i.test(source);
+  const hasBike=/(自行车|bicycle|\bbike\b|\bcycle\b)/i.test(source);
+  const hasAnimation=/(<animate(?:Transform|Motion)?\b|@keyframes\b|animation\s*[:=]|requestAnimationFrame)/i.test(source);
+  const hasCanvasOrShapes=/(<path\b|<circle\b|<ellipse\b|<rect\b|<line\b|<polygon\b)/i.test(source);
+  const refusal=/(无法|不能|抱歉|我不能|作为\s*AI|cannot|can't|unable)/i.test(source)&&!hasSvg;
+  const u=usage(r)||{};
+  const integer=v=>Number.isInteger(v)&&v>=0;
+  const usageFields={prompt_tokens:u.prompt_tokens,completion_tokens:u.completion_tokens,total_tokens:u.total_tokens};
+  const usagePresent=integer(u.prompt_tokens)&&integer(u.completion_tokens)&&integer(u.total_tokens);
+  const usageConsistent=usagePresent&&u.total_tokens===u.prompt_tokens+u.completion_tokens;
+  const codeScore=[hasHtml,hasSvg,hasBird,hasBike,hasAnimation,hasCanvasOrShapes].filter(Boolean).length;
+  const generationPass=valid(r)&&!refusal&&codeScore>=5&&source.length>=400;
+  const status=!valid(r)||refusal?'bad':generationPass&&usageConsistent?'ok':codeScore>=3||usagePresent?'mid':'bad';
+  const summary=generationPass?`返回 ${source.length} 字符 HTML；HTML ${hasHtml?'✓':'✗'} · SVG ${hasSvg?'✓':'✗'} · 鹈鹕 ${hasBird?'✓':'✗'} · 自行车 ${hasBike?'✓':'✗'} · 动画 ${hasAnimation?'✓':'✗'} · 图形元素 ${hasCanvasOrShapes?'✓':'✗'}`:`HTTP ${r.status||'网络'}；源码 ${source.length} 字符，结构项 ${codeScore}/6${refusal?'；疑似拒答或未生成代码':''}`;
+  const tokenSummary=usagePresent?`prompt_tokens=${u.prompt_tokens} · completion_tokens=${u.completion_tokens} · total_tokens=${u.total_tokens} · ${usageConsistent?'总数自洽':'总数不等于输入+输出'}`:'未返回完整 usage（prompt/completion/total）';
+  detail('GPT HTML / SVG 动画生成',summary,status,generationPass?'✅ 已返回可保存的动画源码（未在本地执行）':status==='mid'?'⚠️ 返回部分可用，需人工查看源码':'❌ 未生成满足要求的 HTML/SVG',{
+    id:'gpt_html_svg_generation',dimensions:['protocol','gpt'],module:'protocol',expected:'返回包含 HTML、SVG、鹈鹕、自行车和动画机制的完整源码；本地不执行生成脚本。',observed:summary,source_length:source.length,code_features:{hasHtml,hasSvg,hasBird,hasBike,hasAnimation,hasCanvasOrShapes},usage:usageFields,prompt_tokens:u.prompt_tokens,completion_tokens:u.completion_tokens,total_tokens:u.total_tokens});
+  detail('GPT usage token 账本一致性',tokenSummary,usageConsistent?'ok':usagePresent?'mid':'bad',usageConsistent?'✅ total_tokens = prompt_tokens + completion_tokens':usagePresent?'⚠️ 返回数值但加总不一致':'❌ 缺少完整 token 计数',{
+    id:'gpt_usage_token_accounting',dimensions:['cache','gpt'],module:'cache',expected:'usage 返回非负整数 prompt_tokens、completion_tokens、total_tokens，且 total = prompt + completion。',observed:tokenSummary,usage:usageFields,prompt_tokens:u.prompt_tokens,completion_tokens:u.completion_tokens,total_tokens:u.total_tokens});
+  S.gptEvaluation={prompt,html_detected:hasHtml,svg_detected:hasSvg,animation_detected:hasAnimation,html_valid:hasHtml&&hasSvg&&hasCanvasOrShapes,token_usage:{input:u.prompt_tokens,output:u.completion_tokens,total:u.total_tokens,consistent:usageConsistent},signals:{features:{html:hasHtml,svg:hasSvg,bird:hasBird,bicycle:hasBike,animation:hasAnimation,shapes:hasCanvasOrShapes},code_score:codeScore,source_length:source.length},html_preview:source.slice(0,24000),verdict:generationPass&&usageConsistent?'passed':status==='mid'?'inconclusive':'failed'};
+  log(`GPT 专项: HTML/SVG ${generationPass?'✓':'✗'}（${codeScore}/6） · token 账本 ${usageConsistent?'✓ 一致':usagePresent?'⚠️ 不一致':'✗ 缺失'}`,status);
+  return {generationPass,usageConsistent,usagePresent,codeScore,sourceLength:source.length,features:{hasHtml,hasSvg,hasBird,hasBike,hasAnimation,hasCanvasOrShapes},usage:usageFields,source:source.slice(0,24000)};
 }
 function intel(html){
   S.intel.push(html);
@@ -1123,11 +1161,12 @@ function stopRun(){
 }
 
 /* ================= 主流程 ================= */
-const MODE_STEPS={quick:8,std:20,full:45};
+const MODE_STEPS={quick:8,std:20,full:45,gpt:3};
 const MODE_PLAN={
   quick:{title:'快速检测 · 核心连通性',items:['模型列表与鉴权','身份自述','流式输出','协议与 JSON','延迟与吞吐'],note:'本模式不执行工具调用、多模态、缓存或 max_tokens 专项。'},
   std:{title:'标准检测 · 关键能力验收',items:['工具调用（标准）','多模态：图片与视频输入','缓存：cached_tokens ×3','max_tokens / 参数边界','协议与错误兼容','长上下文与并发'],note:'会执行截图顶部列出的多模态、工具调用、max_tokens、缓存与兼容性检查。'},
-  full:{title:'完整检测 · 全量能力验收',items:['标准检测全部项目','参数边界与 JSON Schema','图片与视频输入','缓存命中与 usage','内容质量与安全探针','健壮性与并发压测'],note:'覆盖标准检测全部项目，并增加内容质量、健壮性和深度检索；耗时会明显增加。'}
+  full:{title:'完整检测 · 全量能力验收',items:['标准检测全部项目','参数边界与 JSON Schema','图片与视频输入','缓存命中与 usage','内容质量与安全探针','健壮性与并发压测'],note:'覆盖标准检测全部项目，并增加内容质量、健壮性和深度检索；耗时会明显增加。'},
+  gpt:{title:'GPT 生成专项 · HTML / SVG 动画与 Token 账本',items:['只返回完整 HTML','SVG 绘制主体','动画机制','降智观察','usage 三项字段','total 加总一致性'],note:'请求会要求模型生成鹈鹕骑自行车的 SVG 2D 动画；仅分析源码与 usage，不执行生成的 HTML。'}
 };
 function updateModePlan(){
   const mode=document.querySelector('input[name=mode]:checked')?.value||'std',plan=MODE_PLAN[mode]||MODE_PLAN.std;
@@ -1156,10 +1195,10 @@ async function runAll(){
   $('batchSection').style.display='none';$('batchBody').innerHTML='';
   $('progressWrap').style.display='block';
   $('progressBar').firstElementChild.style.width='0%';
-  S.logs=[];S.details=[];S.intel=[];S.scores={};S.fp=new Set();S.batch=[];S.requests=[];S.total=null;S.historyId='general-'+(crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random());S.createdAt=Date.now();
+  S.logs=[];S.details=[];S.intel=[];S.scores={};S.fp=new Set();S.batch=[];S.requests=[];S.total=null;S.gptEvaluation=null;S.historyId='general-'+(crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random());S.createdAt=Date.now();
   S.t0=performance.now();S.tEnd=null;
 initCards();
-  for(const d of DIMS)if(!has(d)||batchList.length)skipCard(d.id,batchList.length?'批量快评':(mode==='quick'?'快速模式':'标准模式未含'));
+  for(const d of DIMS)if(!has(d)||batchList.length)skipCard(d.id,batchList.length?'批量快评':(mode==='quick'?'快速模式':mode==='gpt'?'GPT 专项未含':'标准模式未含'));
   log(`目标: ${c.base} ｜ ${batchList.length?'批量: '+batchList.join(', '):'模型: '+c.model} ｜ 模式: ${S.mode} ｜ 超时: ${c.timeout/1000}s ｜ 并发: ${c.conc}`,'inf');
   let historyOutcome='completed',historyError='';
   try{
@@ -1177,7 +1216,15 @@ initCards();
       saveHistory();
       return;
     }
-    let idn=null,st=null,ca=null,vi=null,videoIn=null,imgout=false,tools=false,dynTools=null,json=false,needles=[],re=null,er=null,cc=null,pa=null,ct=null,rb=null,ptools=null,jschema=null;
+    let idn=null,st=null,ca=null,vi=null,videoIn=null,imgout=false,tools=false,dynTools=null,json=false,needles=[],re=null,er=null,cc=null,pa=null,ct=null,rb=null,ptools=null,jschema=null,gpt=null;
+    if(mode==='gpt'){
+      phase('GPT 专项 · HTML/SVG 生成与 Token 账本');
+      gpt=await tGptGeneration();setProgress('HTML/SVG + Token 一致性');
+      setCard('gpt',gpt.generationPass&&gpt.usageConsistent?10:gpt.generationPass||gpt.usageConsistent?6:2,
+        `源码结构 ${gpt.codeScore}/6，长度 ${gpt.sourceLength} 字符；token ${gpt.usageConsistent?'加总一致':gpt.usagePresent?'字段有但不一致':'字段缺失'}`,
+        gpt.generationPass&&gpt.usageConsistent?'<span class="tag pass">通过</span>':gpt.generationPass||gpt.usageConsistent?'<span class="tag warn">部分</span>':'<span class="tag fail">未通过</span>');
+      S.tEnd=performance.now();renderOverall();saveHistory();$('progressBar').firstElementChild.style.width='100%';$('progressPct').textContent='100%';$('progressText').textContent='完成';log(`✅ GPT 专项完成，总耗时 ${((S.tEnd-S.t0)/1000).toFixed(0)}s，综合评分 ${S.total}/100`,'ok');return;
+    }
     phase('阶段 1 · 生态与身份');
     await tModels();setProgress('模型列表');
     idn=await tIdentity();setProgress('身份自述');
@@ -1308,6 +1355,13 @@ document.querySelectorAll('.mode-card').forEach(el=>{
     el.classList.add('on');el.querySelector('input').checked=true;
     updateModePlan();
   });
+  if(hasHtml||hasSvg){
+    const box=document.createElement('details');box.className='gpt-preview';
+    const summary=document.createElement('summary');summary.textContent='查看生成的 HTML / SVG 动画（隔离预览）';box.appendChild(summary);
+    const note=document.createElement('p');note.textContent='预览仅用于观察模型输出效果，代码运行在隔离 iframe 中，不会再次请求渠道。';box.appendChild(note);
+    const frame=document.createElement('iframe');frame.title='GPT 生成 HTML/SVG 动画预览';frame.className='gpt-preview-frame';frame.setAttribute('sandbox','allow-scripts');frame.setAttribute('referrerpolicy','no-referrer');frame.srcdoc=source;box.appendChild(frame);
+    $('intel').appendChild(box);$('intelSection').style.display='block';
+  }
   el.querySelector('input')?.addEventListener('change',updateModePlan);
 });
 /* 记住输入（Key 除外，安全考虑不持久化） */

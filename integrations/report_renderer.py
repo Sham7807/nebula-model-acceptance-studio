@@ -144,6 +144,7 @@ STYLE = r'''
 
 # Shared with the portable HTML export.  Keep all reports on one visual system.
 STYLE += r'''
+.gpt-panel{margin-top:18px;background:#fff;border:1px solid var(--line);border-radius:16px;padding:20px}.gpt-grid{display:grid;grid-template-columns:1fr;gap:14px}.gpt-card{border:1px solid var(--line);border-radius:12px;background:#fbfcfa;padding:16px}.gpt-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}.gpt-card-head h3{margin:3px 0}.gpt-note{font-size:11px;color:var(--muted);margin-top:10px}.gpt-card .compact-table{margin-top:13px}.gpt-card .compact-table th{width:100px}.gpt-card .raw{margin-top:12px}@media(max-width:700px){.gpt-card-head{display:block}.gpt-card-head .badge{margin-top:8px}}
 .media{display:flex;flex-wrap:wrap;gap:13px;margin-top:14px}.media:empty{display:none}.media figure{margin:0;flex:1 1 280px;padding:10px;border:1px solid var(--line);border-radius:10px;background:#fbfcfa}.media img,.media video{display:block;width:100%;max-height:520px;object-fit:contain;border-radius:7px;background:#f0f3eb}.media audio{width:100%}.media figcaption{font-size:11px;margin-top:8px}.model-label{font:11px ui-monospace,monospace;color:var(--muted);margin-top:6px}
 '''
 
@@ -240,6 +241,34 @@ def render_report(result, directory=None):
     module_total=score.get('weighted_total',score.get('total',0));module_covered=score.get('weight_covered',0);module_weight_total=score.get('weight_total',0)
     module_html='<section class="module-panel" id="modules"><div class="module-head"><div><span class="index">MODULES / WEIGHTED SCORE</span><h2>验收模块总览</h2><p class="score-note">各套件使用统一模块结构；模块分数按权重计算，未覆盖模块不计入加权总分。</p></div><div class="module-total"><strong>'+esc(module_total)+'</strong><small>/ 100 · 已覆盖权重 '+esc(module_covered)+'% / '+esc(module_weight_total)+'%</small></div></div><div class="module-grid">'+''.join(module_cards)+'</div><table class="module-table"><thead><tr><th>模块</th><th>权重</th><th>本轮结论</th><th>计分说明</th></tr></thead><tbody>'+''.join('<tr><td><b>'+esc(m.get('label'))+'</b><br><small>'+prose(m.get('description'))+'</small></td><td class="weight">'+esc(m.get('weight'))+'%</td><td>'+badge(m.get('status'))+'<br><small>覆盖 '+esc(m.get('covered',0))+' 项 · 得分 '+esc('—' if m.get('status')=='not_covered' else m.get('score',0))+'</small></td><td><small>'+esc((m.get('counts') or {}).get('passed',0))+' 通过 / '+esc((m.get('counts') or {}).get('failed',0))+' 失败 / '+esc((m.get('counts') or {}).get('inconclusive',0))+' 无法判定</small></td></tr>' for m in (score.get('modules') or []))+'</tbody></table></section>'
     score_html=module_html+'<section class="score-panel" id="score"><div class="score-head"><div><span class="index">SCORE / DIMENSIONS</span><h2>能力评分与覆盖明细</h2><p class="score-note">'+esc(score.get('method',''))+' · '+esc(score_total_note)+'</p></div><div class="score-total">'+esc(score.get('total',0))+'<small> / 100</small></div></div><div class="score-grid">'+score_cards+'</div><ul class="recommendations">'+''.join('<li>'+prose(x)+'</li>' for x in (score.get('recommendations') or []))+'</ul></section>'
+    # Optional GPT degradation / HTML-SVG generation panel.  It is populated
+    # only when the browser client persisted raw.gpt_evaluation; absent fields
+    # stay explicitly unrecorded and are never inferred from a normal response.
+    gpt_rows = data.get('gpt_evaluations') or []
+    def gpt_value(value):
+        if value is None or value == '': return '未记录'
+        if isinstance(value, bool): return '是' if value else '否'
+        return str(value)
+    def gpt_badge(value):
+        if value is True: return '<span class="badge passed">通过</span>'
+        if value is False: return '<span class="badge failed">未通过</span>'
+        return '<span class="badge inconclusive">未记录</span>'
+    gpt_cards=[]
+    for item in gpt_rows:
+        item = item if isinstance(item, dict) else {}
+        usage = item.get('token_usage') if isinstance(item.get('token_usage'), dict) else {}
+        inp = usage.get('input', usage.get('prompt_tokens'))
+        out = usage.get('output', usage.get('completion_tokens'))
+        total_tokens = usage.get('total', usage.get('total_tokens'))
+        consistent = usage.get('consistent')
+        if consistent is None and isinstance(inp, (int,float)) and isinstance(out, (int,float)) and isinstance(total_tokens, (int,float)):
+            consistent = (inp + out == total_tokens)
+        signals = item.get('signals')
+        signal_text = json.dumps(redact(signals), ensure_ascii=False, indent=2) if isinstance(signals, (dict,list)) else gpt_value(signals)
+        generated = item.get('html') or item.get('svg') or item.get('output') or item.get('html_preview') or item.get('source')
+        generated_block = raw_block('HTML / SVG 生成结果（转义展示）', generated) if generated else '<p class="muted">没有保存生成的 HTML/SVG 正文；请展开请求证据查看响应原文。</p>'
+        gpt_cards.append('<article class="gpt-card"><div class="gpt-card-head"><div><span class="index">GPT / QUALITY CHECK</span><h3>'+esc(item.get('model') or '未记录模型')+'</h3><p class="muted">提示词：'+esc(item.get('prompt') or '生成 HTML，内容是 SVG 绘制鹈鹕骑自行车 2D 动画')+'</p></div>'+badge('passed' if item.get('verdict') in (True,'passed','通过') else 'failed' if item.get('verdict') in (False,'failed','失败') else 'inconclusive')+'</div><table class="compact-table"><tr><th>HTML 输出</th><td>'+gpt_badge(item.get('html_detected'))+'</td><th>SVG 输出</th><td>'+gpt_badge(item.get('svg_detected'))+'</td></tr><tr><th>动画特征</th><td>'+gpt_badge(item.get('animation_detected'))+'</td><th>HTML 可解析</th><td>'+gpt_badge(item.get('html_valid'))+'</td></tr><tr><th>输入 tokens</th><td>'+esc(gpt_value(inp))+'</td><th>输出 tokens</th><td>'+esc(gpt_value(out))+'</td></tr><tr><th>总 tokens</th><td>'+esc(gpt_value(total_tokens))+'</td><th>输入 + 输出 = 总数</th><td>'+gpt_badge(consistent)+'</td></tr></table><p class="gpt-note">Token 一致性只核对本次响应 usage 字段的算术关系，不代表 tokenizer、计费或模型身份准确。</p><details class="raw"><summary>检测信号与生成效果证据</summary><pre>'+esc(signal_text)+'</pre></details>'+generated_block+'</article>')
+    gpt_html='<section class="gpt-panel" id="gpt-quality"><div class="section-head"><div><span class="index">GPT / HTML · SVG · TOKEN</span><h2>GPT 生成质量与 Token 一致性</h2><p>针对“SVG 绘制鹈鹕骑自行车 2D 动画”提示词的可观察验收；不把一次生成等同于长期模型质量。</p></div></div><div class="gpt-grid">'+''.join(gpt_cards)+'</div></section>' if gpt_cards else ''
     request_count=(result.get('transport') or {}).get('request_count',len(requests))
     elapsed=(result.get('finished_at') or 0)-(result.get('started_at') or 0)
     elapsed_text=seconds(elapsed*1000) if elapsed>0 else '未记录'
@@ -315,8 +344,8 @@ def render_report(result, directory=None):
     return ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>'+esc(model+' · '+title)+'</title><style>'+STYLE+'</style></head><body><main>'
         +'<div class="masthead"><span class="brand">小小宇宙无敌</span><span class="eyebrow">CHANNEL ACCEPTANCE REPORT</span><button class="button no-print" id="print-report">打印 / 保存 PDF</button></div>'
         +'<header class="cover"><div class="cover-top"><span class="eyebrow">'+esc(title)+'</span>'+badge(result.get('status'))+'</div><h1>'+esc(model)+'</h1><p>'+esc(config.get('base') or '渠道地址未记录')+'</p><p class="run-id">RUN / '+esc(result.get('run_id') or '未记录')+'</p></header>'
-        +'<nav class="nav"><a href="#overview">结论总览</a><a href="#modules">验收模块</a><a href="#score">能力评分</a><a href="#setup">范围与配置</a><a href="#findings">发现的问题</a><a href="#checks">逐项检查</a><a href="#requests">请求证据</a><a href="#limits">判读说明</a></nav>'
-        +'<section id="overview" class="overview"><div class="verdict-line"><div><h2>'+esc(verdict.get('label',''))+'</h2><p>'+esc(verdict.get('detail',''))+'</p></div>'+badge(verdict.get('status'))+'</div><div class="metrics">'+metrics+'</div><div class="distribution" aria-hidden="true">'+distribution+'</div><p class="legend">本报告列出 '+str(len(checks))+' 个验收项 / 用例；'+('请求样本：通过 '+str(summary.get('passed',0))+'，未通过 '+str(summary.get('failed',0))+'，无法判定 '+str(summary.get('inconclusive',0))+'。' if cc else '浏览器检查结果与实际 HTTP 请求数分别统计。' if browser else '官方用例、附加传输检查与真实请求数分别统计。')+'</p></section>'+score_html
+        +'<nav class="nav"><a href="#overview">结论总览</a><a href="#modules">验收模块</a><a href="#score">能力评分</a>'+('<a href="#gpt-quality">GPT 质量</a>' if gpt_html else '')+'<a href="#setup">范围与配置</a><a href="#findings">发现的问题</a><a href="#checks">逐项检查</a><a href="#requests">请求证据</a><a href="#limits">判读说明</a></nav>'
+        +'<section id="overview" class="overview"><div class="verdict-line"><div><h2>'+esc(verdict.get('label',''))+'</h2><p>'+esc(verdict.get('detail',''))+'</p></div>'+badge(verdict.get('status'))+'</div><div class="metrics">'+metrics+'</div><div class="distribution" aria-hidden="true">'+distribution+'</div><p class="legend">本报告列出 '+str(len(checks))+' 个验收项 / 用例；'+('请求样本：通过 '+str(summary.get('passed',0))+'，未通过 '+str(summary.get('failed',0))+'，无法判定 '+str(summary.get('inconclusive',0))+'。' if cc else '浏览器检查结果与实际 HTTP 请求数分别统计。' if browser else '官方用例、附加传输检查与真实请求数分别统计。')+'</p></section>'+score_html+gpt_html
         +'<section id="setup" class="section"><div class="section-head"><div><span class="index">01 / SCOPE</span><h2>这次测了什么</h2></div></div><div class="grid-two"><div class="panel">'+info+'</div><div class="panel">'+scopes+'</div></div></section>'
         +'<section id="findings" class="section"><div class="section-head"><div><span class="index">02 / FINDINGS</span><h2>问题与影响</h2><p>依据本轮已保存的响应和断言整理；建议用于核对链路，不代替上游日志。</p></div></div>'+finding_html+'</section>'
         +'<section id="checks" class="section"><div class="section-head"><div><span class="index">03 / CHECKS</span><h2>逐项验收说明</h2></div><small id="visible-count"></small></div><div class="filters no-print">'

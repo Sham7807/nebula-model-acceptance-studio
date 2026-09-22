@@ -233,6 +233,23 @@ textarea { resize: vertical; line-height: 1.8; }
 .status.demo { background: #f0f0ea; color: #8a8d77; }
 .result-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 15px; font: 9px/1.6 ui-monospace, monospace; color: #97a28d; margin: 10px 20px 0 67px; }
 .result-meta>span+span:before { content: '·'; margin-right: 12px; color: #c0c9b7; }
+.token-usage { display:flex; align-items:center; flex-wrap:wrap; gap:7px; margin:13px 20px 0; padding:10px 12px; border:1px solid #e0e9dc; border-radius:10px; background:#f8faf5; font-size:11px; }
+.token-kicker { color:#8a9987; font:600 9px/1 ui-monospace,monospace; letter-spacing:.08em; }
+.token-stat { padding:3px 7px; border-radius:6px; background:#fff; border:1px solid #e5ece1; color:#526656; font-variant-numeric:tabular-nums; }
+.token-consistency { margin-left:auto; font-size:10px; color:#7e8d7c; }
+.token-consistency.pass { color:#397454; }
+.token-consistency.fail { color:#ad5548; font-weight:600; }
+.generated-html-preview { margin:14px 20px 0; border:1px solid #dfe8dc; border-radius:11px; background:#fbfcfa; overflow:hidden; }
+.generated-html-preview summary { cursor:pointer; padding:10px 12px; color:#28664e; font-size:12px; font-weight:600; }
+.preview-note { margin:0; padding:0 12px 9px; color:#8a9987; font-size:10px; }
+.html-preview-frame { display:block; width:100%; height:420px; border:0; border-top:1px solid #e3eae0; background:#fff; }
+.gpt-assessment { margin:14px 20px 0; padding:12px; border:1px solid #e0e9dc; border-radius:10px; background:#fbfcfa; }
+.gpt-assessment-title { display:block; font-size:11px; color:#526656; }
+.gpt-assessment-list { display:grid; grid-template-columns:repeat(5,1fr); gap:6px; margin-top:9px; }
+.gpt-assessment-row { display:flex; flex-direction:column; gap:3px; padding:7px 8px; border:1px solid #e5ece1; border-radius:7px; background:#fff; font-size:10px; color:#748373; }
+.gpt-assessment-row .pass,.gpt-assessment-row .fail { font-weight:600; }
+.gpt-assessment-row .pass { color:#397454; }.gpt-assessment-row .fail { color:#ad5548; }
+.gpt-assessment-note { margin-top:9px; color:#8a9987; font-size:10px; }
 .result-body { padding: 17px 20px 0; }
 .result-text { font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.9; max-height: 420px; overflow-y: auto; padding: 15px 16px; background: #f7f9f3; border-radius: 8px; margin-bottom: 16px; }
 .media-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr)); gap: 14px; }
@@ -370,6 +387,11 @@ dialog>p { font-size: 11px; color: var(--muted); }
   .result-name h3 { font-size: 12px; }
   .result-body { padding: 14px 14px 0; }
   .result-meta { margin-left: 14px; }
+  .token-usage,.generated-html-preview { margin-left:13px; margin-right:13px; }
+  .gpt-assessment { margin-left:13px; margin-right:13px; }
+  .gpt-assessment-list { grid-template-columns:repeat(2,1fr); }
+  .token-consistency { width:100%; margin-left:0; }
+  .html-preview-frame { height:320px; }
   .media-stage { padding: 10px; }
   .raw-details { padding: 0 14px; }
   .media-hint { display: none; }

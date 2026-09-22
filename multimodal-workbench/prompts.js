@@ -2,6 +2,7 @@
   'use strict';
   root.PromptLibrary={
     text:[
+      {id:'gpt-html-animation',name:'GPT 专项 · HTML/SVG 鹈鹕动画',goal:'检查 GPT 是否按要求生成可运行的 HTML/SVG 动画、是否出现降智或额外解释，并核对响应 usage 中的输入 / 输出 token。选择后直接填入专用提示词。',presets:['openai-chat','openai-responses'],tokenCheck:true,htmlPreview:true,prompt:'生成一个完整、可直接保存为 .html 打开的 HTML 文档，内容是使用 SVG 绘制的鹈鹕骑自行车 2D 动画。动画要有清晰的鹈鹕、车轮、脚踏和连续运动效果，页面打开后即可看到动画。只输出完整 HTML 源码，不要 Markdown 代码围栏，不要解释实现过程，不要调用工具，不要进行测试。'},
       {id:'evidence-conflict',name:'证据核对与冲突消解',goal:'核对版本取舍、原文引用和未知信息，避免补造事实',prompt:'只依据以下记录回答，不使用外部知识。记录 A（3 月 1 日）：青岚台灯定价 299 元，计划周五发货，负责人林岚。记录 B（3 月 2 日）：青岚台灯价格改为 259 元，发货日期待定；未变更负责人。记录 C（3 月 3 日）：确认青岚台灯改为周日发货，其他条款沿用最新记录。请列出最终价格、发货日期、负责人、保修年限，每项都引用支持它的原文；没有证据的写“记录未提供”。最后说明哪些旧信息已失效。'},
       {id:'code-boundary',name:'代码修复与边界',goal:'检查可执行代码、空输入、去重排序和输入是否被修改',prompt:'下面的 Python 函数存在问题：def unique_sorted(values): return list(set(values)).sort()。请修复，使其返回按升序排列的去重整数列表，且不修改传入的列表。只输出可执行的 Python 代码，包括函数和断言测试，不要 Markdown。测试必须覆盖：[3, 1, 3, -2] 返回 [-2, 1, 3]；[] 返回 []；[7, 7] 返回 [7]；调用后原始列表内容和顺序保持不变。'},
       {id:'reasoning',name:'逻辑推理',goal:'检查计算、约束遵循与答案一致性',prompt:'一家书店有科幻书 17 本，每本 23 元。顾客买下全部科幻书，使用满 300 减 40 的优惠券，再支付 12 元运费。请列出计算过程，并在最后单独一行输出最终实付金额。'},

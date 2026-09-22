@@ -142,6 +142,80 @@ function renderInputPreview(){
   $('parkedFiles').textContent=parked?`已暂存 ${referenceFiles.length} 个附件。当前任务不发送这些附件；切回支持参考文件的任务后可继续编辑或清空。`:'';
   updateScenarioRequirement();
 }
+// Extract provider usage in a protocol-neutral way.  OpenAI-compatible
+// gateways may call these fields prompt_tokens/completion_tokens while other
+// providers use input_tokens/output_tokens or nested token_usage objects.
+function extractUsage(raw){
+  const found=[];const seen=new WeakSet();
+  const number=v=>{const n=Number(v);return Number.isFinite(n)&&n>=0?n:null;};
+  const walk=(value,depth=0)=>{
+    if(!value||typeof value!=='object'||depth>10||seen.has(value))return;
+    seen.add(value);
+    if(Array.isArray(value)){value.forEach(item=>walk(item,depth+1));return;}
+    for(const [key,val] of Object.entries(value)){
+      if((key==='usage'||key==='token_usage'||key==='tokenUsage')&&val&&typeof val==='object'){
+        const input=number(val.prompt_tokens??val.promptTokens??val.input_tokens??val.inputTokens??val.input);
+        const output=number(val.completion_tokens??val.completionTokens??val.output_tokens??val.outputTokens??val.output);
+        const total=number(val.total_tokens??val.totalTokens??val.total);
+        const cached=number(val.prompt_tokens_details?.cached_tokens??val.input_tokens_details?.cached_tokens??val.cached_tokens??val.cachedTokens);
+        if(input!==null||output!==null||total!==null)found.push({input,output,total,cached,source:key});
+      }
+      walk(val,depth+1);
+    }
+  };
+  walk(raw);
+  return found.find(item=>item.input!==null||item.output!==null||item.total!==null)||null;
+}
+function renderTokenUsage(r){
+  const usage=extractUsage(r.raw),tokenScenario=r.scenarioId==='gpt-html-animation'||/鹈鹕骑自行车|SVG绘制.*2D动画/i.test(String(r.config?.prompt||''));
+  if(!usage&&!tokenScenario)return null;
+  const row=node('div','token-usage');row.append(node('span','token-kicker','TOKEN USAGE'));
+  const value=(v)=>v===null||v===undefined?'—':Number(v).toLocaleString('en-US');
+  if(!usage){row.append(node('span','token-stat','输入 —'),node('span','token-stat','输出 —'),node('span','token-stat','总计 —'),node('span','token-consistency pending','渠道未返回 usage，无法核对 token 一致性'));return row;}
+  row.append(node('span','token-stat','输入 '+value(usage.input)),node('span','token-stat','输出 '+value(usage.output)),node('span','token-stat','总计 '+value(usage.total)));
+  if(usage.cached!==null&&usage.cached!==undefined)row.append(node('span','token-stat','缓存 '+value(usage.cached)));
+  const hasParts=usage.input!==null&&usage.output!==null,computed=hasParts?usage.input+usage.output:null;
+  const consistent=usage.total===null||computed===null?null:usage.total===computed;
+  const note=consistent===null?'未提供完整 token 字段':consistent?'输入 + 输出 = 总计，usage 一致':'输入 + 输出 ≠ 总计，请核对渠道 usage 定义';
+  const status=node('span','token-consistency '+(consistent===true?'pass':consistent===false?'fail':'pending'),note);row.append(status);return row;
+}
+function htmlSource(text){
+  let source=String(text||'').trim();if(!source)return null;
+  source=source.replace(/^```(?:html)?\s*/i,'').replace(/\s*```$/,'').trim();
+  if(!/(?:<!doctype\s+html|<html\b|<svg\b|<body\b)/i.test(source))return null;
+  return source;
+}
+function renderHtmlPreview(r){
+  const prompt=String(r.config?.prompt||'');
+  if(r.scenarioId!=='gpt-html-animation'&&!/鹈鹕骑自行车|SVG绘制.*2D动画/i.test(prompt))return null;
+  const source=htmlSource(r.text);if(!source)return null;
+  const details=document.createElement('details');details.className='generated-html-preview';
+  const summary=document.createElement('summary');summary.textContent='预览生成的 HTML / SVG 动画（沙箱）';details.append(summary);
+  const note=node('p','preview-note','仅用于查看模型输出效果；预览运行在隔离 iframe 中，不会再次发起渠道请求。');details.append(note);
+  const frame=document.createElement('iframe');frame.className='html-preview-frame';frame.title='模型生成的 HTML / SVG 动画预览';frame.setAttribute('sandbox','allow-scripts');frame.setAttribute('referrerpolicy','no-referrer');frame.srcdoc=source;details.append(frame);return details;
+}
+function renderGptAnimationAssessment(r){
+  const prompt=String(r.config?.prompt||'');if(r.scenarioId!=='gpt-html-animation'&&!/鹈鹕骑自行车|SVG绘制.*2D动画/i.test(prompt))return null;
+  const output=String(r.text||'').trim(),clean=output.replace(/^```(?:html)?\s*/i,'').replace(/\s*```$/,'').trim();
+  const checks=[
+    ['HTML 文档',/(?:<!doctype\s+html|<html\b|<body\b)/i.test(clean)],
+    ['SVG 绘制',/<svg\b/i.test(clean)],
+    ['动画效果',/(?:<animate\b|<animateTransform\b|@keyframes\b|animation(?:-name|-duration)?\s*:|requestAnimationFrame\s*\(|setInterval\s*\()/i.test(clean)],
+    ['未使用 Markdown 围栏',!/^```|```$/m.test(output)],
+    ['未出现拒答',!/抱歉|我不能|无法完成|不能帮助|拒绝/i.test(clean)]
+  ];
+  const box=node('div','gpt-assessment');box.append(node('b','gpt-assessment-title','GPT 专项判读 · HTML/SVG 降智检查'));
+  const list=node('div','gpt-assessment-list');checks.forEach(([label,ok])=>{const row=node('div','gpt-assessment-row');row.append(node('span','',label),node('span',ok?'pass':'fail',ok?'通过':'需核对'));list.append(row);});box.append(list);
+  const passed=checks.filter(([,ok])=>ok).length;box.append(node('p','gpt-assessment-note',`启发式结果：${passed}/${checks.length} 项符合预期。请结合下方沙箱预览人工确认鹈鹕、自行车、车轮和连续运动是否真的绘制出来。`));return box;
+}
+function buildGptEvaluation(r,c){
+  const prompt=String(c?.prompt||'');if(!/鹈鹕骑自行车|SVG绘制.*2D动画/i.test(prompt))return null;
+  const output=String(r.text||'').trim(),clean=output.replace(/^```(?:html)?\s*/i,'').replace(/\s*```$/,'').trim();
+  const hasHtml=/(?:<!doctype\s+html|<html\b|<body\b)/i.test(clean),hasSvg=/<svg\b/i.test(clean),hasAnimation=/(?:<animate\b|<animateTransform\b|@keyframes\b|animation(?:-name|-duration)?\s*:|requestAnimationFrame\s*\(|setInterval\s*\()/i.test(clean),noFence=!/^```|```$/m.test(output),notRefusal=!/抱歉|我不能|无法完成|不能帮助|拒绝/i.test(clean);
+  const usage=extractUsage(r.raw);let consistent=null;if(usage?.input!==null&&usage?.output!==null&&usage?.total!==null)consistent=usage.input+usage.output===usage.total;
+  const checks={hasHtml,hasSvg,hasAnimation,noFence,notRefusal};
+  return {prompt,html_detected:hasHtml,svg_detected:hasSvg,animation_detected:hasAnimation,html_valid:hasHtml&&hasSvg,token_usage:usage?{input:usage.input,output:usage.output,total:usage.total,cached:usage.cached,consistent}:null,signals:checks,source:clean.slice(0,16000),verdict:hasHtml&&hasSvg&&hasAnimation&&noFence&&notRefusal&&consistent!==false?'passed':'failed'};
+}
 function updateScenarioRequirement(){
   const min=Number(currentPromptScenario()?.requiresImages||0),imageCount=acceptsReferenceFiles()?referenceFiles.filter(file=>file.type.startsWith('image/')||/\.(png|jpe?g|webp|gif|avif|bmp)$/i.test(file.name)).length:0;
   $('scenarioRequirement').textContent=min&&imageCount<min?`此场景建议至少上传 ${min} 张图片，当前参与请求 ${imageCount} 张。`:'';
@@ -511,7 +585,8 @@ async function run(resumeId=null){
         log(`${c.model} · ${result.error}`,signal.aborted?'info':'error');
       }
       if(result.taskId)$('taskId').value=String(result.taskId);
-      const rec={...result,id:crypto.randomUUID?crypto.randomUUID():String(Date.now()+Math.random()),kind,model:c.model,preset:selectedPreset().label,createdAt:new Date().toISOString(),config:safeSnapshot(c),elapsedMs:result.elapsedMs??performance.now()-t};
+      const rec={...result,id:crypto.randomUUID?crypto.randomUUID():String(Date.now()+Math.random()),kind,model:c.model,preset:selectedPreset().label,scenarioId:$('promptScenario').value||null,createdAt:new Date().toISOString(),config:safeSnapshot(c),elapsedMs:result.elapsedMs??performance.now()-t};
+      const gptEvaluation=buildGptEvaluation(rec,c);if(gptEvaluation)rec.gpt_evaluation=gptEvaluation;
       addRecord(rec);saveBasicHistory(rec,c,startedAt,resumeId);if(signal.aborted)break;
     }
   }finally{setBusy(false);}
@@ -523,7 +598,7 @@ function saveBasicHistory(r,c,startedAt,resumeId){
   const identity=prior||{id:r.id,createdAt:startedAt,duration:0,requests:[]};
   identity.duration+=r.elapsedMs||0;identity.requests.push(...scrub(r.requests||[]));if(taskKey)historyTasks.set(taskKey,identity);
   const media=(r.media||[]).map(m=>({type:m.kind,mime:m.mime,url:m.url}));
-  const safeResult=scrub({...r,elapsedMs:identity.duration,requests:identity.requests,media:(r.media||[]).map(m=>({kind:m.kind,mime:m.mime,storage:'见记录中的媒体文件'}))});
+  const safeResult=scrub({...r,elapsedMs:identity.duration,requests:identity.requests,media:(r.media||[]).map(m=>({kind:m.kind,mime:m.mime,storage:'见记录中的媒体文件'})),gpt_evaluation:r.gpt_evaluation});
   const container=$('results').querySelector('[data-id="'+r.id+'"] .history-save-status');
   return window.HistoryCapture.record({client_id:identity.id,kind:r.kind,source:'basic',title:kinds[r.kind].name+'测试 · '+r.model,model:r.model,base:c.base,prompt:c.prompt,status:({success:'passed',error:'failed',stopped:'cancelled',pending:'pending'})[r.status]||'inconclusive',created_at:identity.createdAt/1000,duration_ms:identity.duration,result:safeResult,media},{key:c.key,container});
 }
@@ -577,6 +652,9 @@ function renderRecord(r,prepend=false){
   if(r.error){body.append(node('div','result-error',scrub(r.error)));const diagnostic=diagnoseResult(r);if(diagnostic)body.append(diagnostic);}
   if(r.status==='pending')body.append(node('p','task-note','任务已提交但尚未获取成品。可用任务 ID 继续查询，不需要再次生成。'));
   if(r.text)body.append(node('div','result-text',scrub(r.text)));
+  const tokenUsage=renderTokenUsage(r);if(tokenUsage)body.append(tokenUsage);
+  const gptAssessment=renderGptAnimationAssessment(r);if(gptAssessment)body.append(gptAssessment);
+  const htmlPreview=renderHtmlPreview(r);if(htmlPreview)body.append(htmlPreview);
   if(r.media?.length){const grid=node('div','media-grid');r.media.forEach((m,i)=>grid.append(mediaItem(m,i)));body.append(grid);}
   if(r.status==='unrecognized'&&(r.text||r.media?.length))body.append(node('p','task-note','未获得与所选测试类型匹配的有效输出，请检查下方原始响应。'));
   if(!r.text&&!r.media?.length&&!r.error&&r.status!=='pending')body.append(node('p','task-note','响应中没有识别到可展示内容，请展开原始响应核对字段和状态。'));

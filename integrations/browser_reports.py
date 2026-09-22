@@ -26,6 +26,71 @@ def _number(value, default=0):
     except (ValueError, TypeError): return default
 
 
+def _gpt_evaluation(record, result):
+    """Return the optional GPT degradation/HTML-SVG evaluation evidence.
+
+    The browser client may place this under ``raw.gpt_evaluation`` on either
+    the history record or its result payload.  Keeping this extraction here
+    lets the unified report renderer display the same evidence for old and
+    new records without inventing values.
+    """
+    for source in (_dict(record).get('raw'), _dict(result).get('raw'),
+                   _dict(record).get('gpt_evaluation'), _dict(result).get('gpt_evaluation')):
+        if not isinstance(source, dict):
+            continue
+        # ``raw`` wraps the payload, while the history publisher stores the
+        # evaluation directly under result.gpt_evaluation.  Accept both.
+        value = source.get('gpt_evaluation') if isinstance(source.get('gpt_evaluation'), dict) else source
+        if isinstance(value, dict) and any(key in value for key in ('html_detected', 'svg_detected', 'animation_detected', 'token_usage', 'usage', 'code_features')):
+            return deepcopy(value)
+    # Backward-compatible fallback: early clients only persisted the two
+    # detail rows returned by tGptGeneration.  Reconstruct a compact
+    # evaluation from those rows instead of losing the evidence at export.
+    generated = {}; accounting = {}
+    for check in _list(_dict(result).get('checks')):
+        check = _dict(check)
+        identity = str(check.get('id') or check.get('name') or '')
+        if 'gpt_html_svg_generation' in identity:
+            generated = check
+        elif 'gpt_usage_token_accounting' in identity:
+            accounting = check
+    if generated or accounting:
+        features = _dict(generated.get('code_features'))
+        usage = _dict(accounting.get('usage') or generated.get('usage'))
+        return {'prompt': generated.get('prompt'),
+                'html_detected': features.get('hasHtml'),
+                'svg_detected': features.get('hasSvg'),
+                'animation_detected': features.get('hasAnimation'),
+                'html_valid': generated.get('html_valid'),
+                'token_usage': usage,
+                'signals': generated.get('observed') or generated.get('result'),
+                'source': generated.get('source') or generated.get('html') or generated.get('output'),
+                'verdict': 'passed' if generated.get('status') == 'passed' and accounting.get('status') == 'passed' else 'failed' if generated.get('status') == 'failed' or accounting.get('status') == 'failed' else None}
+    return None
+
+
+def _gpt_summary(value):
+    value = _dict(value)
+    usage = _dict(value.get('token_usage') or value.get('usage'))
+    return {
+        'prompt': value.get('prompt'),
+        'html_detected': value.get('html_detected'),
+        'svg_detected': value.get('svg_detected'),
+        'animation_detected': value.get('animation_detected'),
+        'html_valid': value.get('html_valid'),
+        'token_usage': usage,
+        'signals': value.get('signals'),
+        'verdict': value.get('verdict'),
+        # Keep a bounded source/preview when the client saved it.  The report
+        # renderer escapes this text and never executes it.
+        'html': value.get('html'),
+        'svg': value.get('svg'),
+        'output': value.get('output'),
+        'html_preview': value.get('html_preview'),
+        'source': value.get('source'),
+    }
+
+
 def dimensions_for(name):
     import re
     name = str(name)
@@ -66,15 +131,19 @@ def normalize_browser_report(payload):
     if records is None and payload.get('kind'): records = [payload]
     if not isinstance(records, list) or not records or len(records) > 500: raise ValueError('请提供 1 至 500 条测试记录')
     cases, requests, models, bases, originals = [], [], [], [], []
+    gpt_evaluations = []
     started, finished = [], []
     general = False
     for index, record in enumerate(records):
         if not isinstance(record, dict): raise ValueError('测试记录格式无效')
         result = _dict(record.get('result')) or record
         kind = record.get('kind') or 'text'; general = general or kind == 'general'
+        gpt_evaluation = _gpt_evaluation(record, result)
         config = _dict(result.get('config'))
         model = str(record.get('model') or config.get('model') or '未记录模型')
         base = str(record.get('base') or config.get('base') or '未记录')
+        if gpt_evaluation:
+            gpt_evaluations.append({'model': model, **_gpt_summary(gpt_evaluation)})
         if model not in models: models.append(model)
         if base not in bases: bases.append(base)
         created = _number(record.get('created_at'), time.time())
@@ -86,7 +155,7 @@ def normalize_browser_report(payload):
             requests.append(request_record(raw, identity, model, prefix if kind != 'general' else ''))
             record_requests.append(identity)
         if kind == 'general':
-            originals.append({'model': model, 'total': result.get('total'), 'scores': result.get('scores'), 'batch': result.get('batch'), 'logs': result.get('logs')})
+            originals.append({'model': model, 'total': result.get('total'), 'scores': result.get('scores'), 'batch': result.get('batch'), 'logs': result.get('logs'), 'gpt_evaluation': _gpt_summary(gpt_evaluation) if gpt_evaluation else None})
             for ci, check in enumerate(_list(result.get('checks'))):
                 if not isinstance(check, dict): continue
                 name = str(check.get('name') or check.get('title') or '通用检查')
@@ -96,12 +165,28 @@ def normalize_browser_report(payload):
                 observed = check.get('result', check.get('observed'))
                 if fields:
                     observed = '%s\n实测字段：%s' % (observed or '已记录检查结果', json.dumps(fields, ensure_ascii=False, default=str))
+                metadata = {'dimensions': dimensions_for(name), 'module': dimensions_for(name)[0]}
+                if gpt_evaluation:
+                    metadata['gpt_evaluation'] = _gpt_summary(gpt_evaluation)
+                    # Keep the two GPT assertions attributable: HTML/SVG
+                    # structure belongs to protocol/multimodal, while the
+                    # arithmetic usage check belongs only to cache/usage.
+                    gpt_case = 'token' in (name + ' ' + str(check.get('id'))).lower() or 'usage' in (name + ' ' + str(check.get('id'))).lower()
+                    metadata['dimensions'] = ['cache'] if gpt_case else ['protocol', 'multimodal']
+                    metadata['module'] = 'cache' if gpt_case else 'protocol'
+                    usage = _dict(gpt_evaluation.get('token_usage') or gpt_evaluation.get('usage'))
+                    details = []
+                    for label, key in [('HTML', 'html_detected'), ('SVG', 'svg_detected'), ('动画', 'animation_detected'), ('HTML 有效性', 'html_valid')]:
+                        if key in gpt_evaluation: details.append('%s=%s' % (label, gpt_evaluation.get(key)))
+                    if usage:
+                        details.append('token input=%s output=%s total=%s consistent=%s' % (usage.get('input', usage.get('prompt_tokens', '—')), usage.get('output', usage.get('completion_tokens', '—')), usage.get('total', usage.get('total_tokens', '—')), usage.get('consistent', '—')))
+                    if details: observed = '%s\nGPT 专项实测：%s' % (observed or '已记录检查结果', '；'.join(details))
                 cases.append({'id': '%s-check-%s' % (prefix, ci+1), 'title': '%s · %s' % (check_model, name), 'model': check_model,
                     'status': status, 'method': '运行通用检测内置“%s”用例，并保留本次返回的判定。' % name,
-                    'expected': check.get('expected') or '符合该内置用例的输出与协议断言；旧记录未保存独立预期值，详见原始判定。',
-                    'observed': observed, 'meaning': check.get('judge') or '依据保存的原始判定；单项不能推导所有能力。',
+                    'expected': check.get('expected') or ('返回可执行的 HTML/SVG 鹈鹕骑自行车 2D 动画，并提供可核对的 input/output/total token usage。' if gpt_evaluation else '符合该内置用例的输出与协议断言；旧记录未保存独立预期值，详见原始判定。'),
+                    'observed': observed, 'meaning': check.get('judge') or ('GPT 专项只评价本次生成中可观察的 HTML/SVG 结构与 token 字段一致性，不等同于模型身份认证或内容审美评分。' if gpt_evaluation else '依据保存的原始判定；单项不能推导所有能力。'),
                     'next_step': '优先按模型和请求地址核对失败项，再重跑该专项。' if status != 'passed' else '此结论仅适用于当前样本；可增加输入、并发和重复测试。',
-                    'metadata': {'dimensions': dimensions_for(name), 'module': dimensions_for(name)[0]}, 'raw': check, 'request_ids': []})
+                    'metadata': metadata, 'raw': check, 'request_ids': []})
         else:
             status = STATUS.get(record.get('status') or result.get('status'), 'inconclusive')
             title = result.get('preset') or (KINDS.get(kind, kind) + '基础测试')
@@ -125,7 +210,7 @@ def normalize_browser_report(payload):
             'summary': {'total': len(cases), 'completed': len(cases), **counts},
             'verdict': {'status': overall, 'label': '存在失败或证据不足' if overall != 'passed' else '本轮已执行检查通过',
                         'detail': '基础请求结果只代表本轮实际观察；专项能力需查看逐项覆盖。' if overall == 'passed' else '请按模型和请求证据查看失败、取消或无法判定项。'},
-            'original_results': originals,
+            'original_results': originals, 'gpt_evaluations': gpt_evaluations,
             'transport': {'request_count': len(requests)}}
 
 
@@ -138,4 +223,5 @@ def report_data(result):
             'scope': ['本报告仅汇总实际保存的 %s 个检查结果和 %s 条 HTTP 观察。' % (len(checks), len(result['browser_requests'])),
                       '每项标题与请求证据保留所属模型；多模型汇总不混用某一个模型的结果。'],
             'focus': ['通用检测关注协议、多模态理解、工具、参数、缓存及稳定性；实际覆盖以逐项记录为准。' if general else '基础测试关注接口连通、请求参数、文本或媒体返回及错误诊断。'],
-            'limitations': LIMITS, 'findings': _findings(checks, result), 'score': _report_score(checks, result)}
+            'limitations': LIMITS, 'findings': _findings(checks, result), 'score': _report_score(checks, result),
+            'gpt_evaluations': result.get('gpt_evaluations') or []}

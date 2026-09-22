@@ -66,3 +66,27 @@ class ReportTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+class GPTReportTests(unittest.TestCase):
+    def test_gpt_quality_and_token_panel_is_rendered_from_saved_evidence(self):
+        payload = {'records': [{'kind': 'general', 'model': 'gpt-test', 'base': 'https://relay.invalid/v1',
+            'result': {'checks': [{'name': 'GPT · HTML/SVG 降智与 Token 一致性', 'status': 'passed', 'result': '已生成'}],
+                       'raw': {'gpt_evaluation': {'prompt': '生成html，内容是svg绘制鹈鹕骑自行车2D动画',
+                           'html_detected': True, 'svg_detected': True, 'animation_detected': True, 'html_valid': True,
+                           'token_usage': {'input': 10, 'output': 50, 'total': 60, 'consistent': True},
+                           'signals': ['svg', 'requestAnimationFrame'], 'verdict': 'passed'}}}}]}
+        from browser_reports import normalize_browser_report
+        html = render_report(normalize_browser_report(payload)).decode()
+        self.assertIn('GPT 生成质量与 Token 一致性', html)
+        self.assertIn('输入 + 输出 = 总数', html)
+        self.assertIn('requestAnimationFrame', html)
+        self.assertIn('gpt-quality', html)
+
+    def test_gpt_missing_tokens_are_explicitly_unrecorded(self):
+        payload = {'records': [{'kind': 'general', 'model': 'gpt-test', 'result': {
+            'checks': [{'name': 'GPT 专项', 'status': 'inconclusive'}],
+            'raw': {'gpt_evaluation': {'html_detected': True, 'svg_detected': False}}}}]}
+        from browser_reports import normalize_browser_report
+        html = render_report(normalize_browser_report(payload)).decode()
+        self.assertIn('输入 tokens</th><td>未记录', html)
+        self.assertIn('SVG 输出</th><td><span class="badge failed">未通过', html)
