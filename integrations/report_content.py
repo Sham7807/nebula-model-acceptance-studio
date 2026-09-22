@@ -638,6 +638,13 @@ def _module_id_for_check(check, result):
     suite = _text(_dict(result).get("suite"))
     check_id = _text(check.get("id"))
     dims = set(_list(metadata.get("dimensions")) or _list(check.get("dimensions")))
+    # These IDs are stable across standalone and batch reports.  Resolve them
+    # before looking at the parent suite so a CCMax child in a multi-model
+    # batch keeps its security/parameter evidence in the right card.
+    if check_id in {"prompt_injection", "instruction_hierarchy", "behavioral_consistency"}:
+        return "security"
+    if check_id in {"parameter_validation"}:
+        return "parameters"
     if suite in ("ccmax", "ccmax_acceptance"):
         if check_id in {"tool_stream"} or "tools" in dims:
             return "tools"
@@ -661,8 +668,11 @@ def _module_id_for_check(check, result):
 
 def _report_modules(checks, result):
     modules = []
+    configured = _dict(result).get("enabled_modules")
+    enabled = set(configured) if isinstance(configured, (list, tuple, set)) and configured else None
     for module_id, label, weight, description in _module_preset(result):
-        matched = [check for check in checks if _module_id_for_check(check, result) == module_id]
+        disabled = enabled is not None and module_id not in enabled
+        matched = [] if disabled else [check for check in checks if _module_id_for_check(check, result) == module_id]
         matched = [check for check in matched if not check.get("local_only") and check.get("applicable") is not False]
         counts = _counts(matched)
         observed = [check for check in matched if check.get("status") in ("passed", "failed", "inconclusive")]
@@ -679,7 +689,7 @@ def _report_modules(checks, result):
             status = "passed"
         modules.append({"id": module_id, "label": label, "weight": weight, "description": description,
                         "score": score, "max_score": 100, "status": status, "covered": covered,
-                        "counts": counts, "check_ids": [_text(check.get("id")) for check in matched]})
+                        "counts": counts, "check_ids": [_text(check.get("id")) for check in matched], "disabled": disabled})
     covered = [module for module in modules if module["covered"]]
     weight_total = sum(module["weight"] for module in covered)
     weighted_total = round(sum(module["score"] * module["weight"] for module in covered) / weight_total) if weight_total else 0
