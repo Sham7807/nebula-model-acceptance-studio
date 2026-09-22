@@ -595,7 +595,7 @@ REPORT_DIMENSIONS = (
 # as a silent pass.
 MODULE_PRESETS = {
     "kvv": (
-        ("contract", "K3 契约预检", 40, "连通性、响应格式、参数校验、reasoning/thinking、流式收尾与鉴权错误。"),
+        ("protocol", "K3 契约预检", 40, "连通性、响应格式、参数校验、reasoning/thinking、流式收尾与鉴权错误。"),
         ("max_tokens", "max_tokens 生效性", 15, "检查长度上限是否透传、completion_tokens 与 finish_reason 是否一致。"),
         ("tools", "工具调用验证", 15, "覆盖顶层工具、动态工具、tool_choice 和 arguments 结构。"),
         ("cache", "缓存真伪判别", 15, "对比重复请求 usage/cached_tokens 与响应稳定性，区分字段存在和真实命中。"),
@@ -656,10 +656,7 @@ def _module_id_for_check(check, result):
         return "cache"
     if "multimodal" in dims:
         return "multimodal"
-    # KVV's first card is intentionally broader than the technical
-    # ``protocol`` dimension: all ordinary contract/parameter/response checks
-    # belong to that weighted card.
-    return "contract" if suite not in ("browser_report",) else "protocol"
+    return "protocol"
 
 
 def _report_modules(checks, result):
