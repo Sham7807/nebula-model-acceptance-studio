@@ -618,11 +618,17 @@ async function exportReport(){
     // Service mode uses the same server renderer as CCMax/KVV, so all exported
     // reports share one visual language and evidence semantics.
     if(/^https?:$/i.test(location.protocol) && window.HistoryCapture){
-      const payload={records:reportRecords.map(r=>({...r,result:{...r,requests:r.requests||[],raw:r.raw}})),exported_at:Date.now()};
-      const response=await fetch('/api/reports',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Workbench-Token':(await fetch('/api/session',{credentials:'same-origin'}).then(r=>r.json())).token},body:JSON.stringify(payload)});
-      if(!response.ok)throw new Error((await response.json().catch(()=>({}))).error||'统一报告服务暂不可用');
-      const blob=await response.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;
-      const modelPart=String(reportRecords.map(r=>r.model).filter(Boolean).join('、')||'未命名模型').replace(/[\\/:*?"<>|\u0000-\u001f]+/g,'-').slice(0,80);const now=new Date(),pad=v=>String(v).padStart(2,'0');a.download=`测试报告-${modelPart}-${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.html`;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);notify('统一样式报告已下载');return;
+      try {
+        const payload={records:reportRecords.map(r=>({...r,result:{...r,requests:r.requests||[],raw:r.raw}})),exported_at:Date.now()};
+        const response=await fetch('/api/reports',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Workbench-Token':(await fetch('/api/session',{credentials:'same-origin'}).then(r=>r.json())).token},body:JSON.stringify(payload)});
+        if(!response.ok)throw new Error((await response.json().catch(()=>({}))).error||'统一报告服务暂不可用');
+        const blob=await response.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;
+        const modelPart=String(reportRecords.map(r=>r.model).filter(Boolean).join('、')||'未命名模型').replace(/[\\/:*?"<>|\u0000-\u001f]+/g,'-').slice(0,80);const now=new Date(),pad=v=>String(v).padStart(2,'0');a.download=`测试报告-${modelPart}-${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.html`;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);notify('统一样式报告已下载');return;
+      } catch (serviceError) {
+        // Continue with the portable renderer below. This keeps report export
+        // usable during a transient session/service outage.
+        notify('统一报告服务暂不可用，已切换为本地统一报告：'+(serviceError.message||'未知错误'));
+      }
     }
     // Keep portable exports on the same renderer as service/acceptance reports.
     // This branch runs when the page is opened from file:// or the service is
