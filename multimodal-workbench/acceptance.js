@@ -2,7 +2,7 @@
 (function(){
 'use strict';
 const el=id=>document.getElementById(id),make=(tag,cls,text)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;};
-let modelFetchEpoch=0,modelCatalog=[];
+let modelFetchEpoch=0,modelCatalog=[],acceptanceModelPicker=null;
 let selected='general',runningSuite='',token='',runId='',active=false,pollTimer=null,serviceReady=false;
 let serviceState='connecting',kvvRevision='';
 const suiteRuns=new Map(),historyNotified=new Set();
@@ -28,9 +28,14 @@ function updateServiceBadge(){
   badge.textContent='本地验收服务未连接';badge.title='请检查本地验收服务是否运行，恢复服务后刷新页面重新连接。';
  }
 }
+function selectedAcceptanceModels(){
+ const ids=acceptanceModelPicker?.getSelected?.()||[];const typed=el('acceptanceModel').value.trim();
+ return [...new Set((ids.length?ids:[typed]).map(v=>String(v||'').trim()).filter(Boolean))];
+}
 function config(){
  const requestFormat=selected==='ccmax'?el('acceptanceFormat').value:el('acceptanceThinkMode').value==='openai'?'openai':'native';
- return {suite:selected==='ccmax'?'ccmax':el('acceptanceScope').value,base:el('acceptanceBase').value.trim(),key:el('acceptanceKey').value.trim(),model:el('acceptanceModel').value.trim(),timeout:Number(el('acceptanceTimeout').value),signature_samples:Number(el('acceptanceSignature').value),sse_samples:Number(el('acceptanceSse').value),concurrency:2,auth:requestFormat==='openai'?'bearer':el('acceptanceAuth').value,request_format:requestFormat,think_mode:el('acceptanceThinkMode').value,thinking:!['none','openai'].includes(el('acceptanceThinkMode').value),advanced:selected==='ccmax'};
+ const models=selectedAcceptanceModels();
+ return {suite:selected==='ccmax'?'ccmax':el('acceptanceScope').value,base:el('acceptanceBase').value.trim(),key:el('acceptanceKey').value.trim(),model:models[0]||el('acceptanceModel').value.trim(),models,timeout:Number(el('acceptanceTimeout').value),signature_samples:Number(el('acceptanceSignature').value),sse_samples:Number(el('acceptanceSse').value),concurrency:2,auth:requestFormat==='openai'?'bearer':el('acceptanceAuth').value,request_format:requestFormat,think_mode:el('acceptanceThinkMode').value,thinking:!['none','openai'].includes(el('acceptanceThinkMode').value),advanced:selected==='ccmax'};
 }
 function updatePlan(){
  const cc=selected==='ccmax',full=el('acceptanceScope').value==='kvvfull',openai=cc?el('acceptanceFormat').value==='openai':el('acceptanceThinkMode').value==='openai';
@@ -135,7 +140,8 @@ function render(data,id){
  el('acceptanceSummary').textContent=summary?`${data.suite==='ccmax'?'请求样本':'用例'}：通过 ${summary.passed||0} · 未通过 ${summary.failed||0} · 跳过 ${summary.skipped||0} · 未覆盖 ${summary.not_covered||0} · 无法判定 ${summary.inconclusive||0}`:'';
  const actualRequests=result?.transport?.request_count??data.request_count;if(actualRequests!==undefined)el('acceptanceSummary').textContent+=` · 实际 API 请求 ${actualRequests} 次`;
  if(result?.error)message(result.error,true);
- const events=data.events||[],cases=result?(result.cases||result.checks||[]):latestEventCases(events);
+ const events=data.events||[];
+ const cases=result?.results?result.results.map(item=>({id:'batch-'+item.model,label:item.model+' · '+(item.status||'未完成'),status:item.status==='passed'?'passed':item.status==='failed'?'failed':'inconclusive',detail:item.result?.verdict?.detail||'该模型独立子任务已保存，可下载总报告查看逐项证据。'})):(result?(result.cases||result.checks||[]):latestEventCases(events));
  const transportCases=(result?.transport?.checks||[]).filter(x=>x.status!=='passed');el('acceptanceCases').replaceChildren(...cases.slice(-700).map(renderCase),...transportCases.map(renderCase));
  renderHistoryState(data,id);
  el('acceptanceLog').textContent=result?.log||events.slice(-20).map(e=>e.message||e.case?.id||`${e.completed??''}${e.total?' / '+e.total:''}`).join('\n');
@@ -154,10 +160,10 @@ async function poll(){
 }
 async function start(){
  if(restoring)return;
- const c=config();if(!c.base||!c.key||!c.model){message('请填写渠道地址、API Key 和模型 ID。',true);return;}
+ const c=config();if(!c.base||!c.key||!c.model){message('请填写渠道地址、API Key，并至少勾选一个模型。',true);return;}
  if(!serviceReady){message('请先双击「启动验收工作台.command」并打开本地工作台。',true);return;}
  runningSuite=selected;setActive(true);message('');clearTimeout(pollTimer);pollGeneration++;hideResults();
- try{const data=await (await api('/api/runs',{method:'POST',body:JSON.stringify(c)})).json();runId=data.id;recordRun({suite:c.suite,status:'running'},runId);await poll();}
+ try{const data=await (await api('/api/runs',{method:'POST',body:JSON.stringify(c)})).json();runId=data.id;recordRun({suite:c.suite,status:'running',batch:(c.models||[]).length>1,models:c.models||[]},runId);await poll();}
  catch(e){setActive(false);showSuiteResult();message(e.message,true);}
 }
 async function connect(){
@@ -175,7 +181,7 @@ async function connect(){
  if(data.active||data.latest){
   runId=data.active||data.latest;
   try{
-   const job=await (await api('/api/runs/'+runId)).json();el('acceptanceBase').value=job.base||'';el('acceptanceModel').value=job.model||'';restoreConfiguration(job);
+   const job=await (await api('/api/runs/'+runId)).json();el('acceptanceBase').value=job.base||'';if(job.models?.length)acceptanceModelPicker?.setSelected(job.models,{emit:false});else if(job.model)acceptanceModelPicker?.setSelected([job.model],{emit:false});restoreConfiguration(job);
    recordRun(job,runId);if(job.suite!=='ccmax')el('acceptanceScope').value=job.suite;selectSuite(runningSuite);
    if(typeof setTextMode==='function')setTextMode('deep');await poll();
   }catch(e){
@@ -197,12 +203,13 @@ async function loadModels(){
  if(active||!serviceReady)return;
  const c=config();if(!c.base||!c.key){message('请先填写渠道地址和 API Key。',true);return;}
  const epoch=++modelFetchEpoch;el('acceptanceModels').disabled=true;el('acceptanceModelHint').textContent='正在获取…';
- try{const data=await window.ModelDiscovery.list({base:c.base,key:c.key,auth:selected==='ccmax'?c.auth:'bearer'});if(epoch!==modelFetchEpoch)return;modelCatalog=data.models;const picker=window.ChoicePickers.attach(el('acceptanceModel'),{label:'渠道模型',options:modelCatalog});picker.open();el('acceptanceModelHint').textContent=`已获取 ${modelCatalog.length} 个模型，箭头可重复选择；未列出的映射模型仍可手动填写。`;message('');}
+ try{const data=await window.ModelDiscovery.list({base:c.base,key:c.key,auth:selected==='ccmax'?c.auth:'bearer'});if(epoch!==modelFetchEpoch)return;modelCatalog=data.models;if(acceptanceModelPicker)acceptanceModelPicker.search.value='';acceptanceModelPicker?.setOptions(modelCatalog);acceptanceModelPicker?.open({focus:true});el('acceptanceModelHint').textContent=`已获取 ${modelCatalog.length} 个模型，可勾选多个后按顺序测试；未列出的映射模型可手动添加。`;message('');}
  catch(e){if(epoch===modelFetchEpoch){el('acceptanceModelHint').textContent='获取失败；仍可手动填写模型 ID。';message(e.message,true);}}
  finally{if(epoch===modelFetchEpoch)el('acceptanceModels').disabled=false;}
 }
-function invalidateModels(){modelFetchEpoch++;modelCatalog=[];window.ChoicePickers.attach(el('acceptanceModel'),{label:'渠道模型',options:[]}).close();el('acceptanceModels').disabled=false;el('acceptanceModelHint').textContent='渠道配置已变化，请重新获取；支持手动填写。';}
+function invalidateModels(){modelFetchEpoch++;modelCatalog=[];/* retain manually entered/selected IDs while invalidating the catalog */acceptanceModelPicker?.setOptions([],{reconcile:false});acceptanceModelPicker?.close();el('acceptanceModels').disabled=false;el('acceptanceModelHint').textContent='渠道配置已变化，请重新获取模型列表；支持手动添加。';}
 for(const id of ['acceptanceBase','acceptanceKey','acceptanceAuth'])el(id).addEventListener('input',invalidateModels);
 el('acceptanceModels').addEventListener('click',loadModels);
+acceptanceModelPicker=window.ModelMultiselect?.attach(el('acceptanceModel'),{label:'渠道模型',max:30,ids:{wrapper:'acceptanceModelPicker',menu:'acceptanceModelMenu',search:'acceptanceModelSearch',list:'acceptanceModelList',status:'acceptanceModelStatus',toggle:'acceptanceModelToggle',clear:'acceptanceModelClear',all:'acceptanceModelShowAll'},onChange:(ids)=>{el('acceptanceModelHint').textContent=ids.length>1?`已选 ${ids.length} 个模型，将按顺序逐个测试。`:'已选 1 个模型，可继续勾选或开始测试。';}});
 connect();
 })();

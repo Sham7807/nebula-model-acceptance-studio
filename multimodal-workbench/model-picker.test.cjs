@@ -112,13 +112,14 @@ async function assertLastFetchAborted(page) {
         assert.match(await page.locator('#modelListStatus').innerText(), /3/);
         await page.locator('.model-option[data-model="model-alpha"]').click();
         assert.equal(await page.locator('#model').inputValue(), 'model-alpha');
-        await page.locator('#modelToggle').click();
+        assert.equal(await page.locator('#modelMenu').isVisible(), true, 'checkbox selection leaves menu open');
         assert.deepEqual(await optionIds(page), modelIds, 'the arrow shows B/C even after A is selected');
         await page.locator('#modelSearch').fill('beta');
         await waitForIds(page, ['model-beta']);
         assert.equal(await page.locator('#model').inputValue(), 'model-alpha', 'catalog search does not change the selected model');
         await page.locator('.model-option[data-model="model-beta"]').click();
         assert.equal(await page.locator('#model').inputValue(), 'model-beta');
+        assert.equal(await page.locator('#batch').inputValue(), 'model-alpha,model-beta');
         await page.locator('#modelToggle').click();
         assert.equal(await page.locator('#modelSearch').inputValue(), '');
         assert.deepEqual(await optionIds(page), modelIds);
@@ -138,15 +139,14 @@ async function assertLastFetchAborted(page) {
         await page.locator('#modelSearch').press('ArrowDown');
         await page.keyboard.press('Enter');
         assert.equal(await page.locator('#model').inputValue(), 'model-gamma');
-        assert.equal(await page.locator('#modelMenu').isVisible(), false);
+        assert.equal(await page.locator('#modelMenu').isVisible(), true);
         await page.locator('#model').fill('model-');
         assert.equal(await page.locator('#modelMenu').isVisible(), true);
         await page.locator('.advanced summary').click();
         assert.equal(await page.locator('.advanced').evaluate(element => element.open), true, 'closing the picker must not swallow the outside summary click');
         assert.equal(await page.locator('#modelMenu').isVisible(), false);
         await page.locator('#modelToggle').click();
-        await page.locator('#modelSearch').press('Tab');
-        await page.keyboard.press('Tab');
+        await page.locator('#modelSearch').press('Escape');
         await page.waitForFunction(() => document.getElementById('modelMenu').hidden);
         assert.equal(fixture.calls.length, 1, 'selection, search and manual editing never refetch or generate');
         checks.push('full list after selection, independent search, custom ID, clear and keyboard navigation');
@@ -166,7 +166,7 @@ async function assertLastFetchAborted(page) {
         assert.match(await page.locator('#modelListStatus').innerText(), /失败|错误|HTTP|unavailable/i);
         await load(fixture, catalog(['model-beta', 'model-delta']));
         assert.deepEqual(await optionIds(page), ['model-beta', 'model-delta']);
-        assert.equal(await page.locator('#model').inputValue(), 'model-alpha', 'catalog refresh does not replace a chosen/custom model');
+        assert.equal(await page.locator('#model').inputValue(), '', 'catalog refresh removes retired catalog models');
         assert.equal(fixture.calls.length, 3);
         checks.push('failed refresh keeps previous models and a later refresh recovers');
       } finally { await fixture.close(); }

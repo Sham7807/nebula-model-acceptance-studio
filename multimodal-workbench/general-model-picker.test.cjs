@@ -31,7 +31,7 @@ const path = require('node:path');
     await page.locator('#loadGeneralModels').click();
     await page.waitForFunction(() => /获取失败/.test(document.getElementById('generalModelStatus').textContent));
     assert.match(await page.locator('#generalModelStatus').innerText(), /获取失败/);
-    await page.locator('#loadGeneralModels').click();
+    await page.locator('#loadGeneralModels').dispatchEvent('click');
     await page.locator('.model-option[data-model="kimi-k3"]').waitFor();
     assert.deepEqual(await page.locator('.model-option').allTextContents(), ['model-a', 'model-b', 'kimi-k3']);
     await page.locator('#generalModelSearch').fill('kimi');

@@ -1,0 +1,36 @@
+.mm-picker{position:relative;min-width:0;flex:1;text-align:left;color:#263e35}
+.mm-picker *{box-sizing:border-box}
+.mm-input-row{display:flex;align-items:stretch;min-width:0;border:1px solid #dce5d8;border-radius:10px;background:#fafbf8;overflow:hidden}
+.mm-input-row:focus-within{border-color:#6c8e64;box-shadow:0 0 0 3px #5b80600d}
+.mm-picker .mm-input-row>input{flex:1;min-width:0;border:0;border-radius:0;background:transparent;box-shadow:none!important;margin:0}
+.mm-picker button{cursor:pointer;font:inherit}
+.mm-picker button:focus-visible,.mm-picker input:focus-visible{outline:2px solid #678a5f;outline-offset:2px}
+.mm-picker .mm-clear,.mm-picker .mm-toggle{flex:0 0 34px;border:0;background:transparent;color:#658b64;border-radius:0;font-size:18px;padding:0 7px;min-width:0}
+.mm-picker .mm-toggle{border-left:1px solid #e6ece2;font-size:14px}
+.mm-picker .mm-clear:hover,.mm-picker .mm-toggle:hover{background:#edf3e7}
+.mm-chips{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}
+.mm-chip{display:inline-flex;align-items:center;gap:5px;max-width:100%;border:1px solid #d9e5d0;background:#eff5e8;border-radius:6px;font:11px/1.6 ui-monospace,SFMono-Regular,monospace;padding:3px 4px 3px 8px;color:#476244}
+.mm-chip>span{min-width:0;overflow-wrap:anywhere}
+.mm-picker .mm-chip button{border:0;background:transparent;border-radius:4px;color:#688760;font-size:16px;line-height:1;padding:2px 4px}
+.mm-picker .mm-summary{font-size:11px;line-height:1.7;color:#8b987d;margin:7px 0 0;overflow-wrap:anywhere}
+.mm-picker .mm-summary.mm-warning{color:#94732b}
+.mm-menu{margin-top:8px;border:1px solid #dce5d4;background:#fff;border-radius:10px;box-shadow:0 9px 26px #253b2210;overflow:hidden}
+.mm-search-row{display:flex;align-items:center;gap:6px;padding:9px;border-bottom:1px solid #edf0e8}
+.mm-picker .mm-search{flex:1;min-width:0;padding:8px 10px;border:1px solid #e3e8dd;border-radius:6px;font-size:12px;margin:0;background:#fcfdfb}
+.mm-picker .mm-text-button{border:0;background:transparent;color:#5c7e51;font-size:11px;padding:4px 3px;white-space:nowrap}
+.mm-picker .mm-text-button:hover{text-decoration:underline}
+.mm-actions{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:6px 12px;background:#f6f8f1}
+.mm-status{padding:4px 12px 8px;font-size:10px;line-height:1.6;color:#8c997d;background:#f6f8f1;overflow-wrap:anywhere}
+.mm-list{max-height:250px;overflow:auto;overscroll-behavior:contain;padding:4px;scrollbar-width:thin}
+.mm-picker .mm-option{display:flex;align-items:center;justify-content:flex-start;gap:9px;cursor:pointer;min-height:36px;width:100%;margin:0;padding:8px;border:0;border-radius:6px;background:#fff;color:#2d4136;text-align:left;font:11px/1.7 ui-monospace,SFMono-Regular,monospace}
+.mm-picker .mm-option:hover,.mm-picker .mm-option.is-active{background:#f3f7ed}
+.mm-picker .mm-option[aria-selected="true"]{color:#45683b;background:#eff5e8;font-weight:600}
+.mm-picker .mm-option input{accent-color:#6a8b59;width:15px;height:15px;min-width:15px;padding:0;margin:0;border-radius:3px;cursor:pointer;flex:none}
+.mm-picker .mm-option .mm-model-name{min-width:0;overflow-wrap:anywhere;color:inherit;font:inherit;flex:1}
+.mm-picker .mm-empty{font-size:11px;line-height:1.8;margin:0;padding:12px;color:#8b987d}
+.mm-picker .mm-add-custom{border:0;border-top:1px solid #e7edde;width:100%;padding:10px 12px;background:#fafcf6;color:#567b4e;font-size:11px;text-align:left;overflow-wrap:anywhere;line-height:1.7}
+.mm-picker .mm-add-custom:hover{background:#eef4e6}
+.mm-picker.is-disabled{opacity:.7}
+.mm-picker button:disabled,.mm-picker input:disabled{cursor:not-allowed}
+.mm-picker [hidden]{display:none!important}
+@media(max-width:650px){.mm-picker .mm-search{font-size:16px}.mm-picker .mm-option{font-size:12px;min-height:42px}.mm-chip{font-size:11px}.mm-picker .mm-clear,.mm-picker .mm-toggle{flex-basis:34px}}

@@ -644,6 +644,38 @@ def build_report_data(result):
     """Describe stored results without changing status or making new requests."""
     result = _dict(result)
     suite = _text(result.get("suite"))
+    if suite == 'batch_acceptance':
+        # A batch is an orchestration record. Reuse the normal CCMax/KVV
+        # contract for each child and prefix identifiers so evidence remains
+        # attributable to the selected model.
+        checks = []
+        scopes = []
+        focuses = []
+        limitations = []
+        for item in _list(result.get('results')):
+            child = _dict(item.get('result'))
+            if not child:
+                checks.append({'id': 'batch-%s-missing' % _text(item.get('model')), 'title': '%s · 未启动或没有报告' % _text(item.get('model')), 'status': 'inconclusive', 'method': '批量任务记录该模型的启动状态。', 'expected': '该模型应完成独立子任务并产生可复核结果。', 'observed': item.get('status') or 'not_run', 'meaning': '未启动项不能视为通过。', 'next_step': '单独重试该模型。', 'request_ids': [], 'sample_ids': []})
+                continue
+            child_data = build_report_data(child)
+            model = _text(item.get('model') or _dict(child.get('configuration')).get('model') or '未记录模型')
+            for check in child_data.get('checks', []):
+                entry = deepcopy(check)
+                entry['id'] = 'batch-%s-%s' % (len(checks) + 1, _text(entry.get('id')))
+                entry['title'] = '%s · %s' % (model, _text(entry.get('title') or entry.get('id')))
+                entry['model'] = model
+                checks.append(entry)
+            scopes.extend(child_data.get('scope', [])); focuses.extend(child_data.get('focus', [])); limitations.extend(child_data.get('limitations', []))
+        counts = {key: sum(1 for c in checks if c.get('status') == key) for key in ('passed','failed','inconclusive','cancelled','skipped','not_covered')}
+        summary = _dict(result.get('summary'))
+        return {'title': '多模型批量验收报告', 'engine': '多模型串行验收队列', 'checks': checks,
+                'scope': list(dict.fromkeys(['本次按勾选模型逐一独立执行；子任务不会复用上一模型的结果。'] + scopes)),
+                'focus': list(dict.fromkeys(focuses)), 'limitations': list(dict.fromkeys(limitations + ['批量总览不计算跨模型平均分；请按模型查看各自证据。'])),
+                'findings': _findings(checks, result), 'score': _report_score(checks, result), 'summary': summary,
+                'verdict': deepcopy(_dict(result.get('verdict'))), 'configuration': deepcopy(_dict(result.get('configuration'))), 'suite': suite}
+    if suite == 'browser_report':
+        from browser_reports import report_data
+        return report_data(result)
     # ``ccmax`` is the UI/configuration name while ``ccmax_acceptance`` is the
     # persisted result name.  Treat both as the same suite so every export
     # uses identical report semantics even when a result is rendered before

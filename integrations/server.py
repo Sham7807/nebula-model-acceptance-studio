@@ -26,6 +26,8 @@ TOKEN = secrets.token_urlsafe(32)
 JOBS = {}
 LOCK = threading.RLock()
 SUITES = {'kvv11', 'kvvfull', 'ccmax'}
+MAX_BATCH_MODELS = 30
+QUEUE_META = REPORTS / '.jobs.json'
 AUTH_STORE = Store(os.environ.get('WORKBENCH_DB', str(ROOT / 'workbench.sqlite3')), os.environ.get('WORKBENCH_AUTH_FILE') or None)
 
 
@@ -60,7 +62,19 @@ def normalized_base(raw):
 
 def validate(data):
     if not isinstance(data,dict) or data.get('suite') not in SUITES: raise ValueError('请选择有效的验收套件')
-    c = {'suite':data['suite'], 'base':normalized_base(data.get('base','')), 'key':str(data.get('key','')).strip(), 'model':str(data.get('model','')).strip()}
+    raw_models=data.get('models')
+    if raw_models is not None:
+        if not isinstance(raw_models,list) or not raw_models: raise ValueError('模型列表不能为空')
+        models=[]
+        for value in raw_models:
+            value=str(value).strip()
+            if value and value not in models: models.append(value)
+        if not models: raise ValueError('模型列表不能为空')
+        if len(models)>MAX_BATCH_MODELS: raise ValueError(f'一次最多测试 {MAX_BATCH_MODELS} 个模型')
+    else:
+        models=[]
+    model=str(data.get('model','')).strip() or (models[0] if models else '')
+    c = {'suite':data['suite'], 'base':normalized_base(data.get('base','')), 'key':str(data.get('key','')).strip(), 'model':model, 'models':models}
     if not c['key'] or not c['model']: raise ValueError('请填写 API Key 和渠道模型 ID')
     if any('\n' in c[k] or '\r' in c[k] for k in ('key','model')): raise ValueError('密钥和模型名不能包含换行')
     for name, default, low, high in [('timeout',120,5,600),('signature_samples',1,1,20),('sse_samples',3,1,200),('concurrency',2,1,10)]:
@@ -82,6 +96,23 @@ def validate(data):
     c['advanced'] = advanced
     return c
 
+def _persist_jobs():
+    """Persist only restart-safe job metadata; never write channel keys."""
+    try:
+        REPORTS.mkdir(parents=True, exist_ok=True)
+        with LOCK:
+            payload=[]
+            for job in JOBS.values():
+                if not job.get('batch'): continue
+                payload.append({'id':job['id'],'batch':True,'suite':job.get('suite'),'models':job.get('models',[]),
+                    'base':job.get('base',''),'status':job.get('status'),'started_at':job.get('started_at'),
+                    'completed':job.get('completed',0),'total':job.get('total'),'children':[
+                        {k:v for k,v in child.items() if k in ('id','model','status','completed','total','summary','run_id')}
+                        for child in job.get('children',[])]})
+        tmp=QUEUE_META.with_suffix('.tmp');tmp.write_text(json.dumps(payload,ensure_ascii=False),encoding='utf-8');tmp.replace(QUEUE_META)
+    except Exception:
+        pass
+
 def run_job(job,c):
     directory = REPORTS / job['id']; directory.mkdir(parents=True, exist_ok=True)
     key = c['key']
@@ -94,6 +125,9 @@ def run_job(job,c):
             if event.get('request_count') is not None: job['request_count']=event['request_count']
             if event.get('total') is not None: job['total'] = event['total']
             if event.get('completed') is not None: job['completed'] = event['completed']
+        parent_emit=job.get('parent_emit')
+        if parent_emit:
+            parent_emit(event)
     try:
         if c['suite']=='ccmax':
             from ccmax_acceptance import run
@@ -128,8 +162,87 @@ def run_job(job,c):
         job['history_error'] = str(exc)
     c['key']=''
 
+def run_batch(parent, config):
+    """Run selected models serially. Each child has its own report/history.
+
+    The parent is only an orchestration record: it never sends a provider request
+    and its persisted metadata never contains the channel key.
+    """
+    models=list(config.get('models') or [config.get('model','')])
+    results=[]
+    try:
+        for index, model in enumerate(models):
+            with LOCK:
+                if parent['cancel'].is_set():
+                    break
+                child={'id':uuid.uuid4().hex,'suite':config['suite'],'model':model,'base':config['base'],
+                    'status':'running','started_at':time.time(),'total':11 if config['suite']=='kvv11' else None,
+                    'completed':0,'events':[],'cancel':parent['cancel'],'batch_child':True}
+                parent['children'][index].update({'id':child['id'],'run_id':child['id'],'status':'running'})
+                JOBS[child['id']]=child
+                parent['current_run']=child['id']
+            _persist_jobs()
+            # Copy only progress into the parent; the child owns complete evidence.
+            def relay(event, child=child, child_index=index, child_model=model):
+                with LOCK:
+                    parent['events'].append({'model':child_model,**event})
+                    if len(parent['events'])>2000: parent['events']=parent['events'][-2000:]
+                    parent['completed']=sum(int(x.get('completed') or 0) for x in parent['children'])
+                    parent['total']=sum(int(x.get('total') or 0) for x in parent['children']) or None
+                    parent['children'][child_index].update({'completed':child.get('completed',0),'total':child.get('total'),'summary':child.get('summary',{})})
+            child_config={**config,'model':model,'models':[]}
+            child['parent_emit']=relay
+            run_job(child,child_config)
+            with LOCK:
+                child_result=child.get('result') or {'suite':config['suite'],'status':child.get('status','error'),'run_id':child['id'],'configuration':{'suite':config['suite'],'model':model,'base':config['base']}}
+                verdict_status=(child_result.get('verdict') or {}).get('status')
+                if verdict_status not in ('passed','failed','inconclusive','cancelled','skipped','not_covered'):
+                    verdict_status='failed' if child.get('status') in ('error','failed') or child_result.get('status')=='error' else 'cancelled' if child.get('status')=='cancelled' else 'inconclusive'
+                parent['children'][index].update({'status':verdict_status,'completed':child.get('completed',0),'total':child.get('total'),'summary':child.get('summary',{})})
+                results.append({'model':model,'run_id':child['id'],'status':verdict_status,'result':child_result})
+                parent['current_run']=None
+            _persist_jobs()
+        # Models not started after cancellation are explicitly retained.
+        with LOCK:
+            for item in parent['children'][len(results):]:
+                if item.get('status')=='pending': item['status']='not_run'
+            cancelled=parent['cancel'].is_set()
+            completed=len(results)
+            counts={k:0 for k in ('passed','failed','inconclusive','cancelled','not_run')}
+            for item in parent['children']:
+                status=item.get('status','not_run');
+                if status in counts: counts[status]+=1
+            if counts['failed']: verdict={'status':'failed','label':'至少一个模型未通过','detail':f"{counts['failed']} 个模型存在失败项；请展开各模型报告查看证据。"}
+            elif cancelled or counts['not_run'] or counts['inconclusive'] or completed<len(models): verdict={'status':'inconclusive','label':'批量测试未完成或证据不足','detail':'已保留已完成模型结果，未启动模型不会计为通过。'}
+            elif counts['passed']==len(models): verdict={'status':'passed','label':'所选模型均通过本轮检查','detail':'结论仅对本轮各模型独立测试负责。'}
+            else: verdict={'status':'inconclusive','label':'批量结果无法确认全部通过','detail':'部分模型没有可用的完整通过证据。'}
+            status='cancelled' if cancelled else ('completed' if completed==len(models) else 'inconclusive')
+            summary={'total':len(models),'completed':completed,'passed':counts['passed'],'failed':counts['failed'],'inconclusive':counts['inconclusive'],'cancelled':counts['cancelled'],'not_run':counts['not_run']}
+            safe_config={k:v for k,v in config.items() if k!='key'};safe_config['model']=f'多模型对比（{len(models)}）';safe_config['models']=models
+            result={'suite':'batch_acceptance','status':status,'configuration':safe_config,'results':results,'models':models,'summary':summary,'verdict':verdict,'run_id':parent['id'],'started_at':parent['started_at'],'finished_at':time.time(),'log':'批量模型按顺序独立执行；未自动重试。'}
+            parent['result']=result;parent['status']=status;parent['summary']=summary;parent['completed']=completed;parent['total']=len(models);parent['finished_at']=result['finished_at']
+        directory=REPORTS/parent['id'];directory.mkdir(parents=True,exist_ok=True)
+        (directory/'report.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+        try:(directory/'report.html').write_bytes(report_html(result,directory))
+        except Exception as exc: parent['history_error']='HTML 报告生成失败：'+str(exc)
+        try:
+            saved=AUTH_STORE.save_acceptance(result);parent['history_id']=saved.get('id');parent['history_saved']=True
+        except Exception as exc: parent['history_saved']=False;parent['history_error']=str(exc)
+    finally:
+        config['key']='';_persist_jobs()
+
+def run_dispatch(job,c):
+    if job.get('batch'): return run_batch(job,c)
+    return run_job(job,c)
+
 def snapshot(job):
-    return {k:v for k,v in job.items() if k not in ('cancel','result')} | {'elapsed': round((job.get('finished_at') or time.time())-job['started_at'],1), 'result':job.get('result')}
+    if job.get('batch'):
+        data={k:v for k,v in job.items() if k not in ('cancel','result','events','children','models')}
+        data.update({'batch':True,'models':job.get('models',[]),'children':job.get('children',[]),'current_run':job.get('current_run')})
+        if job.get('current_run') and JOBS.get(job['current_run']): data['current_run_snapshot']=snapshot(JOBS[job['current_run']])
+        data['elapsed']=round((job.get('finished_at') or time.time())-job['started_at'],1);data['result']=job.get('result')
+        return data
+    return {k:v for k,v in job.items() if k not in ('cancel','result','parent_emit')} | {'elapsed': round((job.get('finished_at') or time.time())-job['started_at'],1), 'result':job.get('result')}
 
 def report_download_name(result, kind='html'):
     result = result if isinstance(result, dict) else {}
@@ -250,6 +363,21 @@ class Handler(BaseHTTPRequestHandler):
                 record = AUTH_STORE.detail(identity)
                 if not record: return self.send_json(404, {'error':'历史记录不存在'})
                 return self.send_bytes(200,json.dumps(record,ensure_ascii=False,indent=2).encode(),'application/json',report_download_name(record, 'json'))
+            if len(parts) == 5 and parts[4] == 'report.html':
+                record = AUTH_STORE.detail(identity)
+                if not record: return self.send_json(404, {'error':'历史记录不存在'})
+                if record.get('run_id'):
+                    result=record['result'];directory=REPORTS/record['run_id']
+                else:
+                    import base64
+                    from browser_reports import normalize_browser_report
+                    for item in record.get('media',[]):
+                        if item.get('stored'):
+                            # Inline only previously stored local bytes; do not fetch remote URLs.
+                            index=int(item['url'].rsplit('/',1)[-1]);media=AUTH_STORE.media(identity,index)
+                            if media:item['url']='data:'+media['mime']+';base64,'+base64.b64encode(media['data']).decode('ascii')
+                    result=normalize_browser_report(record);directory=None
+                return self.send_bytes(200,report_html(result,directory),'text/html; charset=utf-8',report_download_name(record,'html'))
             return self.send_json(404, {'error':'历史资源不存在'})
         if path.startswith('/api/runs/'):
             if not self.guard(auth=True):return
@@ -265,8 +393,16 @@ class Handler(BaseHTTPRequestHandler):
             if parts[4]=='evidence.zip':
                 data=io.BytesIO()
                 with zipfile.ZipFile(data,'w',zipfile.ZIP_DEFLATED) as archive:
-                    for f in (REPORTS/job['id']).iterdir():
-                        if f.is_file() and f.name!='report.html':archive.writestr(f.name,f.read_bytes())
+                    root_dir=REPORTS/job['id']
+                    for f in root_dir.rglob('*'):
+                        if f.is_file() and f.name!='report.html':archive.write(f,f.relative_to(root_dir))
+                    for child in job.get('result', {}).get('results', []) if isinstance(job.get('result'), dict) else []:
+                        child_dir=REPORTS/str(child.get('run_id',''))
+                        if not child_dir.is_dir(): continue
+                        for f in child_dir.rglob('*'):
+                            if f.is_file() and f.name!='report.html':
+                                safe_model=re.sub(r'[^A-Za-z0-9._-]+','_',str(child.get('model','model')))[:80] or 'model'
+                                archive.write(f,Path('models')/safe_model/f.relative_to(child_dir))
                     archive.writestr('report.html',report_html(result,REPORTS/job['id']))
                 return self.send_bytes(200,data.getvalue(),'application/zip',report_download_name(result, 'evidence.zip'))
             return self.send_json(404,{'error':'产物不存在'})
@@ -297,6 +433,15 @@ class Handler(BaseHTTPRequestHandler):
                 data=json.loads(self.rfile.read(length)); saved=AUTH_STORE.save(data)
                 return self.send_json(200, saved)
             except Exception as exc: return self.send_json(400, {'error':str(exc)})
+        if path == '/api/reports':
+            try:
+                length=int(self.headers.get('Content-Length','0'))
+                if self.headers.get_content_type()!='application/json' or not 0<length<=MAX_BODY: raise ValueError('报告请求格式无效或内容过大')
+                from browser_reports import normalize_browser_report
+                result=normalize_browser_report(json.loads(self.rfile.read(length)))
+                return self.send_bytes(200,report_html(result),'text/html; charset=utf-8',report_download_name(result,'html'))
+            except (ValueError,TypeError,KeyError) as exc:
+                return self.send_json(400, {'error':'报告内容不完整，请刷新后重试：'+str(exc)})
         history_match = re.fullmatch(r'/api/runs/([a-f0-9]+)/history', path)
         if history_match:
             job = JOBS.get(history_match.group(1))
@@ -330,12 +475,20 @@ class Handler(BaseHTTPRequestHandler):
             if self.headers.get_content_type()!='application/json': raise ValueError('请求必须为 JSON')
             length=int(self.headers.get('Content-Length','0'))
             if not 0<length<65536:raise ValueError('请求长度无效')
-            c=validate(json.loads(self.rfile.read(length)))
+            payload=json.loads(self.rfile.read(length)); c=validate(payload)
+            request_id=str(payload.get('client_request_id','')).strip()
             with LOCK:
+                if request_id:
+                    for existing in JOBS.values():
+                        if existing.get('client_request_id')==request_id:
+                            return self.send_json(202,{'id':existing['id'],'duplicate':True})
                 if any(j['status']=='running' for j in JOBS.values()):return self.send_json(409,{'error':'已有验收任务运行中，请完成或取消后再开始'})
-                job={'id':uuid.uuid4().hex,'suite':c['suite'],'model':c['model'],'base':c['base'],'status':'running','started_at':time.time(),'total':11 if c['suite']=='kvv11' else None,'completed':0,'events':[],'cancel':threading.Event()}
+                models=c.get('models') or [c['model']]; batch=len(models)>1
+                job={'id':uuid.uuid4().hex,'suite':c['suite'],'model':c['model'] if not batch else f'多模型对比（{len(models)}）','base':c['base'],'status':'running','started_at':time.time(),'total':(11 if c['suite']=='kvv11' else None) if not batch else len(models),'completed':0,'events':[],'cancel':threading.Event(),'client_request_id':request_id}
+                if batch:
+                    job.update({'batch':True,'models':models,'children':[{'model':m,'status':'pending','completed':0,'total':11 if c['suite']=='kvv11' else None,'summary':{}} for m in models],'current_run':None})
                 JOBS[job['id']]=job
-            threading.Thread(target=run_job,args=(job,c),daemon=True).start()
+            _persist_jobs();threading.Thread(target=run_dispatch,args=(job,c),daemon=True).start()
             return self.send_json(202,{'id':job['id']})
         except (ValueError,TypeError) as exc:return self.send_json(400,{'error':str(exc)})
 
@@ -349,16 +502,42 @@ def restore_reports():
             suite=result.get('configuration',{}).get('suite') or result.get('suite')
             if suite=='ccmax_acceptance':suite='ccmax'
             config=result.get('configuration',{});summary=result.get('summary',{})
-            JOBS[identity]={'id':identity,'suite':suite,'model':config.get('model',''),'base':config.get('base',''),
+            job={'id':identity,'suite':suite,'model':config.get('model',''),'base':config.get('base',''),
                 'status':result.get('status','error'),'started_at':result.get('started_at',path.stat().st_mtime),
                 'finished_at':result.get('finished_at',path.stat().st_mtime),'total':summary.get('total'),
                 'completed':summary.get('completed',0),'summary':summary,'events':[],'result':result,'cancel':threading.Event()}
+            if result.get('suite') == 'batch_acceptance':
+                job.update({'batch':True,'models':result.get('models') or [x.get('model','') for x in result.get('results',[])],
+                    'children':[{'id':x.get('run_id'),'run_id':x.get('run_id'),'model':x.get('model',''),'status':x.get('status','inconclusive'),'completed':(x.get('result') or {}).get('summary',{}).get('completed',0),'total':(x.get('result') or {}).get('summary',{}).get('total'),'summary':(x.get('result') or {}).get('summary',{})} for x in result.get('results',[])], 'current_run':None})
+            JOBS[identity]=job
             # Backfill the durable history index for reports created before SQLite history.
             try:
                 AUTH_STORE.save_acceptance(result, only_missing=True)
             except Exception:
                 pass
         except (ValueError,OSError):continue
+    # A process can stop between child requests before the parent report is
+    # written. Restore only the safe queue metadata and mark it inconclusive;
+    # never resume provider calls automatically.
+    if QUEUE_META.is_file():
+        try:
+            queued = json.loads(QUEUE_META.read_text(encoding='utf-8'))
+            for item in queued if isinstance(queued, list) else []:
+                identity = item.get('id') if isinstance(item, dict) else ''
+                if not re.fullmatch('[a-f0-9]+', str(identity)) or identity in JOBS or not item.get('batch'):
+                    continue
+                models = [str(x) for x in item.get('models', [])]
+                children = []
+                for child in item.get('children', []):
+                    row = dict(child) if isinstance(child, dict) else {}
+                    if row.get('status') in ('running','pending'): row['status'] = 'not_run'
+                    children.append(row)
+                JOBS[identity] = {'id':identity,'suite':item.get('suite'),'model':'多模型对比（%s）' % len(models),'base':item.get('base',''),
+                    'status':'inconclusive','started_at':item.get('started_at') or time.time(),'finished_at':time.time(),
+                    'total':item.get('total') or len(models),'completed':item.get('completed',0),'summary':{'total':len(models),'completed':0,'not_run':len(models)},
+                    'events':[],'cancel':threading.Event(),'batch':True,'models':models,'children':children,'current_run':None}
+        except (ValueError, OSError, TypeError):
+            pass
     # Editing a derived report must not make an older run the latest run.
     ordered=sorted(JOBS.items(),key=lambda item:item[1]['started_at'])
     JOBS.clear();JOBS.update(ordered)
@@ -368,6 +547,36 @@ def restore_reports():
             job['history_id'] = saved.get('id'); job['history_saved'] = True
         except Exception as exc:
             job['history_saved'] = False; job['history_error'] = str(exc)
+    # A queue metadata file means the service stopped while a batch was active.
+    # Never resume provider calls after restart: expose an explicit incomplete
+    # parent so the UI can show the already-finished child summaries safely.
+    if QUEUE_META.is_file():
+        try:
+            queued=json.loads(QUEUE_META.read_text(encoding='utf-8'))
+            for meta in queued if isinstance(queued,list) else []:
+                identity=meta.get('id','')
+                if not meta.get('batch') or identity in JOBS or not re.fullmatch('[a-f0-9]+',str(identity)): continue
+                children=meta.get('children') if isinstance(meta.get('children'),list) else []
+                children=[dict(x) for x in children]
+                for child in children:
+                    if child.get('status') in ('running','pending'): child['status']='not_run'
+                models=[str(x) for x in (meta.get('models') or [])]
+                done=sum(x.get('status') not in ('not_run','pending') for x in children)
+                result={'suite':'batch_acceptance','status':'inconclusive','configuration':{'suite':meta.get('suite'),'model':f'多模型对比（{len(models)}）','models':models,'base':meta.get('base','')},
+                    'models':models,'results':[{'model':x.get('model',''),'run_id':x.get('run_id'),'status':x.get('status','not_run')} for x in children],
+                    'summary':{'total':len(models),'completed':done,'passed':sum(x.get('status')=='passed' for x in children),'failed':sum(x.get('status')=='failed' for x in children),'inconclusive':sum(x.get('status')=='inconclusive' for x in children),'not_run':sum(x.get('status')=='not_run' for x in children)},
+                    'verdict':{'status':'inconclusive','label':'服务重启导致批量测试未完成','detail':'已完成的子模型结果保留；未开始的模型不会自动重试或计费。'},'run_id':identity,'started_at':meta.get('started_at',time.time()),'finished_at':time.time(),
+                    'log':'服务在批量任务完成前重启，未自动恢复请求。'}
+                directory=REPORTS/identity;directory.mkdir(parents=True,exist_ok=True)
+                (directory/'report.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+                try:(directory/'report.html').write_bytes(report_html(result,directory))
+                except Exception:pass
+                JOBS[identity]={'id':identity,'batch':True,'suite':meta.get('suite'),'model':f'多模型对比（{len(models)}）','base':meta.get('base',''),'models':models,'children':children,'current_run':None,'status':'inconclusive','started_at':result['started_at'],'finished_at':result['finished_at'],'total':len(models),'completed':done,'summary':result['summary'],'events':[],'result':result,'cancel':threading.Event(),'history_saved':False}
+                try:
+                    saved=AUTH_STORE.save_acceptance(result,only_missing=True);JOBS[identity]['history_id']=saved.get('id');JOBS[identity]['history_saved']=True
+                except Exception as exc:JOBS[identity]['history_error']=str(exc)
+        except (OSError,ValueError,TypeError):
+            pass
 
 def main():
     restore_reports()

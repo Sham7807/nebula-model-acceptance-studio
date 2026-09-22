@@ -10,6 +10,7 @@
 <link rel="stylesheet" href="style.css">
 <link rel="stylesheet" href="acceptance.css">
 <link rel="stylesheet" href="history.css">
+<link rel="stylesheet" href="model-multiselect.css">
 </head>
 <body>
 <header class="topbar"><div class="brand"><span class="brand-icon">宇<span>↗</span></span><div>小小宇宙无敌<small>多模态渠道测试台</small></div></div><nav class="workspace-nav" aria-label="工作区"><button id="workspaceTab" class="active" aria-current="page" type="button">工作台</button><button id="historyTab" type="button">历史记录 <span id="historyNavCount" hidden>0</span></button></nav><div class="top-actions"><span class="local-badge" id="sessionLabel"><i></i><span id="sessionMode">本地会话</span><span>v1.11</span></span><div id="accountMenu" class="account-menu" hidden><span id="accountName"></span><button id="logoutButton" type="button">退出</button></div></div></header>
@@ -38,10 +39,7 @@
 <div class="form-group" id="imageModeGroup" hidden><label for="imageMode">图像任务</label><select id="imageMode"><option value="generation">文生图</option><option value="edit">图生图 / 编辑</option><option value="reference">多图参考 / 融合</option></select><small id="imageModeHint"></small></div>
 <div class="form-group"><label for="preset">接口协议</label><select id="preset"></select><small id="presetDescription"></small></div>
 <div class="form-group model-field"><label for="model">模型名称 <span class="model-fetch-actions"><button id="cancelModels" class="text-button" type="button" hidden>取消获取</button><button id="loadModels" class="text-button" type="button">获取模型列表 ↓</button></span></label>
-<div id="modelPicker" class="model-picker">
-<div class="model-input-row"><input id="model" role="combobox" aria-controls="modelList" aria-expanded="false" aria-haspopup="listbox" aria-autocomplete="list" placeholder="选择模型，或手动填写模型 ID" autocomplete="off" spellcheck="false"><button id="modelClear" class="model-icon-button" type="button" aria-label="清空模型" title="清空模型">×</button><button id="modelToggle" class="model-icon-button" type="button" aria-label="展开全部模型" aria-expanded="false" aria-controls="modelMenu" title="展开全部模型">▾</button></div>
-<div id="modelMenu" class="model-menu" hidden><div class="model-search-row"><input id="modelSearch" type="search" role="combobox" aria-label="搜索模型列表" aria-controls="modelList" aria-expanded="false" aria-autocomplete="list" placeholder="搜索全部模型…" autocomplete="off" spellcheck="false"><button id="modelShowAll" type="button" class="text-button">全部</button></div><div id="modelListStatus" class="model-list-status" role="status" aria-live="polite"></div><div id="modelList" class="model-list" role="listbox" aria-label="可选模型"></div></div>
-</div><small id="modelHint" role="status" aria-live="polite">模型名称可手动填写；点击下箭头查看完整列表。</small></div>
+<input id="model" placeholder="勾选一个或多个模型，也可手动填写 ID" autocomplete="off" spellcheck="false"><small id="modelHint" role="status" aria-live="polite">获取模型后可直接勾选，支持多模型顺序测试。</small></div>
 <div id="modelAdvice" class="model-advice" hidden><b>模型与测试类型可能不匹配</b><p id="modelAdviceText"></p><button id="applyModelAdvice" class="text-button" type="button"></button><label class="alias-override"><input id="allowMismatch" type="checkbox"> 渠道使用自定义映射，仍按当前配置测试</label></div>
 <div id="protocolNote" class="protocol-note" hidden></div>
 <div class="prompt-library"><label for="promptScenario">测试场景 <span>选择即填入，可继续编辑</span></label><div class="scenario-row"><select id="promptScenario" aria-describedby="scenarioGoal scenarioRequirement"></select></div><p id="scenarioGoal" aria-live="polite"></p><small id="scenarioRequirement"></small></div>
@@ -66,7 +64,7 @@
 <div class="form-group video-only"><label for="contentPath">成品下载路径（可选）</label><input id="contentPath" class="mono" placeholder="/v1/videos/{id}/content"><small>用于完成后通过当前渠道鉴权获取视频。</small></div>
 <div class="form-group video-only"><label for="pollTimeout">最多等待视频（秒）</label><input id="pollTimeout" type="number" min="5" max="7200" value="600"></div>
 <div class="form-group"><label for="extra">附加请求参数 <span>JSON 对象</span></label><textarea id="extra" class="mono" rows="5" spellcheck="false" placeholder='{"quality": "high"}'>{}</textarea><small>顶层合并并覆盖默认请求体，可包含 model、aspect_ratio、image 等渠道自定义字段；复杂嵌套字段请填写完整对象。报告中的测试模型仍以模型字段为准。</small></div>
-<div class="form-group"><label for="batch">批量模型（可选）</label><textarea id="batch" rows="2" placeholder="model-a, model-b"></textarea><small>同一协议按顺序测试，每个模型提交一次；不同协议请分开测试。</small></div>
+<input id="batch" type="hidden"><p class="field-note">在上方模型列表勾选多个模型即可批量测试；同一协议按顺序执行。</p>
 </div></details>
 <div class="resume-box video-only"><label for="taskId">已有视频任务 ID</label><div class="input-action"><input id="taskId" placeholder="输入 ID 可继续查询"><button id="resumeBtn" type="button">继续查询</button></div><small>只查询已有任务，不会重新生成视频。</small></div>
 </fieldset>
@@ -124,6 +122,7 @@
 <script src="model-discovery.js"></script>
 <script src="media-download.js"></script>
 <script src="choice-picker.js"></script>
+<script src="model-multiselect.js"></script>
 <script src="prompts.js"></script>
 <script src="history-capture.js"></script>
 <script src="app.js"></script>

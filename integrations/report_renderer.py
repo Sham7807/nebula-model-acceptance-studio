@@ -73,6 +73,21 @@ def raw_block(label, value):
 def evidence_records(result, directory=None):
     """Join raw KVV observations with the corrected, derived transport summary."""
     records=[]
+    if result.get('suite') == 'batch_acceptance':
+        parent = Path(directory).parent if directory else None
+        for index, item in enumerate(result.get('results') or []):
+            child = item.get('result') if isinstance(item, dict) else None
+            if not isinstance(child, dict):
+                continue
+            child_dir = parent / str(item.get('run_id')) if parent and item.get('run_id') else None
+            for row in evidence_records(child, child_dir):
+                row = dict(row)
+                row['id'] = 'model-%s-%s' % (index + 1, row.get('id') or 'request')
+                row['model'] = item.get('model') or (child.get('configuration') or {}).get('model')
+                records.append(row)
+        return records
+    if result.get('suite') == 'browser_report':
+        return result.get('browser_requests') or []
     if result.get('suite') in ('ccmax','ccmax_acceptance'):
         for sample in result.get('samples',[]):
             response=sample.get('response') or {};evidence=sample.get('evidence') or {};request=sample.get('request') or {}
@@ -127,6 +142,28 @@ STYLE = r'''
 @media print{body{background:white;font-size:10px}main{max-width:none;padding:0}.no-print,.nav,.filters{display:none!important}.cover{background:white;color:var(--ink);border:1px solid var(--line);padding:20px}.cover p,.cover .eyebrow{color:var(--muted)}.cover code{color:var(--ink)}.metrics{grid-template-columns:repeat(4,1fr)}.check[hidden]{display:block!important}.check,.finding,.panel,.request{break-inside:avoid}.findings{display:block}.finding{margin-bottom:10px}.comparison,.interpretation{grid-template-columns:1fr 1fr}pre{max-height:none;overflow:visible;font-size:8px}.raw>summary{font-size:10px}.chart{height:55px}.section{margin-top:18px}h1{font-size:24px}}
 '''
 
+# Shared with the portable HTML export.  Keep all reports on one visual system.
+STYLE += r'''
+.media{display:flex;flex-wrap:wrap;gap:13px;margin-top:14px}.media:empty{display:none}.media figure{margin:0;flex:1 1 280px;padding:10px;border:1px solid var(--line);border-radius:10px;background:#fbfcfa}.media img,.media video{display:block;width:100%;max-height:520px;object-fit:contain;border-radius:7px;background:#f0f3eb}.media audio{width:100%}.media figcaption{font-size:11px;margin-top:8px}.model-label{font:11px ui-monospace,monospace;color:var(--muted);margin-top:6px}
+'''
+
+
+def media_html(items):
+    from urllib.parse import urlsplit
+    output=[]
+    for item in items or []:
+        if not isinstance(item,dict): continue
+        kind=item.get('type') or item.get('kind');url=str(item.get('url') or '')
+        if kind not in ('image','video','audio'):continue
+        parsed=urlsplit(url)
+        safe_remote=parsed.scheme in ('https','http') and parsed.netloc and not parsed.username and not parsed.password and redact(url)==url
+        safe_data=bool(re.fullmatch(r'data:(?:image/(?:png|jpeg|webp|gif|avif)|video/(?:mp4|webm|quicktime)|audio/(?:mpeg|mp3|mp4|wav|wave|x-wav|ogg|webm|flac|x-flac|aac));base64,[A-Za-z0-9+/=\r\n]+',url))
+        if not (safe_remote or safe_data): continue
+        tag='img' if kind=='image' else kind
+        attrs=' alt="生成图片" loading="lazy" referrerpolicy="no-referrer"' if tag=='img' else ' controls preload="none"'
+        output.append('<figure><'+tag+' src="'+esc(url)+'"'+attrs+'>'+('' if tag=='img' else '</'+tag+'>')+'<figcaption>' + ('已嵌入本报告 · 可离线查看' if safe_data else '<a href="'+esc(url)+'" target="_blank" rel="noopener noreferrer">打开媒体 ↗</a> · 远程链接需联网')+'</figcaption></figure>')
+    return '<div class="media">'+''.join(output)+'</div>'
+
 SCRIPT = r'''
 (()=>{'use strict';let filter='all';const search=document.getElementById('check-search');const cards=[...document.querySelectorAll('.check')];
 function apply(){const q=search.value.trim().toLowerCase();let count=0;for(const card of cards){const ok=(filter==='all'||card.dataset.status===filter)&&(q===''||card.textContent.toLowerCase().includes(q));card.hidden=!ok;if(ok)count++;}document.getElementById('visible-count').textContent='显示 '+count+' / '+cards.length+' 项';}
@@ -138,7 +175,7 @@ document.getElementById('print-report').addEventListener('click',()=>window.prin
 
 def render_report(result, directory=None):
     result=redact(copy.deepcopy(result));decorate(result)
-    data=build_report_data(result);cc=result.get('suite') in ('ccmax','ccmax_acceptance')
+    data=build_report_data(result);cc=result.get('suite') in ('ccmax','ccmax_acceptance');browser=result.get('suite')=='browser_report'
     checks=data.get('checks',[]);requests=redact(evidence_records(result,directory));config=result.get('configuration') or {}
     status_counts=Counter(c.get('status') for c in checks)
     local_count=sum('tolerance_boundaries' in str(c.get('id','')) for c in checks)
@@ -204,14 +241,14 @@ def render_report(result, directory=None):
     total=max(1,len(checks));distribution=''.join('<span class="'+s+'" style="width:'+str(n/total*100)+'%"></span>' for s,n in status_counts.items() if s in STATUS)
     runtime_info=[('渠道地址',config.get('base') or '未记录'),('模型 ID',config.get('model') or '未记录'),('检测程序',data.get('engine') or '未记录'),
         ('运行状态',STATUS.get(result.get('status'),result.get('status','未记录'))),('本轮耗时',elapsed_text),
-        ('执行进度',f'{summary.get("completed",0)} / {summary.get("total","未记录")} '+('请求样本' if cc else 'pytest 项')),
+        ('执行进度',f'{summary.get("completed",0)} / {summary.get("total","未记录")} '+('请求样本' if cc else '观察项' if browser else 'pytest 项')),
         ('单次超时',str(config['timeout'])+' 秒' if config.get('timeout') is not None else '未记录')]
     openai=result.get('request_format')=='openai' or config.get('request_format')=='openai' or (not cc and config.get('think_mode')=='openai')
-    runtime_info.append(('请求格式','OpenAI Chat Completions · /v1/chat/completions' if openai else 'Anthropic Messages · /v1/messages' if cc else 'Kimi 原生契约 · Chat Completions'))
+    runtime_info.append(('请求格式','按各项实际请求体与端点记录' if browser else 'OpenAI Chat Completions · /v1/chat/completions' if openai else 'Anthropic Messages · /v1/messages' if cc else 'Kimi 原生契约 · Chat Completions'))
     if cc:
         runtime_info.extend([('采样设置',('签名不适用 · ' if openai else f'签名 {config.get("signature_samples","未记录")} 次 · ')+f'普通 SSE {config.get("sse_samples","未记录")} 次 · 工具与非法模型各 1 次'),
             ('并发 / 鉴权',str(config.get('concurrency','未记录'))+' / '+('x-api-key' if config.get('auth')=='anthropic' else config.get('auth','未记录')))])
-    else:
+    elif not browser:
         runtime_info.extend([('KVV Schema / 原生版本',result.get('revision','未记录')),('格式范围','全部四个检测层面使用兼容断言，原生专项另行说明' if openai else str(config.get('think_mode','未记录'))+'；原生 K3 专项保留官方字段')])
     info='<dl class="key-value">'+''.join('<dt>'+esc(k)+'</dt><dd>'+esc(v)+'</dd>' for k,v in runtime_info)+'</dl>'
     scopes='<ul class="scope-list">'+''.join('<li>'+prose(x)+'</li>' for x in data.get('scope',[]))+'</ul>'
@@ -231,7 +268,7 @@ def render_report(result, directory=None):
         check_html.append('<article class="check" id="check-'+str(i+1)+'" data-status="'+esc(c.get('status','inconclusive'))+'"><div class="check-head"><div><h3>'+f'{i+1:02d} · '+esc(c.get('title') or c.get('id'))+'</h3><details class="case-id"><summary></summary><code>'+esc(c.get('id',''))+'</code></details></div>'+badge(c.get('status'))+'</div>'
             +'<p class="method"><span class="field-label">怎么测</span>'+prose(c.get('method'))+'</p><div class="comparison"><div><span class="field-label">预期行为</span><p>'+prose(c.get('expected'))+'</p></div><div class="actual"><span class="field-label">实际结果</span><p>'+prose(c.get('observed_summary') or c.get('observed'))+'</p></div></div>'
             +'<div class="interpretation"><div><span class="field-label">结果说明</span><p>'+prose(c.get('meaning'))+'</p></div><div><span class="field-label">下一步建议</span><p>'+prose(c.get('next_step'))+'</p></div></div>'
-            +('<div class="evidence-links">请求证据：'+links(c.get('request_ids',[]))+'</div>' if c.get('request_ids') else '')+(raw_block('逐样本结果明细',c.get('observed')) if c.get('observed_summary') else '')+raw_block('原始判定与断言',c.get('raw'))+'</article>')
+            +('<div class="evidence-links">请求证据：'+links(c.get('request_ids',[]))+'</div>' if c.get('request_ids') else '')+media_html(c.get('media'))+(raw_block('逐样本结果明细',c.get('observed')) if c.get('observed_summary') else '')+raw_block('原始判定与断言',c.get('raw'))+'</article>')
     durations=[r.get('duration_ms') for r in requests if isinstance(r.get('duration_ms'),(int,float)) and math.isfinite(r['duration_ms'])]
     if durations:
         ordered=sorted(durations);p95=ordered[max(0,math.ceil(len(ordered)*.95)-1)];maximum=max(durations)
@@ -244,6 +281,7 @@ def render_report(result, directory=None):
         ids='\n'.join(str(x.get('header','Request ID'))+': '+str(x.get('value','')) if isinstance(x,dict) else str(x) for x in upstream) or '上游未提供 / 本次未记录'
         kv=[('所属用例 / 探针',r.get('case_id')),('请求地址',str(r.get('method') or '')+' '+str(r.get('url') or '未记录')),
             ('HTTP 状态',r.get('http_status')),('请求耗时',seconds(r.get('duration_ms'))),('结束方式',TERMINATIONS.get(r.get('termination'),r.get('termination'))),('上游 Request ID',ids)]
+        if r.get('model'):kv.insert(0,('所属模型',r['model']))
         if r.get('first_byte_ms') is not None:kv.append(('首字节耗时',seconds(r['first_byte_ms'])))
         if r.get('transport_status'):kv.append(('传输独立判定',STATUS.get(r['transport_status'],r['transport_status'])))
         facts='<dl class="key-value">'+''.join('<dt>'+esc(k)+'</dt><dd>'+prose(v)+'</dd>' for k,v in kv)+'</dl>'
@@ -257,7 +295,7 @@ def render_report(result, directory=None):
     wire_items=''.join('<div class="transport-item">'+badge(x.get('status'))+' <b>'+esc(x.get('label') or x.get('id'))+'</b> · '+links([x.get('request_id','')])+'<p>'+prose(x.get('detail') or x.get('details'))+'</p></div>' for x in wire if x.get('status')!='passed')
     wire_html='<section class="section"><div class="section-head"><div><span class="index">TRANSPORT</span><h2>附加传输检查</h2><p>与官方用例结果分开统计：通过 '+str(wire_counts['passed'])+'，失败 '+str(wire_counts['failed'])+'，无法判定 '+str(wire_counts['inconclusive'])+'。</p></div></div><div class="transport-list">'+wire_items+'</div></section>' if wire else ''
     limitations=list(data.get('limitations',[]))+['HTTP 成功不等于验收通过；报告中的模型名称为请求或响应字段，不能单独作为真实模型身份证明。',
-        '原始字段在本 HTML 中按段展示，超长字段会明确标注缩略。JSON 结果与 ZIP 证据包保留已采集的数据；被截断或未读完的响应不声称完整。']
+        '原始字段在本 HTML 中按段展示，超长字段会明确标注缩略。被截断或未读完的响应不声称完整。']
     notes=result.get('classification_notes') or []
     note_html='<div class="panel" style="margin-top:14px"><h3>结果归类说明</h3><p>'+prose(notes)+'</p></div>' if notes else ''
     result_json=raw_block('查看报告原始 JSON（已脱敏）',result)
@@ -266,7 +304,7 @@ def render_report(result, directory=None):
         +'<div class="masthead"><span class="brand">小小宇宙无敌</span><span class="eyebrow">CHANNEL ACCEPTANCE REPORT</span><button class="button no-print" id="print-report">打印 / 保存 PDF</button></div>'
         +'<header class="cover"><div class="cover-top"><span class="eyebrow">'+esc(title)+'</span>'+badge(result.get('status'))+'</div><h1>'+esc(model)+'</h1><p>'+esc(config.get('base') or '渠道地址未记录')+'</p><p class="run-id">RUN / '+esc(result.get('run_id') or '未记录')+'</p></header>'
         +'<nav class="nav"><a href="#overview">结论总览</a><a href="#score">能力评分</a><a href="#setup">范围与配置</a><a href="#findings">发现的问题</a><a href="#checks">逐项检查</a><a href="#requests">请求证据</a><a href="#limits">判读说明</a></nav>'
-        +'<section id="overview" class="overview"><div class="verdict-line"><div><h2>'+esc(verdict.get('label',''))+'</h2><p>'+esc(verdict.get('detail',''))+'</p></div>'+badge(verdict.get('status'))+'</div><div class="metrics">'+metrics+'</div><div class="distribution" aria-hidden="true">'+distribution+'</div><p class="legend">本报告列出 '+str(len(checks))+' 个验收项 / 用例；'+('请求样本：通过 '+str(summary.get('passed',0))+'，未通过 '+str(summary.get('failed',0))+'，无法判定 '+str(summary.get('inconclusive',0))+'。' if cc else '官方用例、附加传输检查与真实请求数分别统计。')+'</p></section>'+score_html
+        +'<section id="overview" class="overview"><div class="verdict-line"><div><h2>'+esc(verdict.get('label',''))+'</h2><p>'+esc(verdict.get('detail',''))+'</p></div>'+badge(verdict.get('status'))+'</div><div class="metrics">'+metrics+'</div><div class="distribution" aria-hidden="true">'+distribution+'</div><p class="legend">本报告列出 '+str(len(checks))+' 个验收项 / 用例；'+('请求样本：通过 '+str(summary.get('passed',0))+'，未通过 '+str(summary.get('failed',0))+'，无法判定 '+str(summary.get('inconclusive',0))+'。' if cc else '浏览器检查结果与实际 HTTP 请求数分别统计。' if browser else '官方用例、附加传输检查与真实请求数分别统计。')+'</p></section>'+score_html
         +'<section id="setup" class="section"><div class="section-head"><div><span class="index">01 / SCOPE</span><h2>这次测了什么</h2></div></div><div class="grid-two"><div class="panel">'+info+'</div><div class="panel">'+scopes+'</div></div></section>'
         +'<section id="findings" class="section"><div class="section-head"><div><span class="index">02 / FINDINGS</span><h2>问题与影响</h2><p>依据本轮已保存的响应和断言整理；建议用于核对链路，不代替上游日志。</p></div></div>'+finding_html+'</section>'
         +'<section id="checks" class="section"><div class="section-head"><div><span class="index">03 / CHECKS</span><h2>逐项验收说明</h2></div><small id="visible-count"></small></div><div class="filters no-print">'
