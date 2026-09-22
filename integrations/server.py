@@ -27,6 +27,104 @@ JOBS = {}
 LOCK = threading.RLock()
 SUITES = {'kvv11', 'kvvfull', 'ccmax'}
 MAX_BATCH_MODELS = 30
+
+# Capability modules are a presentation and coverage contract shared by the
+# KVV, CCMax and future suites.  The runners may still execute their fixed,
+# reviewed probes, but disabled modules are explicitly marked not_covered in
+# the persisted result so they never inflate the score or verdict.
+MODULES = {
+    'kvv': {
+        'protocol': {'label': '参数与协议契约', 'weight': 40},
+        'max_tokens': {'label': 'max_tokens 长度控制', 'weight': 15},
+        'tools': {'label': '工具调用与 Schema', 'weight': 15},
+        'cache': {'label': '缓存与 Token 计量', 'weight': 15},
+        'multimodal': {'label': '多模态输入', 'weight': 15},
+        'reliability': {'label': '稳定性与性能', 'weight': 0},
+    },
+    'ccmax': {
+        'protocol': {'label': 'Claude 协议与错误', 'weight': 30},
+        'reliability': {'label': '流式稳定性', 'weight': 25},
+        'tools': {'label': '工具调用', 'weight': 15},
+        'cache': {'label': 'usage 与缓存', 'weight': 15},
+        'security': {'label': '安全与一致性', 'weight': 15},
+        'max_tokens': {'label': '参数边界', 'weight': 0},
+    },
+}
+
+def _module_defs(suite):
+    return MODULES['ccmax' if suite == 'ccmax' else 'kvv']
+
+def _case_modules(entry, suite):
+    """Infer capability dimensions for a raw runner case/check."""
+    if not isinstance(entry, dict):
+        return set()
+    explicit = entry.get('dimensions')
+    if isinstance(explicit, (list, tuple, set)) and explicit:
+        return {str(x) for x in explicit}
+    ident = ' '.join(str(entry.get(k, '')) for k in ('id', 'title', 'label', 'probe', 'category', 'check')).lower()
+    out = set()
+    if any(x in ident for x in ('tool', 'schema', 'function', 'calculator')): out.add('tools')
+    if any(x in ident for x in ('cache', 'usage', 'prompt_token', 'token')): out.add('cache')
+    if any(x in ident for x in ('video', 'image', 'multimodal', 'vision')): out.add('multimodal')
+    if any(x in ident for x in ('max_token', 'max-completion', 'length')): out.add('max_tokens')
+    if any(x in ident for x in ('signature', 'message_', 'error', 'protocol', 'json')): out.add('protocol')
+    if any(x in ident for x in ('stream', 'connection', 'reliab', 'sse')): out.add('reliability')
+    if any(x in ident for x in ('injection', 'hierarchy', 'fingerprint', 'distill', 'security', 'parameter')): out.add('security')
+    if not out:
+        out.add('protocol')
+    # CCMax advanced security probes are deliberately isolated from protocol.
+    if suite == 'ccmax' and any(x in ident for x in ('injection', 'hierarchy', 'fingerprint', 'behavioral')):
+        out.discard('protocol'); out.add('security')
+    return out
+
+def apply_enabled_modules(result, config):
+    """Annotate disabled capability entries as ``not_covered``.
+
+    This runs after the fixed runner so evidence remains available for audit,
+    while the report/score can clearly distinguish disabled modules from
+    failures and successful checks.
+    """
+    if not isinstance(result, dict):
+        return result
+    suite = str(config.get('suite') or result.get('suite') or '')
+    defs = _module_defs(suite)
+    requested = config.get('enabled_modules')
+    enabled = set(requested) if isinstance(requested, list) and requested else set(defs)
+    enabled &= set(defs)
+    result['enabled_modules'] = sorted(enabled)
+    result['module_definitions'] = defs
+    if suite == 'batch_acceptance':
+        for child in result.get('results') or []:
+            child_result = child.get('result') if isinstance(child, dict) else None
+            if isinstance(child_result, dict):
+                apply_enabled_modules(child_result, config)
+        return result
+    containers = []
+    for key in ('cases', 'checks'):
+        value = result.get(key)
+        if isinstance(value, list): containers.append(value)
+    for entries in containers:
+        for entry in entries:
+            if not isinstance(entry, dict): continue
+            dims = _case_modules(entry, 'ccmax' if suite in ('ccmax','ccmax_acceptance') else 'kvv')
+            entry.setdefault('dimensions', sorted(dims))
+            disabled = bool(dims) and not (dims & enabled)
+            if disabled and entry.get('status') not in ('not_covered', 'skipped'):
+                entry['original_status'] = entry.get('status')
+                entry['status'] = 'not_covered'
+                entry['skip_reason'] = '本轮未启用模块：' + '、'.join(defs[d]['label'] for d in sorted(dims) if d in defs)
+                entry['detail'] = entry.get('skip_reason')
+                entry['not_covered'] = True
+    primary = result.get('checks') if suite in ('ccmax','ccmax_acceptance') else result.get('cases')
+    if isinstance(primary, list) and primary:
+        summary = dict(result.get('summary') or {})
+        for status in ('passed','failed','inconclusive','skipped','not_covered','cancelled'):
+            summary[status] = sum(1 for x in primary if isinstance(x, dict) and x.get('status') == status)
+        summary['total'] = len(primary)
+        summary['completed'] = sum(1 for x in primary if isinstance(x, dict) and x.get('status') not in ('running',))
+        result['summary'] = summary
+    return result
+
 QUEUE_META = REPORTS / '.jobs.json'
 AUTH_STORE = Store(os.environ.get('WORKBENCH_DB', str(ROOT / 'workbench.sqlite3')), os.environ.get('WORKBENCH_AUTH_FILE') or None)
 
@@ -94,6 +192,27 @@ def validate(data):
     advanced = data.get('advanced', True if c['suite'] == 'ccmax' else False)
     if not isinstance(advanced, bool): raise ValueError('高级 CCMax 探针开关必须为布尔值')
     c['advanced'] = advanced
+    # Module selection is optional for backwards compatibility.  An omitted
+    # selection means every reviewed module for the selected suite; invalid
+    # names are rejected before any provider request is made.
+    available = _module_defs(c['suite'])
+    raw_modules = data.get('enabled_modules')
+    if raw_modules is None:
+        c['enabled_modules'] = sorted(available)
+    else:
+        if not isinstance(raw_modules, list):
+            raise ValueError('enabled_modules 必须是数组')
+        selected_modules = []
+        for value in raw_modules:
+            value = str(value).strip()
+            if value and value not in selected_modules:
+                selected_modules.append(value)
+        unknown = [value for value in selected_modules if value not in available]
+        if unknown:
+            raise ValueError('存在无效检测模块：' + '、'.join(unknown))
+        if not selected_modules:
+            raise ValueError('至少启用一个检测模块')
+        c['enabled_modules'] = selected_modules
     return c
 
 def _persist_jobs():
@@ -134,6 +253,10 @@ def run_job(job,c):
             result = run(c,emit,job['cancel'].is_set)
         else: result = kvv_runner.run(c,emit,job['cancel'].is_set,directory)
         result = clean(result,key)
+        # Mark disabled modules after the runner has produced its reviewed
+        # evidence.  This keeps raw request evidence intact while preventing
+        # unselected dimensions from being scored as passing.
+        apply_enabled_modules(result, c)
         result['configuration'] = clean({**result.get('configuration',{}), **{k:v for k,v in c.items() if k!='key'}})
     except Exception as exc:
         result = {'suite':c['suite'],'status':'error','error':clean(str(exc),key),'summary':{}}
@@ -219,7 +342,10 @@ def run_batch(parent, config):
             status='cancelled' if cancelled else ('completed' if completed==len(models) else 'inconclusive')
             summary={'total':len(models),'completed':completed,'passed':counts['passed'],'failed':counts['failed'],'inconclusive':counts['inconclusive'],'cancelled':counts['cancelled'],'not_run':counts['not_run']}
             safe_config={k:v for k,v in config.items() if k!='key'};safe_config['model']=f'多模型对比（{len(models)}）';safe_config['models']=models
-            result={'suite':'batch_acceptance','status':status,'configuration':safe_config,'results':results,'models':models,'summary':summary,'verdict':verdict,'run_id':parent['id'],'started_at':parent['started_at'],'finished_at':time.time(),'log':'批量模型按顺序独立执行；未自动重试。'}
+            result={'suite':'batch_acceptance','status':status,'configuration':safe_config,'results':results,'models':models,'summary':summary,
+                    'enabled_modules': list(config.get('enabled_modules') or []),
+                    'module_definitions': _module_defs(config.get('suite')),
+                    'verdict':verdict,'run_id':parent['id'],'started_at':parent['started_at'],'finished_at':time.time(),'log':'批量模型按顺序独立执行；未自动重试。'}
             parent['result']=result;parent['status']=status;parent['summary']=summary;parent['completed']=completed;parent['total']=len(models);parent['finished_at']=result['finished_at']
         directory=REPORTS/parent['id'];directory.mkdir(parents=True,exist_ok=True)
         (directory/'report.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')

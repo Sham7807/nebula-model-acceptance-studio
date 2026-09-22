@@ -4,6 +4,7 @@ This module never sends a request to a model. A successful generation is only a
 successful response, not proof of tool execution, cache hits or model identity.
 """
 from copy import deepcopy
+import json
 import time
 
 
@@ -45,7 +46,8 @@ def request_record(raw, identity, model, case_id=''):
             'status': status, 'http_status': code, 'duration_ms': raw.get('duration_ms', raw.get('elapsedMs')),
             'method': raw.get('method'), 'url': raw.get('url'), 'request_body': raw.get('request', raw.get('body')),
             'response_body': raw.get('response', raw.get('raw')), 'response_headers': raw.get('headers'),
-            'notes': [raw['error']] if raw.get('error') else [], 'extra': raw, 'assessments': []}
+            'notes': [raw['error']] if raw.get('error') else [], 'extra': raw, 'assessments': [],
+            'observed_fields': {key: raw.get(key) for key in ('model','finish_reason','completion_tokens','prompt_tokens','cached_tokens','tool_calls','usage','media_count') if raw.get(key) is not None}}
 
 
 def normalize_browser_report(payload):
@@ -90,12 +92,16 @@ def normalize_browser_report(payload):
                 name = str(check.get('name') or check.get('title') or '通用检查')
                 status = check.get('status') if check.get('status') in ('passed', 'failed', 'inconclusive', 'cancelled', 'skipped') else 'inconclusive'
                 check_model = check.get('model') or (model if not _list(result.get('batch')) else '旧记录未保存逐项模型')
+                fields = {key: check.get(key) for key in ('model','finish_reason','completion_tokens','prompt_tokens','cached_tokens','tool_calls','http_status','duration_ms') if check.get(key) is not None}
+                observed = check.get('result', check.get('observed'))
+                if fields:
+                    observed = '%s\n实测字段：%s' % (observed or '已记录检查结果', json.dumps(fields, ensure_ascii=False, default=str))
                 cases.append({'id': '%s-check-%s' % (prefix, ci+1), 'title': '%s · %s' % (check_model, name), 'model': check_model,
                     'status': status, 'method': '运行通用检测内置“%s”用例，并保留本次返回的判定。' % name,
                     'expected': check.get('expected') or '符合该内置用例的输出与协议断言；旧记录未保存独立预期值，详见原始判定。',
-                    'observed': check.get('result', check.get('observed')), 'meaning': check.get('judge') or '依据保存的原始判定；单项不能推导所有能力。',
+                    'observed': observed, 'meaning': check.get('judge') or '依据保存的原始判定；单项不能推导所有能力。',
                     'next_step': '优先按模型和请求地址核对失败项，再重跑该专项。' if status != 'passed' else '此结论仅适用于当前样本；可增加输入、并发和重复测试。',
-                    'metadata': {'dimensions': dimensions_for(name)}, 'raw': check, 'request_ids': []})
+                    'metadata': {'dimensions': dimensions_for(name), 'module': dimensions_for(name)[0]}, 'raw': check, 'request_ids': []})
         else:
             status = STATUS.get(record.get('status') or result.get('status'), 'inconclusive')
             title = result.get('preset') or (KINDS.get(kind, kind) + '基础测试')
@@ -105,7 +111,7 @@ def normalize_browser_report(payload):
                 'expected': '返回与所选接口协议匹配的文本或媒体结果；生成、编辑和理解能力以实际请求体为准。',
                 'observed': observed, 'meaning': '返回成功仅表示本次接口响应可解析，不自动证明生成质量或工具、缓存、长度控制专项通过。',
                 'next_step': result.get('diagnostic') or ('核对错误正文、模型名、端点和鉴权；需要时联系渠道方按请求 ID 排查。' if status == 'failed' else '结合输出复核质量，并使用通用检测或专项验收验证工具、缓存与长度控制。'),
-                'metadata': {'dimensions': ['protocol']}, 'request_ids': record_requests,
+                'metadata': {'dimensions': dimensions_for(title), 'module': dimensions_for(title)[0]}, 'request_ids': record_requests,
                 'raw': result, 'media': _list(record.get('media'))})
     if not cases:
         cases = [{'id': 'missing-evidence', 'title': '检查证据不完整', 'status': 'inconclusive', 'model': '、'.join(models),

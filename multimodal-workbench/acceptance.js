@@ -7,6 +7,26 @@ let selected='general',runningSuite='',token='',runId='',active=false,pollTimer=
 let serviceState='connecting',kvvRevision='';
 const suiteRuns=new Map(),historyNotified=new Set();
 let displayedRunId='',pollGeneration=0,restoring=false;
+/* The overview is deliberately kept separate from the verifier's case list.  It
+ * gives operators a fast, weighted view of coverage while the list below keeps
+ * the exact upstream case names (and therefore remains backwards compatible). */
+const acceptanceModules={
+ kimi:[
+  {id:'protocol',title:'K3 契约预检',weight:40,requests:4,desc:'基础协议、响应结构与错误映射'},
+  {id:'max_tokens',title:'max_tokens',weight:15,requests:2,desc:'限制透传、截断与 finish_reason'},
+  {id:'tools',title:'工具调用',weight:15,requests:3,desc:'顶层工具、强制调用与参数 JSON'},
+  {id:'cache',title:'缓存真伪',weight:15,requests:2,desc:'usage 缓存字段与重复前缀观测'},
+  {id:'multimodal',title:'多模态输入',weight:15,requests:2,desc:'图片、视频 URL 与能力声明'}
+ ],
+ ccmax:[
+  {id:'protocol',title:'协议与流式',weight:35,requests:4,desc:'SSE 收尾、事件顺序与连接关闭'},
+  {id:'parameters',title:'参数与错误',weight:15,requests:3,desc:'非法参数、错误状态与诊断'},
+  {id:'tools',title:'工具调用',weight:20,requests:3,desc:'工具增量与 JSON 参数完整性'},
+  {id:'security',title:'安全与一致性',weight:15,requests:3,desc:'指令层级、注入与重复行为'},
+  {id:'cache',title:'Usage / 缓存',weight:15,requests:2,desc:'token、缓存字段与计数'}
+ ]
+};
+let enabledModules={kimi:new Set(acceptanceModules.kimi.map(m=>m.id)),ccmax:new Set(acceptanceModules.ccmax.map(m=>m.id))};
 const statuses={passed:'通过',failed:'未通过',skipped:'已跳过',inconclusive:'无法判定',error:'运行错误',cancelled:'已取消',completed:'测试已完成',running:'运行中',not_covered:'未覆盖'};
 const ccItems=['无效 thinking 签名','message_start 唯一性','message_stop 完整收尾','连接及时关闭','流中错误事件','错误状态与格式','usage / 缓存字段','工具参数 JSON 增量','系统提示词注入与金丝雀泄露','指令层级与越权覆盖','重复行为一致性（蒸馏风险启发式）','非法参数拒绝与错误诊断'];
 const quickItems=['基础请求 · non-thinking','基础请求 · thinking','非法温度 · non-thinking','非法温度 · thinking','Tool Schema · 非流式','Tool Schema · 流式','Dynamic tools','JSON Object 输出','tool_choice required','Prompt Tokens · 基础','Prompt Tokens · 工具'];
@@ -35,7 +55,7 @@ function selectedAcceptanceModels(){
 function config(){
  const requestFormat=selected==='ccmax'?el('acceptanceFormat').value:el('acceptanceThinkMode').value==='openai'?'openai':'native';
  const models=selectedAcceptanceModels();
- return {suite:selected==='ccmax'?'ccmax':el('acceptanceScope').value,base:el('acceptanceBase').value.trim(),key:el('acceptanceKey').value.trim(),model:models[0]||el('acceptanceModel').value.trim(),models,timeout:Number(el('acceptanceTimeout').value),signature_samples:Number(el('acceptanceSignature').value),sse_samples:Number(el('acceptanceSse').value),concurrency:2,auth:requestFormat==='openai'?'bearer':el('acceptanceAuth').value,request_format:requestFormat,think_mode:el('acceptanceThinkMode').value,thinking:!['none','openai'].includes(el('acceptanceThinkMode').value),advanced:selected==='ccmax'};
+ return {suite:selected==='ccmax'?'ccmax':el('acceptanceScope').value,base:el('acceptanceBase').value.trim(),key:el('acceptanceKey').value.trim(),model:models[0]||el('acceptanceModel').value.trim(),models,timeout:Number(el('acceptanceTimeout').value),signature_samples:Number(el('acceptanceSignature').value),sse_samples:Number(el('acceptanceSse').value),concurrency:2,auth:requestFormat==='openai'?'bearer':el('acceptanceAuth').value,request_format:requestFormat,think_mode:el('acceptanceThinkMode').value,thinking:!['none','openai'].includes(el('acceptanceThinkMode').value),advanced:selected==='ccmax',enabled_modules:[...(enabledModules[selected]||[]) ]};
 }
 function updatePlan(){
  const cc=selected==='ccmax',full=el('acceptanceScope').value==='kvvfull',openai=cc?el('acceptanceFormat').value==='openai':el('acceptanceThinkMode').value==='openai';
@@ -48,7 +68,26 @@ function updatePlan(){
  el('acceptanceCcFormatHelp').textContent=openai?'请求发送到 /v1/chat/completions，使用 Bearer 鉴权；签名校验不适用于此协议，不发送请求、不计入评分。':'请求发送到 /v1/messages；Bearer 仅改变鉴权，不改变原生 Messages 请求体。';
  const items=cc?(openai?openaiCcItems:ccItems):openai?(full?openaiFullItems:openaiQuickItems):full?fullItems:quickItems;
  const title=cc?(openai?'11 类 OpenAI 兼容验收检查':'12 类渠道验收检查（含 4 项安全与一致性探针）'):openai?(full?'OpenAI 全范围兼容验证':'11 项 OpenAI 兼容预检'):full?'全套 API verifier':'11 项代表性预检';
- const root=el('acceptancePlan');root.replaceChildren(make('h3','',title));
+ const root=el('acceptancePlan');root.replaceChildren();
+ const moduleSuite=cc?'ccmax':'kimi', modules=acceptanceModules[moduleSuite];
+ const overview=make('div','acceptance-module-overview');
+ const overviewHead=make('div','acceptance-module-head');
+ overviewHead.append(make('div','', '检测模块'),make('small','', '勾选要纳入本轮验收的能力维度 · 权重合计决定最终评分'));
+ overview.append(overviewHead);
+ const cards=make('div','acceptance-module-cards');
+ modules.forEach(module=>{
+  const card=make('label','acceptance-module-card');card.dataset.module=module.id;
+  const check=document.createElement('input');check.type='checkbox';check.checked=enabledModules[moduleSuite].has(module.id);check.dataset.module=module.id;
+  const mark=make('i','module-check','✓');
+  const body=make('div','module-card-body');body.append(make('strong','',module.title),make('small','',module.desc));
+  const meta=make('div','module-card-meta');meta.append(make('b','',module.weight+'%'),make('em','',`约 ${module.requests} 次请求`));
+  card.append(check,mark,body,meta);cards.append(card);
+  check.addEventListener('change',()=>{if(check.checked)enabledModules[moduleSuite].add(module.id);else enabledModules[moduleSuite].delete(module.id);updatePlan();});
+ });
+ overview.append(cards);
+ const selectedWeight=modules.filter(m=>enabledModules[moduleSuite].has(m.id)).reduce((sum,m)=>sum+m.weight,0);
+ overview.append(make('p','acceptance-module-summary',`已启用 ${enabledModules[moduleSuite].size}/${modules.length} 个模块 · 覆盖权重 ${selectedWeight}%`));
+ root.append(overview,make('h3','acceptance-plan-title',title));
  const list=make('ol','acceptance-plan-list');items.forEach((text,i)=>{const item=make('li');item.append(make('i','',String(i+1).padStart(2,'0')),make('span','',text));list.append(item);});root.append(list);
  const note=cc?(openai?'按 OpenAI delta / tool_calls / [DONE] 验证流式响应；Claude 专属签名项明确列为不适用。安全和一致性探针只记录本轮行为，不能证明模型来源或蒸馏事实。':'包含协议、流式、工具、错误映射及安全与一致性探针。401、429、网络错误记为无法判定。'):openai?'兼容模式使用独立断言，不冒充官方原生验证通过。视频 URL、reasoning 等扩展不被支持、未观察到缓存命中时会记录限制；完整 Schema 矩阵可能超出部分渠道支持的子集。':full?'官方全套逐项执行，保留官方跳过项和本地检查。实际用例数量以收集结果为准，不自动重试失败请求。':'这是官方用例的抽样组合，Kimi-K3 会另外追加工作台能力探针；非法参数遇到鉴权或网络错误不会记为通过。';
  root.append(make('p','acceptance-plan-note',note));
@@ -60,7 +99,7 @@ async function api(path,options={}){
  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),path==='/api/models'?30000:12000);
  try{const r=await fetch(path,{...options,signal:controller.signal,cache:'no-store',headers:{'Content-Type':'application/json','X-Workbench-Token':token,...options.headers}});if(!r.ok){let text;try{text=(await r.json()).error;}catch{}const error=new Error(text||'本地服务错误 '+r.status);error.status=r.status;throw error;}return r;}finally{clearTimeout(timer);}
 }
-function setActive(value){active=value;el('acceptanceFields').disabled=value||restoring;el('acceptanceRun').disabled=value||restoring||!serviceReady;el('acceptanceStop').disabled=!value;document.querySelectorAll('.deep-suite-tabs button[data-suite]:not([data-suite="general"])').forEach(b=>b.disabled=value&&b.dataset.suite!==runningSuite);}
+function setActive(value){active=value;el('acceptanceFields').disabled=value||restoring;el('acceptanceRun').disabled=value||restoring||!serviceReady;el('acceptanceStop').disabled=!value;document.querySelectorAll('.acceptance-module-card input').forEach(input=>{input.disabled=value||restoring;});document.querySelectorAll('.deep-suite-tabs button[data-suite]:not([data-suite="general"])').forEach(b=>b.disabled=value&&b.dataset.suite!==runningSuite);}
 function syncDownloads(){
  const saved=suiteRuns.get(selected),available=!!(saved&&saved.id===displayedRunId&&saved.data.result);
  document.querySelectorAll('[data-acceptance-download]').forEach(b=>b.disabled=!available);
@@ -105,6 +144,12 @@ function latestEventCases(events){
 function restoreConfiguration(job){
  const saved=job.result?.configuration;
  if(!saved||typeof saved!=='object'||Array.isArray(saved))return;
+ const suiteKey=job.suite==='ccmax'?'ccmax':'kimi';
+ if(Array.isArray(saved.enabled_modules)){
+  const allowed=new Set(acceptanceModules[suiteKey].map(module=>module.id));
+  const restoredModules=new Set(saved.enabled_modules.map(value=>String(value)).filter(value=>allowed.has(value)));
+  if(restoredModules.size)enabledModules[suiteKey]=restoredModules;
+ }
  const restored={};
  for(const [field,id,min,max] of [['signature_samples','acceptanceSignature',1,20],['sse_samples','acceptanceSse',1,200],['timeout','acceptanceTimeout',5,600]]){
   const value=Number(saved[field]);
@@ -119,9 +164,20 @@ function restoreConfiguration(job){
  }
 }
 function renderCase(item){
- const row=make('div','acceptance-case '+item.status);row.append(make('b','',item.applicable===false?'不适用':statuses[item.status]||item.status),make('span','',(item.title||item.label||item.id||item.probe||'测试项')+(Number.isInteger(item.samples)?`（${item.samples} 样本 / ${item.failures||0} 异常）`:'')));
- const detail=item.skip_reason||item.detail||item.details||item.issues||item.notes||item.observations;if(detail&&(typeof detail==='string'||detail.length)){
- const details=make('details'),summary=make('summary','','查看详情');details.append(summary,make('pre','',typeof detail==='string'?detail:JSON.stringify(detail,null,2)));row.append(details);}
+ const status=item.applicable===false?'not_covered':(item.status||'inconclusive');
+ const row=make('div','acceptance-case '+status);row.dataset.caseId=item.id||item.nodeid||'';
+ const title=(item.title||item.label||item.id||item.probe||'测试项')+(Number.isInteger(item.samples)?`（${item.samples} 样本 / ${item.failures||0} 异常）`:'' );
+ const detail=item.skip_reason||item.detail||item.details||item.issues||item.notes||item.observations;
+ const expected=item.expected||item.expectation||item.expected_result||item.requirement||'接口按协议返回可判定结果';
+ let actual=item.actual||item.observed||item.result||detail||statuses[status]||status;
+ if(typeof actual!=='string')actual=JSON.stringify(actual,null,2);
+ const grid=make('div','acceptance-matrix-row');
+ const resultCell=make('div','matrix-result');resultCell.append(make('span','status-dot '+status,item.applicable===false?'—':status==='passed'?'✓':status==='failed'||status==='error'?'×':'!'),make('b','',item.applicable===false?'不适用':statuses[status]||status));
+ grid.append(make('div','matrix-case',title),make('div','matrix-expected',typeof expected==='string'?expected:JSON.stringify(expected,null,2)),make('div','matrix-actual',actual),resultCell);
+ row.append(grid);
+ if(detail&&(typeof detail==='string'||detail.length)){
+  const details=make('details','matrix-details'),summary=make('summary','','查看请求证据与诊断');details.append(summary,make('pre','',typeof detail==='string'?detail:JSON.stringify(detail,null,2)));row.append(details);
+ }
  return row;
 }
 function duration(seconds){return seconds>=60?`${Math.floor(seconds/60)} 分 ${Math.floor(seconds%60)} 秒`:`${Math.floor(seconds)} 秒`;}
@@ -142,7 +198,12 @@ function render(data,id){
  if(result?.error)message(result.error,true);
  const events=data.events||[];
  const cases=result?.results?result.results.map(item=>({id:'batch-'+item.model,label:item.model+' · '+(item.status||'未完成'),status:item.status==='passed'?'passed':item.status==='failed'?'failed':'inconclusive',detail:item.result?.verdict?.detail||'该模型独立子任务已保存，可下载总报告查看逐项证据。'})):(result?(result.cases||result.checks||[]):latestEventCases(events));
- const transportCases=(result?.transport?.checks||[]).filter(x=>x.status!=='passed');el('acceptanceCases').replaceChildren(...cases.slice(-700).map(renderCase),...transportCases.map(renderCase));
+ const transportCases=(result?.transport?.checks||[]).filter(x=>x.status!=='passed');
+ const matrixCases=[...cases.slice(-700),...transportCases];
+ const matrix=el('acceptanceCases');matrix.replaceChildren();
+ if(matrixCases.length){
+  const head=make('div','acceptance-matrix-head');head.append(make('span','','检测项'),make('span','','期望'),make('span','','实际结果'),make('span','','状态'));matrix.append(head,...matrixCases.map(renderCase));
+ }
  renderHistoryState(data,id);
  el('acceptanceLog').textContent=result?.log||events.slice(-20).map(e=>e.message||e.case?.id||`${e.completed??''}${e.total?' / '+e.total:''}`).join('\n');
  syncDownloads();

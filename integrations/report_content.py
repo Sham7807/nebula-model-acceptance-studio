@@ -587,6 +587,108 @@ REPORT_DIMENSIONS = (
     ("reliability", "稳定性与性能"),
 )
 
+# The report is intentionally organized around the same five capability cards
+# shown in the workbench.  ``dimensions`` remains available for backwards
+# compatibility and for deep technical filtering; modules are the reviewer
+# facing weighted view.  A module is only scored from checks that have stored
+# evidence, so an unchecked card is shown as “未覆盖” instead of being treated
+# as a silent pass.
+MODULE_PRESETS = {
+    "kvv": (
+        ("contract", "K3 契约预检", 40, "连通性、响应格式、参数校验、reasoning/thinking、流式收尾与鉴权错误。"),
+        ("max_tokens", "max_tokens 生效性", 15, "检查长度上限是否透传、completion_tokens 与 finish_reason 是否一致。"),
+        ("tools", "工具调用验证", 15, "覆盖顶层工具、动态工具、tool_choice 和 arguments 结构。"),
+        ("cache", "缓存真伪判别", 15, "对比重复请求 usage/cached_tokens 与响应稳定性，区分字段存在和真实命中。"),
+        ("multimodal", "多模态输入探针", 15, "验证图像、视频、音频或其他内容块是否被接受并返回可判读结果。"),
+    ),
+    "cc": (
+        ("protocol", "协议与流式收尾", 35, "检查消息起始、增量、收尾、错误事件与响应流结束。"),
+        ("tools", "工具调用与 JSON", 20, "检查工具声明、增量 JSON、调用 ID 和参数完整性。"),
+        ("cache", "缓存与 usage", 15, "检查 token/缓存字段结构并保留可核对的原始 usage 证据。"),
+        ("security", "安全与一致性", 15, "提示词泄露、指令层级和重复行为仅作为风险启发式信号。"),
+        ("parameters", "参数与错误映射", 15, "检查非法参数、非法模型和结构化错误是否可诊断。"),
+    ),
+    "browser": (
+        ("protocol", "接口与协议", 25, "保存请求、HTTP 状态、响应正文与错误诊断。"),
+        ("multimodal", "多模态结果", 25, "按图像、视频、音频和文本结果分别展示媒体证据。"),
+        ("tools", "工具调用", 15, "展示工具声明、调用结果和调用失败原因。"),
+        ("max_tokens", "长度控制", 10, "展示 max_tokens、完成长度和终止原因。"),
+        ("cache", "缓存与 usage", 10, "展示 usage/cached_tokens 字段及重复请求观察。"),
+        ("reliability", "稳定性与性能", 15, "展示耗时、失败率、取消和超时证据。"),
+    ),
+}
+
+
+def _module_preset(result):
+    suite = _text(_dict(result).get("suite"))
+    if suite in ("ccmax", "ccmax_acceptance"):
+        return MODULE_PRESETS["cc"]
+    if suite == "browser_report":
+        return MODULE_PRESETS["browser"]
+    return MODULE_PRESETS["kvv"]
+
+
+def _module_id_for_check(check, result):
+    """Map one check to exactly one weighted module."""
+    check = _dict(check)
+    metadata = _dict(check.get("metadata"))
+    explicit = metadata.get("module") or check.get("module")
+    if explicit:
+        return _text(explicit)
+    suite = _text(_dict(result).get("suite"))
+    check_id = _text(check.get("id"))
+    dims = set(_list(metadata.get("dimensions")) or _list(check.get("dimensions")))
+    if suite in ("ccmax", "ccmax_acceptance"):
+        if check_id in {"tool_stream"} or "tools" in dims:
+            return "tools"
+        if check_id in {"usage_cache"} or "cache" in dims:
+            return "cache"
+        if check_id in {"prompt_injection", "instruction_hierarchy", "behavioral_consistency"}:
+            return "security"
+        if check_id in {"parameter_validation", "error_format"}:
+            return "parameters"
+        return "protocol"
+    if "max_tokens" in dims:
+        return "max_tokens"
+    if "tools" in dims:
+        return "tools"
+    if "cache" in dims:
+        return "cache"
+    if "multimodal" in dims:
+        return "multimodal"
+    # KVV's first card is intentionally broader than the technical
+    # ``protocol`` dimension: all ordinary contract/parameter/response checks
+    # belong to that weighted card.
+    return "contract" if suite not in ("browser_report",) else "protocol"
+
+
+def _report_modules(checks, result):
+    modules = []
+    for module_id, label, weight, description in _module_preset(result):
+        matched = [check for check in checks if _module_id_for_check(check, result) == module_id]
+        matched = [check for check in matched if not check.get("local_only") and check.get("applicable") is not False]
+        counts = _counts(matched)
+        observed = [check for check in matched if check.get("status") in ("passed", "failed", "inconclusive")]
+        covered = len(observed)
+        points = sum(1.0 if check.get("status") == "passed" else 0.4 if check.get("status") == "inconclusive" else 0.0 for check in observed)
+        score = round(points / covered * 100) if covered else 0
+        if not covered:
+            status = "not_covered"
+        elif counts.get("failed"):
+            status = "failed"
+        elif counts.get("inconclusive") or counts.get("skipped") or counts.get("cancelled") or counts.get("not_covered"):
+            status = "inconclusive"
+        else:
+            status = "passed"
+        modules.append({"id": module_id, "label": label, "weight": weight, "description": description,
+                        "score": score, "max_score": 100, "status": status, "covered": covered,
+                        "counts": counts, "check_ids": [_text(check.get("id")) for check in matched]})
+    covered = [module for module in modules if module["covered"]]
+    weight_total = sum(module["weight"] for module in covered)
+    weighted_total = round(sum(module["score"] * module["weight"] for module in covered) / weight_total) if weight_total else 0
+    return {"modules": modules, "weighted_total": weighted_total, "weight_covered": weight_total,
+            "weight_total": sum(module["weight"] for module in modules)}
+
 
 def _report_score(checks, result):
     """Return a transparent, dimensioned score for the HTML report.
@@ -598,7 +700,17 @@ def _report_score(checks, result):
     score so a reviewer can audit every number.
     """
     dimensions = []
+    enabled = result.get("enabled_modules")
+    enabled = set(enabled) if isinstance(enabled, (list, tuple, set)) and enabled else None
     for key, label in REPORT_DIMENSIONS:
+        # A module that was explicitly disabled is always shown as uncovered,
+        # even when a shared protocol check also carries another dimension.
+        if enabled is not None and key not in enabled:
+            dimensions.append({"id": key, "label": label, "score": 0, "max_score": 100,
+                               "status": "not_covered", "covered": 0,
+                               "counts": {"total": 0, "passed": 0, "failed": 0, "inconclusive": 0, "skipped": 0, "not_covered": 0, "cancelled": 0},
+                               "check_ids": [], "disabled": True})
+            continue
         matched = [check for check in checks if key in (_list(_dict(check.get("metadata")).get("dimensions")) or _list(check.get("dimensions")))]
         # Avoid double counting local-only helper checks in a capability score.
         matched = [check for check in matched if not check.get("local_only") and check.get('applicable') is not False]
@@ -634,10 +746,13 @@ def _report_score(checks, result):
             recommendations.append("补齐“%s”的超时、鉴权或断流证据，再重新运行未完成用例。" % dimension["label"])
     if not recommendations:
         recommendations.append("各已覆盖维度均有完整通过证据；仍建议扩大模型、输入和并发样本后复测。")
+    modules = _report_modules(checks, result)
     return {"total": total, "max_total": 100, "dimensions": dimensions,
             "covered_dimensions": len(covered_dims), "dimension_count": len(dimensions),
             "recommendations": recommendations,
-            "method": "等权维度；通过=100%，无法判定=40%，失败/跳过/未覆盖=0%。协议不适用项不计入分母；未覆盖维度不计入已覆盖维度平均分。总分只代表本轮已覆盖能力。"}
+            "modules": modules["modules"], "weighted_total": modules["weighted_total"],
+            "weight_covered": modules["weight_covered"], "weight_total": modules["weight_total"],
+            "method": "模块按权重计分；通过=100%，无法判定=40%，失败/跳过/未覆盖=0%。模块未覆盖时不计入加权总分；技术维度仍保留供审计。"}
 
 
 def build_report_data(result):
@@ -672,7 +787,9 @@ def build_report_data(result):
                 'scope': list(dict.fromkeys(['本次按勾选模型逐一独立执行；子任务不会复用上一模型的结果。'] + scopes)),
                 'focus': list(dict.fromkeys(focuses)), 'limitations': list(dict.fromkeys(limitations + ['批量总览不计算跨模型平均分；请按模型查看各自证据。'])),
                 'findings': _findings(checks, result), 'score': _report_score(checks, result), 'summary': summary,
-                'verdict': deepcopy(_dict(result.get('verdict'))), 'configuration': deepcopy(_dict(result.get('configuration'))), 'suite': suite}
+                'verdict': deepcopy(_dict(result.get('verdict'))), 'configuration': deepcopy(_dict(result.get('configuration'))),
+                'enabled_modules': deepcopy(_list(result.get('enabled_modules'))),
+                'module_definitions': deepcopy(_dict(result.get('module_definitions'))), 'suite': suite}
     if suite == 'browser_report':
         from browser_reports import report_data
         return report_data(result)
@@ -757,4 +874,5 @@ def build_report_data(result):
             "summary": deepcopy(summary), "verdict": deepcopy(_dict(result.get("verdict"))),
             "remote_case_counts": _counts(remote) if not cc else {}, "local_case_counts": _counts(local),
             "configuration": deepcopy(_dict(result.get("configuration"))), "score": score,
-            "focus": focus}
+            "enabled_modules": deepcopy(_list(result.get("enabled_modules"))),
+            "module_definitions": deepcopy(_dict(result.get("module_definitions"))), "focus": focus}
