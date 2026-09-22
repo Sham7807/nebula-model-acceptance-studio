@@ -340,7 +340,8 @@ dialog>p { font-size: 11px; color: var(--muted); }
 .legacy-bar { display: flex; justify-content: space-between; gap: 20px; align-items: center; padding: 12px 20px; background: #fff; border-bottom: 1px solid var(--line); }
 .legacy-bar p { font-size: 12px; color: var(--muted); }
 #legacyFrame { display: block; width: 100%; height: max(700px, calc(100vh - 180px)); border: 0; }
-#legacyView { background: #fff; border: 1px solid var(--line); border-radius: 13px; overflow: hidden; margin-top: 18px; }
+/* 深度检测和基础测试属于同一个工作区：不要在 iframe 外再套一层卡片边框。 */
+#legacyView { background: #fff; border: 0; border-radius: 0; overflow: visible; margin-top: 0; }
 @media (min-width: 1600px) {
   .workspace { grid-template-columns: 400px minmax(0, 1fr); }
   .media-item img, .media-item video { max-height: 480px; }

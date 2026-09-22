@@ -829,3 +829,12 @@ window.addEventListener('message',event=>{
   let holder=$('generalHistorySaveStatus');if(!holder){holder=node('div','history-save-status');holder.id='generalHistorySaveStatus';frame.parentNode.insertBefore(holder,frame);}
   if(window.HistoryCapture)window.HistoryCapture.record(data.record,{container:holder});
 });
+window.addEventListener('message',event=>{
+  const frame=$('legacyFrame');if(event.source!==frame?.contentWindow)return;
+  if(event.origin!==location.origin&&!(location.protocol==='file:'&&event.origin==='null'))return;
+  const height=Number(event.data?.height);
+  if(event.data?.type==='workbench:deep-resize'&&Number.isFinite(height)&&height>0){
+    frame.style.height=Math.min(Math.max(Math.ceil(height),700),200000)+'px';
+    requestAnimationFrame(()=>{try{frame.contentWindow?.postMessage({type:'workbench:deep-resize-request'},'*');}catch{}});
+  }
+});

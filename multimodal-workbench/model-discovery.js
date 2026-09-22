@@ -2,7 +2,16 @@
 (function(root){
   'use strict';
   const AUTH = new Set(['bearer','anthropic','gemini','none']);
-  function hosted(){try{return /^https?:$/.test(new URL(root.document?.baseURI||root.location?.href).protocol);}catch{return /^https?:$/.test(root.location?.protocol||'');}}
+  function hosted(){
+    const protocol=String(root.location?.protocol||'');
+    if(protocol==='http:'||protocol==='https:')return true;
+    const base=String(root.document?.baseURI||'');
+    if(/^https?:/i.test(base))return true;
+    try{return !!(root.parent&&root.parent!==root&&/^https?:$/.test(String(root.parent.location?.protocol||'')));}catch{return false;}
+  }
+  // Keep service paths relative. In a same-origin srcdoc the browser resolves
+  // `/api/*` against the host workbench while preserving the inherited origin.
+  function serviceUrl(path){return path;}
   function error(message,status){const value=new Error(message);if(status)value.status=status;return value;}
   function sanitized(message,key){let text=String(message||'未知错误');if(key)text=text.split(key).join('[已隐藏]');return text.replace(/(Bearer\s+)[^\s"<>]+/gi,'$1[已隐藏]');}
   function configFor(input){
@@ -50,9 +59,9 @@
       if(controller.signal.aborted)throw Object.assign(error('已取消获取模型列表。'),{name:'AbortError'});
       let data,transport;
       if(hosted()){
-        const session=await jsonResponse(await root.fetch('/api/session',{cache:'no-store',credentials:'same-origin',signal:controller.signal,redirect:'error'}),c.key,'工作台会话');
+        const session=await jsonResponse(await root.fetch(serviceUrl('/api/session'),{cache:'no-store',credentials:'same-origin',signal:controller.signal,redirect:'error'}),c.key,'工作台会话');
         if(typeof session?.token!=='string'||!session.token)throw error('工作台会话不可用，请刷新页面或重新登录后再获取模型列表。');
-        data=await jsonResponse(await root.fetch('/api/models',{method:'POST',headers:{'Content-Type':'application/json','X-Workbench-Token':session.token},body:JSON.stringify({base:c.base,key:c.key,auth:c.auth}),cache:'no-store',credentials:'same-origin',signal:controller.signal,redirect:'error'}),c.key,'获取模型列表');
+        data=await jsonResponse(await root.fetch(serviceUrl('/api/models'),{method:'POST',headers:{'Content-Type':'application/json','X-Workbench-Token':session.token},body:JSON.stringify({base:c.base,key:c.key,auth:c.auth}),cache:'no-store',credentials:'same-origin',signal:controller.signal,redirect:'error'}),c.key,'获取模型列表');
         transport='service';
       }else{
         const headers={};

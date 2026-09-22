@@ -37,6 +37,9 @@ const fullItems=['参数约束 · 全量','Tool JSON Schema · 全量','K3 特�
 function message(text,error=false){el('acceptanceMessage').hidden=!text;el('acceptanceMessage').textContent=text;el('acceptanceMessage').className='notice'+(error?' error':'');}
 function updateServiceBadge(){
  const badge=el('acceptanceService'),kimi=selected==='kimi';
+ if(selected==='gpt'){
+  badge.textContent='浏览器内执行 · GPT 专项';badge.title='GPT 生成专项直接在深度检测工作区执行，不依赖 KVV 或 CCMax 本地验收服务。';return;
+ }
  if(serviceState==='file'){
   badge.textContent='需要本地验收服务';badge.title='双击启动验收工作台.command，各专项共用同一个本地服务。';
  }else if(serviceState==='connecting'){
@@ -121,10 +124,24 @@ function recordRun(data,id){
 }
 function selectSuite(value){
  if(active&&value!=='general'&&value!==runningSuite)return;
- if(value!==selected)invalidateModels();
+ if(value==='gpt'){
+  selected='gpt';updateServiceBadge();document.querySelectorAll('[data-suite]').forEach(b=>{b.classList.toggle('active',b.dataset.suite==='gpt');b.setAttribute('aria-selected',String(b.dataset.suite==='gpt'));});
+  if(el('generalHistorySaveStatus'))el('generalHistorySaveStatus').hidden=true;
+  el('legacyFrame').hidden=true;el('acceptancePanel').hidden=true;el('gptPanel').hidden=false;
+  window.GptSuite?.activate?.();
+  return;
+ }
+ if(value!==selected&&selected!=='gpt')invalidateModels();
  selected=value;updateServiceBadge();document.querySelectorAll('[data-suite]').forEach(b=>{b.classList.toggle('active',b.dataset.suite===value);b.setAttribute('aria-selected',String(b.dataset.suite===value));});
  if(el('generalHistorySaveStatus'))el('generalHistorySaveStatus').hidden=value!=='general';
- el('legacyFrame').hidden=value!=='general';el('acceptancePanel').hidden=value==='general';
+  el('legacyFrame').hidden=value!=='general';el('acceptancePanel').hidden=value==='general';el('gptPanel').hidden=true;
+  if(value==='general'){
+   const frame=el('legacyFrame');
+   // A hidden iframe may keep the previous responsive height. Ask the embedded
+   // detector to measure again after it returns to the document flow.
+   const requestResize=()=>{try{frame.contentWindow?.postMessage({type:'workbench:deep-resize-request'},'*');}catch{}};
+   requestAnimationFrame(()=>requestAnimationFrame(requestResize));
+  }
  if(value!=='general'){
   for(const [to,from] of [['acceptanceBase','base'],['acceptanceKey','key'],['acceptanceModel','model']])if(!el(to).value)el(to).value=el(from).value;
   message('');updatePlan();showSuiteResult();

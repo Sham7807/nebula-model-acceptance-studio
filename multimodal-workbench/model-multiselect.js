@@ -32,7 +32,7 @@
     build(ids) {
       const prefix = 'model-multi-' + (++sequence);
       const identify = (node, key) => { node.id = ids[key] || prefix + '-' + key; return node; };
-      this.wrapper = identify(element('div', 'mm-picker'), 'wrapper');
+      this.wrapper = identify(element('div', 'mm-picker choice-picker'), 'wrapper');
       this.wrapper.dataset.modelMultiselect = '';
       this.row = element('div', 'mm-input-row');
       this.clearButton = identify(element('button', 'mm-clear', '×'), 'clear');
@@ -144,6 +144,7 @@
         const option = element('label', 'mm-option model-option');
         option.dataset.model = id;
         option.id = this.list.id + '-option-' + index;
+        option.setAttribute('role', 'option');
         option.setAttribute('aria-selected', String(checked.has(id)));
         const checkbox = element('input');
         checkbox.type = 'checkbox'; checkbox.value = id; checkbox.checked = checked.has(id);

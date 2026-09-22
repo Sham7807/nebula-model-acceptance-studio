@@ -18,7 +18,7 @@ html = html.replace('<script src="client-report.js"></script>', '<script>\n' + (
 html = html.replace('<script src="media-download.js"></script>', '<script>\n' + (root / 'media-download.js').read_text().replace('</script', '<\\/script') + '\n</script>')
 html = html.replace('<link rel="stylesheet" href="acceptance.css">', '<style>\n' + (root / 'acceptance.css').read_text() + '\n</style>')
 html = html.replace('<link rel="stylesheet" href="history.css">', '<style>\n' + (root / 'history.css').read_text() + '\n</style>')
-for script in ['model-discovery.js', 'choice-picker.js', 'model-multiselect.js', 'prompts.js', 'history-capture.js', 'acceptance.js', 'history.js']:
+for script in ['model-discovery.js', 'choice-picker.js', 'model-multiselect.js', 'prompts.js', 'history-capture.js', 'gpt-suite.js', 'acceptance.js', 'history.js']:
     html = html.replace('<script src="' + script + '"></script>', '<script>\n' + (root / script).read_text().replace('</script', '<\\/script') + '\n</script>')
 output = root.parent / '中转站测试工具-多模态版.html'
 output.write_text(html)

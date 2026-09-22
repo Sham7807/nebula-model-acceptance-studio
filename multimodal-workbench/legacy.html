@@ -14,11 +14,12 @@
     --red:#b4473f; --red-soft:#fcf0ed; --shadow:none;
   }
   *{margin:0;padding:0;box-sizing:border-box}
-  body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased;padding:18px 0 0}
+  /* 该页面嵌入主工作台，边距和外框由主页面统一管理。 */
+  body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased;padding:0}
   button,input,select{font:inherit}
   button,a,input,select,summary{-webkit-tap-highlight-color:transparent}
   button:focus-visible,summary:focus-visible{outline:2px solid #69a084;outline-offset:3px}
-  .wrap{margin:0 auto;border:1px solid #dce3d9;border-radius:16px;overflow:hidden;background:white}
+  .wrap{margin:0;border:0;border-radius:0;overflow:visible;background:white}
   .hero{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:24px 28px;border-bottom:1px solid var(--border)}
   .eyebrow{font:9px/1.6 ui-monospace,monospace;letter-spacing:1.7px;color:#7d8d76;margin-bottom:9px}
   .hero h1{font-size:21px;font-weight:550;line-height:1.6;letter-spacing:0;margin:3px 0 6px}
@@ -173,7 +174,6 @@
       <div class="field"><label for="inModel">渠道模型 ID <span>获取后可直接勾选多个，也可手动填写</span></label>
         <div class="model-row"><input id="inModel" placeholder="勾选一个或多个模型，也可手动填写 ID" autocomplete="off"><button id="loadGeneralModels" class="model-load" type="button">获取模型</button></div>
         <input id="inBatch" type="hidden">
-        <div id="generalModelPicker" class="model-picker" role="region" aria-label="渠道模型列表"></div>
         <small id="generalModelHint">获取模型后可直接勾选多个，按顺序进行批量快评。</small>
       </div>
       <div class="settings-row">
@@ -1355,13 +1355,6 @@ document.querySelectorAll('.mode-card').forEach(el=>{
     el.classList.add('on');el.querySelector('input').checked=true;
     updateModePlan();
   });
-  if(hasHtml||hasSvg){
-    const box=document.createElement('details');box.className='gpt-preview';
-    const summary=document.createElement('summary');summary.textContent='查看生成的 HTML / SVG 动画（隔离预览）';box.appendChild(summary);
-    const note=document.createElement('p');note.textContent='预览仅用于观察模型输出效果，代码运行在隔离 iframe 中，不会再次请求渠道。';box.appendChild(note);
-    const frame=document.createElement('iframe');frame.title='GPT 生成 HTML/SVG 动画预览';frame.className='gpt-preview-frame';frame.setAttribute('sandbox','allow-scripts');frame.setAttribute('referrerpolicy','no-referrer');frame.srcdoc=source;box.appendChild(frame);
-    $('intel').appendChild(box);$('intelSection').style.display='block';
-  }
   el.querySelector('input')?.addEventListener('change',updateModePlan);
 });
 /* 记住输入（Key 除外，安全考虑不持久化） */
@@ -1376,20 +1369,31 @@ for(const id of ['inBase','inKey'])$(id).addEventListener('input',()=>{
 generalSelection=window.ModelMultiselect?.attach($('inModel'),{batchInput:$('inBatch'),label:'渠道模型',ids:{wrapper:'generalModelPicker',menu:'generalModelMenu',search:'generalModelSearch',list:'generalModelList',status:'generalModelStatus',toggle:'generalModelToggle',clear:'generalModelClear',all:'generalModelShowAll'},onChange:(ids)=>{ $('inBatch').value=ids.length>1?ids.join(','):''; $('generalModelHint').textContent=ids.length>1?`已选 ${ids.length} 个模型，将逐个运行快速检测。`:'已选择模型，可开始测试。'; }});
 initCards();
 updateModePlan();
+/* The host page exposes GPT as a peer suite beside CCMax and KVV.  Keep the
+   reusable GPT implementation here, but select it automatically when that
+   top-level suite is opened. */
+window.addEventListener('message',event=>{
+  if(!event.data||event.data.type!=='workbench:deep-suite')return;
+  const suite=event.data.suite;
+  const radio=document.querySelector(`input[name="mode"][value="${suite==='gpt'?'gpt':'std'}"]`);
+  if(radio){radio.checked=true;radio.closest('.mode-card')?.click();updateModePlan();}
+});
 /* Keep the embedded page in the workbench's normal scroll flow. */
 function resizeWorkbenchFrame(){
   try{
     const frame=window.frameElement;
     if(!frame)return;
-    const box=document.querySelector('.wrap').getBoundingClientRect();
-    if(!box.width)return;
-    const style=getComputedStyle(document.body);
-    const height=Math.ceil(box.height+parseFloat(style.paddingTop)+parseFloat(style.paddingBottom))+1;
-    if(frame.style.height!==height+'px')frame.style.height=height+'px';
+    // Use the body content height only. documentElement.scrollHeight also
+    // includes the iframe's current viewport, which would make a mobile
+    // height sticky after returning to desktop.
+    const body=document.body;
+    const height=Math.ceil(body?.scrollHeight||0)+2;
+    if(window.parent!==window)window.parent.postMessage({type:'workbench:deep-resize',height},location.origin==='null'?'*':location.origin);
   }catch{}
 }
-if(typeof ResizeObserver==='function')new ResizeObserver(resizeWorkbenchFrame).observe(document.querySelector('.wrap'));
+if(typeof ResizeObserver==='function')new ResizeObserver(resizeWorkbenchFrame).observe(document.documentElement);
 window.addEventListener('resize',resizeWorkbenchFrame);
+window.addEventListener('message',event=>{if(event.data?.type==='workbench:deep-resize-request'){resizeWorkbenchFrame();requestAnimationFrame(()=>requestAnimationFrame(resizeWorkbenchFrame));}});
 resizeWorkbenchFrame();
 </script>
 </body>
