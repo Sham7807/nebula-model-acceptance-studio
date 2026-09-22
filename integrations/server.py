@@ -614,7 +614,10 @@ class Handler(BaseHTTPRequestHandler):
                 if isinstance(form,dict):
                     fields=form.get('fields') or {}
                     if not isinstance(fields,dict): raise ValueError('代理表单字段格式无效')
-                    data={str(k):str(v) for k,v in fields.items()}
+                    data=[]
+                    for field, value in fields.items():
+                        values = value if isinstance(value, list) else [value]
+                        data.extend((str(field), str(item)) for item in values)
                     files=[]
                     for item in form.get('files') or []:
                         if not isinstance(item,dict): continue
