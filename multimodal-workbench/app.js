@@ -211,10 +211,10 @@ function renderGptAnimationAssessment(r){
 function buildGptEvaluation(r,c){
   const prompt=String(c?.prompt||'');if(!/鹈鹕骑自行车|SVG绘制.*2D动画/i.test(prompt))return null;
   const output=String(r.text||'').trim(),clean=output.replace(/^```(?:html)?\s*/i,'').replace(/\s*```$/,'').trim();
-  const hasHtml=/(?:<!doctype\s+html|<html\b|<body\b)/i.test(clean),hasSvg=/<svg\b/i.test(clean),hasAnimation=/(?:<animate\b|<animateTransform\b|@keyframes\b|animation(?:-name|-duration)?\s*:|requestAnimationFrame\s*\(|setInterval\s*\()/i.test(clean),noFence=!/^```|```$/m.test(output),notRefusal=!/抱歉|我不能|无法完成|不能帮助|拒绝/i.test(clean);
+  const hasHtml=/(?:<!doctype\s+html|<html\b|<body\b)/i.test(clean),hasSvg=/<svg\b/i.test(clean),hasAnimation=/(?:<animate\b|<animateTransform\b|@keyframes\b|animation(?:-name|-duration)?\s*:|requestAnimationFrame\s*\(|setInterval\s*\()/i.test(clean),hasBird=/(?:鹈鹕|pelican)/i.test(clean),hasBike=/(?:自行车|单车|bicycle|bike)/i.test(clean),noFence=!/^```|```$/m.test(output),notRefusal=!/抱歉|我不能|无法完成|不能帮助|拒绝/i.test(clean);
   const usage=extractUsage(r.raw);let consistent=null;if(usage?.input!==null&&usage?.output!==null&&usage?.total!==null)consistent=usage.input+usage.output===usage.total;
-  const checks={hasHtml,hasSvg,hasAnimation,noFence,notRefusal};
-  return {prompt,html_detected:hasHtml,svg_detected:hasSvg,animation_detected:hasAnimation,html_valid:hasHtml&&hasSvg,token_usage:usage?{input:usage.input,output:usage.output,total:usage.total,cached:usage.cached,consistent}:null,signals:checks,source:clean.slice(0,16000),verdict:hasHtml&&hasSvg&&hasAnimation&&noFence&&notRefusal&&consistent!==false?'passed':'failed'};
+  const checks={hasHtml,hasSvg,hasBird,hasBike,hasAnimation,noFence,notRefusal};
+  return {prompt,html_detected:hasHtml,svg_detected:hasSvg,animation_detected:hasAnimation,html_valid:hasHtml&&hasSvg,token_usage:usage?{input:usage.input,output:usage.output,total:usage.total,cached:usage.cached,consistent}:null,signals:checks,source:clean.slice(0,16000),verdict:hasHtml&&hasSvg&&hasBird&&hasBike&&hasAnimation&&noFence&&notRefusal&&consistent!==false?'passed':'failed'};
 }
 function updateScenarioRequirement(){
   const min=Number(currentPromptScenario()?.requiresImages||0),imageCount=acceptsReferenceFiles()?referenceFiles.filter(file=>file.type.startsWith('image/')||/\.(png|jpe?g|webp|gif|avif|bmp)$/i.test(file.name)).length:0;

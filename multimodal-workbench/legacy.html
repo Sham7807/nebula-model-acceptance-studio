@@ -478,7 +478,6 @@ async function tGptGeneration(){
   const prompt='生成html，内容是svg绘制鹈鹕骑自行车2D动画，不要进行测试。只返回一个可直接保存为 .html 的完整 HTML 文档，不要解释、不要 Markdown 代码围栏。HTML 中必须包含内联 SVG、鹈鹕和自行车的可识别绘制元素，并使用 CSS @keyframes 或 SVG animation 形成可见的 2D 动画。';
   const r=await postSmart({model:cfg().model,max_tokens:4000,temperature:0,stream:false,messages:Q(prompt)});
   const raw=content(r),source=raw.replace(/^```(?:html)?\s*/i,'').replace(/\s*```$/,'').trim();
-  const lower=source.toLowerCase();
   const hasHtml=/<(?:!doctype\s+html|html\b)/i.test(source)&&/<\/html\s*>/i.test(source);
   const hasSvg=/<svg\b/i.test(source)&&/<\/svg\s*>/i.test(source);
   const hasBird=/(鹈鹕|pelican|\bbird\b|鸟)/i.test(source);
@@ -1183,6 +1182,7 @@ async function runAll(){
   const batchList=$('inBatch').value.split(/[,，\s]+/).map(s=>s.trim()).filter(Boolean);
   if(!batchList.length&&!c.model){alert('请填写模型名（或批量模型列表）');return;}
   const mode=document.querySelector('input[name=mode]:checked').value;
+  if(mode==='gpt'&&batchList.length){alert('GPT 生成专项一次只测试一个模型，请取消批量选择后再开始。');return;}
   S.mode=batchList.length?'batch(quick)':mode;
   const has=d=>d.modes.includes(mode);
   STOP=false;RUNNING=true;RUN_CONFIG=Object.freeze({...c});
