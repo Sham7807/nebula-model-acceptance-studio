@@ -253,6 +253,58 @@
   }
   function abortError(message='操作已停止') { const e=new Error(message);e.name='AbortError';return e; }
   function emit(cb,event) {if(typeof cb==='function')try{cb(event);}catch{}}
+  let workbenchProxyToken = '', workbenchProxyTokenPromise = null;
+  async function proxyToken(force = false) {
+    if (!force && workbenchProxyToken) return workbenchProxyToken;
+    if (!force && workbenchProxyTokenPromise) return workbenchProxyTokenPromise;
+    workbenchProxyTokenPromise = fetch('/api/session', { cache: 'no-store', credentials: 'same-origin' }).then(async response => {
+      let data = null; try { data = await response.json(); } catch {}
+      if (!response.ok || typeof data?.token !== 'string' || !data.token) throw new Error(data?.error || '工作台会话不可用，请刷新页面或重新登录。');
+      workbenchProxyToken = data.token; return workbenchProxyToken;
+    }).finally(() => { workbenchProxyTokenPromise = null; });
+    return workbenchProxyTokenPromise;
+  }
+  function canUseWorkbenchProxy(url) {
+    try {
+      const page = root.location;
+      if (!page || !/^https?:$/.test(page.protocol)) return false;
+      return new URL(url, page.href).origin !== page.origin;
+    } catch { return false; }
+  }
+  function proxyHeaders(headers) {
+    const result={};
+    if (!headers) return result;
+    if (headers instanceof Headers) headers.forEach((value,key)=>{result[key]=value;});
+    else for (const [key,value] of Object.entries(headers)) result[key]=String(value);
+    delete result.host; delete result.Host; delete result['content-length']; delete result['Content-Length'];
+    return result;
+  }
+  async function proxyFormData(form) {
+    const fields={}, files=[];
+    for (const [name,value] of form.entries()) {
+      if (typeof File !== 'undefined' && value instanceof File || typeof Blob !== 'undefined' && value instanceof Blob) {
+        const bytes=new Uint8Array(await value.arrayBuffer());
+        let encoded=''; for (let i=0;i<bytes.length;i+=0x8000) encoded+=String.fromCharCode.apply(null,bytes.subarray(i,i+0x8000));
+        files.push({field:name,name:value.name||'upload',type:value.type||'application/octet-stream',data:btoa(encoded)});
+      } else if (fields[name]===undefined) fields[name]=String(value);
+      else fields[name]=Array.isArray(fields[name])?[...fields[name],String(value)]:[fields[name],String(value)];
+    }
+    return {fields,files};
+  }
+  async function workbenchProxy(spec, timeout) {
+    const body={url:spec.url,method:spec.method||'GET',headers:proxyHeaders(spec.headers),timeout};
+    if (typeof FormData !== 'undefined' && spec.body instanceof FormData) body.form=await proxyFormData(spec.body);
+    else if (spec.body!==undefined && spec.body!==null) body.body=typeof spec.body==='string'?spec.body:String(spec.body);
+    const token = await proxyToken();
+    const response=await fetch('/api/proxy',{method:'POST',headers:{'Content-Type':'application/json','X-Workbench-Token':token},body:JSON.stringify(body),signal:spec.signal,credentials:'same-origin'});
+    let envelope; try { envelope=await response.json(); } catch { throw new Error('工作台代理没有返回有效 JSON'); }
+    if (!response.ok || envelope?.error) { const error=new Error(envelope?.error||('工作台代理失败（HTTP '+response.status+'）')); error.status=response.status; throw error; }
+    const headers=new Headers(envelope.headers||{}), contentType=envelope.content_type||headers.get('content-type')||'';
+    let bytes=null, textValue;
+    if (typeof envelope.body_base64==='string') { const binary=atob(envelope.body_base64); bytes=new Uint8Array(binary.length); for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i); }
+    else textValue=typeof envelope.text==='string'?envelope.text:'';
+    return {status:Number(envelope.status)||0,ok:Number(envelope.status)>=200&&Number(envelope.status)<300,url:envelope.url||spec.url,headers,text:async()=>bytes!==null?new TextDecoder().decode(bytes):textValue,blob:async()=>new Blob([bytes!==null?bytes:textValue||''],{type:contentType})};
+  }
   async function request(spec,options={}) {
     const requests=options.requests||[],key=spec.key||'',record={method:spec.method||'GET',url:redact(spec.url,key),status:null,durationMs:0};
     if(spec.preview!==undefined)record.body=spec.preview;
@@ -266,7 +318,10 @@
     emit(options.onEvent,{type:'request',message:record.method+' '+record.url,request:{...record},timeoutSeconds:Number.isFinite(timeout)&&timeout>0?timeout:null});
     try {
       if(ctrl.signal.aborted)throw abortError();
-      const response=await fetch(spec.url,{method:record.method,headers:spec.headers,body:spec.body,signal:ctrl.signal,redirect:'error',credentials:'omit'});
+      const response=canUseWorkbenchProxy(spec.url)
+        ? await workbenchProxy({...spec,signal:ctrl.signal},timeout)
+        : await fetch(spec.url,{method:record.method,headers:spec.headers,body:spec.body,signal:ctrl.signal,redirect:'error',credentials:'omit'});
+      if (canUseWorkbenchProxy(spec.url)) record.transport='workbench-proxy';
       record.status=response.status;
       const contentType=response.headers.get('content-type')||'',binaryAudio=audioDetails(contentType),mime=binaryAudio.mime;
       let raw,media=[],text='';

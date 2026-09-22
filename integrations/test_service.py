@@ -63,6 +63,28 @@ class ServiceTests(unittest.TestCase):
                             fetch.assert_called_once_with(body['base'],body['key'],auth)
                 finally:srv.shutdown();srv.server_close()
 
+    def test_proxy_forwards_json_and_multipart_without_cors(self):
+        class Provider(BaseHTTPRequestHandler):
+            requests=[]
+            def log_message(self,*args): pass
+            def do_POST(self):
+                length=int(self.headers.get('Content-Length','0')); body=self.rfile.read(length)
+                type(self).requests.append((self.headers.get('Content-Type',''), body))
+                payload=json.dumps({'choices':[{'message':{'content':'proxy-ok'}}]}).encode()
+                self.send_response(200); self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(payload))); self.end_headers(); self.wfile.write(payload)
+        provider=ThreadingHTTPServer(('127.0.0.1',0),Provider); threading.Thread(target=provider.serve_forever,daemon=True).start()
+        service=ThreadingHTTPServer(('127.0.0.1',0),server.Handler); threading.Thread(target=service.serve_forever,daemon=True).start()
+        try:
+            with httpx.Client(trust_env=False) as client:
+                base=f'http://127.0.0.1:{service.server_port}'; token=client.get(base+'/api/session').json()['token']; headers={'X-Workbench-Token':token}
+                target=f'http://127.0.0.1:{provider.server_port}/v1/chat/completions'
+                response=client.post(base+'/api/proxy',headers=headers,json={'url':target,'method':'POST','headers':{'Authorization':'Bearer [hidden]','Content-Type':'application/json'},'body':'{"hello":"world"}'})
+                self.assertEqual(response.status_code,200); self.assertEqual(response.json()['status'],200); self.assertIn('proxy-ok',response.json()['text'])
+                self.assertEqual(len(Provider.requests),1); self.assertIn(b'hello',Provider.requests[0][1])
+                response=client.post(base+'/api/proxy',headers=headers,json={'url':target,'method':'POST','form':{'fields':{'model':'fixture'},'files':[{'field':'file','name':'a.bin','type':'application/octet-stream','data':'AAE='}]}})
+                self.assertEqual(response.status_code,200); self.assertEqual(len(Provider.requests),2); self.assertIn(b'a.bin',Provider.requests[1][1]); self.assertIn(b'\x00\x01',Provider.requests[1][1])
+        finally: provider.shutdown(); provider.server_close(); service.shutdown(); service.server_close()
+
     def test_normalization_validation(self):
         self.assertEqual(server.normalized_base('https://relay.test/prefix/'),'https://relay.test/prefix/v1')
         for value in ['file:///tmp/foo','https://key@relay.test','https://relay.test?api_key=x']:

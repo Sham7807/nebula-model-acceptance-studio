@@ -583,6 +583,65 @@ class Handler(BaseHTTPRequestHandler):
             job=JOBS.get(path.split('/')[3])
             if not job:return self.send_json(404,{'error':'任务不存在'})
             job['cancel'].set();return self.send_json(200,{'status':'stopping'})
+        if path=='/api/proxy':
+            # Browser clients on a deployed workbench cannot call arbitrary
+            # relay origins directly when the relay does not enable CORS.
+            # Execute the already-built request server-side and return a small
+            # response envelope so the browser can keep the same parser and
+            # diagnostics as direct requests.
+            try:
+                length=int(self.headers.get('Content-Length','0'))
+                if self.headers.get_content_type()!='application/json' or not 0<length<=50*1024*1024:
+                    raise ValueError('代理请求格式无效或内容过大')
+                payload=json.loads(self.rfile.read(length))
+                if not isinstance(payload,dict): raise ValueError('代理请求必须是 JSON 对象')
+                target=str(payload.get('url','')).strip(); method=str(payload.get('method','POST')).upper()
+                parsed=urlsplit(target)
+                if parsed.scheme not in ('http','https') or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+                    raise ValueError('代理目标必须是完整的 HTTP(S) 地址')
+                if method not in {'GET','POST','PUT','PATCH','DELETE','OPTIONS','HEAD'}:
+                    raise ValueError('代理请求方法不受支持')
+                headers=payload.get('headers') or {}
+                if not isinstance(headers,dict): raise ValueError('代理请求头格式无效')
+                # Never allow a caller to pin the upstream host or ask httpx
+                # to follow redirects.  Authentication is intentionally passed
+                # through because the browser already supplied it to this
+                # authenticated workbench request.
+                upstream_headers={str(k):str(v) for k,v in headers.items() if str(k).lower() not in ('host','content-length','connection')}
+                timeout=float(payload.get('timeout',120) or 120); timeout=max(.5,min(timeout,600))
+                body=None; files=None; data=None
+                form=payload.get('form')
+                if isinstance(form,dict):
+                    fields=form.get('fields') or {}
+                    if not isinstance(fields,dict): raise ValueError('代理表单字段格式无效')
+                    data={str(k):str(v) for k,v in fields.items()}
+                    files=[]
+                    for item in form.get('files') or []:
+                        if not isinstance(item,dict): continue
+                        name=str(item.get('field','file')); filename=str(item.get('name','upload')); mime=str(item.get('type','application/octet-stream'))
+                        encoded=item.get('data','')
+                        import base64
+                        raw=base64.b64decode(encoded,validate=True)
+                        files.append((name,(filename,raw,mime)))
+                    # httpx builds the boundary and content type for multipart.
+                    upstream_headers.pop('Content-Type',None); upstream_headers.pop('content-type',None)
+                elif payload.get('body') is not None:
+                    body=str(payload.get('body'))
+                import base64, httpx
+                with httpx.Client(timeout=timeout,follow_redirects=False,trust_env=False) as client:
+                    response=client.request(method,target,headers=upstream_headers,content=body,data=data,files=files)
+                ctype=response.headers.get('content-type','application/octet-stream')
+                is_text=('text/' in ctype.lower() or 'json' in ctype.lower() or 'javascript' in ctype.lower() or 'xml' in ctype.lower() or 'event-stream' in ctype.lower())
+                envelope={'status':response.status_code,'url':str(response.url),'content_type':ctype,'headers':{k:v for k,v in response.headers.items() if k.lower() in ('content-type','x-request-id','request-id','retry-after','content-length')}}
+                if is_text:
+                    envelope['text']=response.text
+                else:
+                    envelope['body_base64']=base64.b64encode(response.content).decode('ascii')
+                return self.send_json(200,envelope)
+            except Exception as exc:
+                from httpx import TimeoutException, RequestError
+                message='代理请求超时，请检查渠道连通性后重试。' if isinstance(exc,TimeoutException) else '服务器无法连接渠道，请检查渠道地址、TLS 证书和网络设置。' if isinstance(exc,RequestError) else str(exc)
+                return self.send_json(400,{'error':clean(message,locals().get('headers',{}).get('Authorization',''))})
         if path=='/api/models':
             try:
                 length=int(self.headers.get('Content-Length','0'))

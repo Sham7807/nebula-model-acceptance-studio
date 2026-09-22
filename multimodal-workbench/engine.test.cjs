@@ -297,6 +297,24 @@ test('network failure causes one generation attempt only', async () => {
   assert.equal(calls.length, 1);
 });
 
+test('hosted workbench proxies cross-origin JSON requests and preserves provider evidence', async () => {
+  const { engine, calls } = harness([
+    jsonResponse({ token: 'workbench-session-token' }),
+    jsonResponse({ status: 200, url: 'https://relay.example/v1/chat/completions', content_type: 'application/json', headers: {'content-type': 'application/json'}, text: JSON.stringify({ choices: [{ message: { content: 'proxied response' } }] }) }),
+  ], { globals: { location: { protocol: 'https:', href: 'https://workbench.example/' } } });
+  const result = await engine.run(config('openai-chat', { base: 'https://relay.example/v1' }));
+  assert.equal(result.status, 'success');
+  assert.match(result.text, /proxied response/);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].url, '/api/session');
+  assert.equal(calls[1].url, '/api/proxy');
+  const payload = JSON.parse(calls[1].body);
+  assert.equal(payload.url, 'https://relay.example/v1/chat/completions');
+  assert.equal(payload.method, 'POST');
+  assert.match(payload.headers.Authorization, /Bearer/);
+  assert.equal(calls[1].headers['X-Workbench-Token'], 'workbench-session-token');
+});
+
 test('text extraction supports OpenAI, Responses and Anthropic outputs', () => {
   const { engine } = harness();
   for (const [raw, expected] of [
