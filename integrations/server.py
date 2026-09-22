@@ -42,9 +42,9 @@ MODULES = {
         'reliability': {'label': '稳定性与性能', 'weight': 0},
     },
     'ccmax': {
-        'protocol': {'label': 'Claude 协议与错误', 'weight': 30},
-        'reliability': {'label': '流式稳定性', 'weight': 25},
-        'tools': {'label': '工具调用', 'weight': 15},
+        'protocol': {'label': 'Claude 协议与错误', 'weight': 35},
+        'parameters': {'label': '参数与错误', 'weight': 15},
+        'tools': {'label': '工具调用', 'weight': 20},
         'cache': {'label': 'usage 与缓存', 'weight': 15},
         'security': {'label': '安全与一致性', 'weight': 15},
         'max_tokens': {'label': '参数边界', 'weight': 0},
