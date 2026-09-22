@@ -624,6 +624,16 @@ async function exportReport(){
       const blob=await response.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;
       const modelPart=String(reportRecords.map(r=>r.model).filter(Boolean).join('、')||'未命名模型').replace(/[\\/:*?"<>|\u0000-\u001f]+/g,'-').slice(0,80);const now=new Date(),pad=v=>String(v).padStart(2,'0');a.download=`测试报告-${modelPart}-${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.html`;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);notify('统一样式报告已下载');return;
     }
+    // Keep portable exports on the same renderer as service/acceptance reports.
+    // This branch runs when the page is opened from file:// or the service is
+    // unavailable; media URLs are embedded by WorkbenchReport when possible.
+    if(window.WorkbenchReport?.render){
+      const report=await window.WorkbenchReport.render(reportRecords,reportLogs);
+      const models=[...new Set(reportRecords.map(record=>String(record.model||'未命名模型').trim()).filter(Boolean))];
+      const modelPart=(models.join('、')||'未命名模型').replace(/[\\/:*?"<>|\u0000-\u001f]+/g,'-').replace(/\s+/g,' ').slice(0,80)||'未命名模型';
+      const now=new Date(),pad=value=>String(value).padStart(2,'0'),stamp=`${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+      downloadBlob(new Blob([report],{type:'text/html;charset=utf-8'}),`测试报告-${modelPart}-${stamp}.html`);notify('统一样式报告已下载');return;
+    }
     const mediaHTML=async m=>{let url=visibleMediaUrl(m);if(!url)return '<p class="muted">该媒体地址包含会话密钥或不适合预览，未写入报告。</p>';
       if(url.startsWith('blob:')){const blob=await fetch(url).then(r=>r.blob());url=await new Promise((resolve,reject)=>{const f=new FileReader();f.onload=()=>resolve(f.result);f.onerror=reject;f.readAsDataURL(blob);});}
       const safe=escapeHtml(url),tag=m.kind==='image'?'img':m.kind==='video'?'video':'audio';return `<figure><${tag} src="${safe}" ${tag==='img'?'alt="生成图片" referrerpolicy="no-referrer"':'controls preload="metadata"'}>${tag==='img'?'':`</${tag}>`}<figcaption><a href="${safe}" target="_blank" rel="noopener noreferrer">打开媒体 ↗</a></figcaption></figure>`;};

@@ -14,6 +14,7 @@ legacy_source = legacy_source.replace('<script src="model-multiselect.js"></scri
 legacy = json.dumps(legacy_source, ensure_ascii=False).replace('</', '<\\/')
 html = html.replace('<script src="engine.js"></script>', '<script>window.LEGACY_HTML=' + legacy + ';</script>\n<script>\n' + (root / 'engine.js').read_text().replace('</script', '<\\/script') + '\n</script>')
 html = html.replace('<script src="app.js"></script>', '<script>\n' + (root / 'app.js').read_text().replace('</script', '<\\/script') + '\n</script>')
+html = html.replace('<script src="client-report.js"></script>', '<script>\n' + (root / 'client-report.js').read_text().replace('</script', '<\\/script') + '\n</script>')
 html = html.replace('<script src="media-download.js"></script>', '<script>\n' + (root / 'media-download.js').read_text().replace('</script', '<\\/script') + '\n</script>')
 html = html.replace('<link rel="stylesheet" href="acceptance.css">', '<style>\n' + (root / 'acceptance.css').read_text() + '\n</style>')
 html = html.replace('<link rel="stylesheet" href="history.css">', '<style>\n' + (root / 'history.css').read_text() + '\n</style>')
