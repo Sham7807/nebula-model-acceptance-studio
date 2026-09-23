@@ -47,7 +47,7 @@ async function fixture(browser, options = {}) {
   const restoredJob = restored ? running(restored, options.total) : null;
   if (options.latest) Object.assign(restoredJob, { status: 'completed', completed: restoredJob.total, elapsed: 90, result: result(restored, 'completed') });
   if (options.configuration && restoredJob?.result) restoredJob.result.configuration = options.configuration;
-  const state = { sessionHold: !!options.holdSession, sessionPending: [], sessionOffline: !!options.offline, sessionNoToken: !!options.noToken, kvvRevision: Object.hasOwn(options, 'kvvRevision') ? options.kvvRevision : '66092cf', pollFailuresRemaining: 0, job: restoredJob, calls: [], posts: [], modelPosts: [], modelReplies: [], modelPending: [], modelHold: false, models: ['ccmax', 'kimi-k3', 'manual-compatible'], cancel: 0, session: 0 };
+  const state = { sessionHold: !!options.holdSession, sessionPending: [], sessionOffline: !!options.offline, sessionNoToken: !!options.noToken, kvvRevision: Object.hasOwn(options, 'kvvRevision') ? options.kvvRevision : '66092cf', pollFailuresRemaining: 0, job: restoredJob, calls: [], posts: [], planPosts: [], modelPosts: [], modelReplies: [], modelPending: [], modelHold: false, models: ['ccmax', 'kimi-k3', 'manual-compatible'], cancel: 0, session: 0 };
   const previousJobs = new Map();
   let notifyRestore;const restoreStarted = new Promise(resolve => { notifyRestore = resolve; });
   state.restoreHold = !!options.holdRestore;state.restorePending = [];state.runReads = 0;
@@ -67,6 +67,15 @@ async function fixture(browser, options = {}) {
         return send({ token: state.sessionNoToken ? '' : token, active: state.job?.status === 'running' ? state.job.id : null, latest: state.job?.id || null, kvv_revision: state.kvvRevision, ready: true });
       }
       assert.equal(req.headers()['x-workbench-token'], token, 'API call carries only local session token');
+      if (url.pathname === '/api/claude/plan') {
+        assert.equal(req.method(),'POST');const body=JSON.parse(req.postData());state.planPosts.push(body);
+        assert.equal(Object.hasOwn(body,'key'),false,'request plan never submits API key');
+        assert.doesNotMatch(req.postData(),/mock-channel-key/);
+        return send({suite:'claude',request_count:6,request_count_is_maximum:true,conditional_requests:1,token_estimate:{cache_prefix_target_tokens:6000,cache_requests:4,cache_total_target_input_tokens:24000,basis:'实际消耗以上游 usage 为准。'},limitations:['来源标签不是官方身份证明。','长前缀 token 为估算，以实测 usage 为准。'],requests:[
+          {id:'baseline',module:'protocol',title:'基础 Messages 基线',method:'POST',url:'https://relay.test/v1/messages',body:{model:body.model,max_tokens:32,messages:[{role:'user',content:'<script>window.__previewExecuted=true</script>'}]},notes:'保留响应结构。'},
+          {id:'cache-warm',module:'cache',title:'长前缀缓存预热',method:'POST',url:'https://relay.test/v1/messages',repeat:3,conditional:true,body:{model:body.model,system:[{type:'text',text:'prefix '.repeat(300),cache_control:{type:'ephemeral'}}],max_tokens:16,messages:[{role:'user',content:'返回 OK'}]}}
+        ]});
+      }
       if (url.pathname === '/api/models') {
         assert.equal(req.method(), 'POST');state.modelPosts.push(JSON.parse(req.postData()));
         const reply = state.modelReplies.shift() || { status: 200, data: { models: state.models, total: state.models.length } };
@@ -223,6 +232,97 @@ async function download(page, format, bytes) {
         await screenshot(page, 'mobile-ccmax-plan.png');
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
         passed.push('deep tabs, adopted connection, 11/full plans, CC quick/batch/custom sampling and mobile fit');
+      } finally { await f.close(); }
+    }
+    {
+      const f = await fixture(browser); const { page, state } = f;
+      try {
+        await page.locator('#base').fill('https://relay.test/v1');
+        await page.locator('#key').fill('mock-channel-key');
+        await page.locator('#model').fill('claude-compatible');
+        const tabs = await page.locator('.deep-suite-tabs [data-suite]').evaluateAll(nodes => nodes.map(node => node.dataset.suite));
+        assert.deepEqual(tabs.slice(0, 5), ['general', 'ccmax', 'claude', 'kimi', 'gpt'], 'Claude tab sits between CCMax and KVV');
+        await suite(page, 'claude');
+        assert.equal(await page.locator('#acceptanceTitle').innerText(), 'Claude 上游专项验收');
+        assert.equal(await page.locator('#acceptanceCcFields').isVisible(), false);
+        assert.equal(await page.locator('#acceptanceClaudeFields').isVisible(), true);
+        assert.equal(await page.locator('#acceptanceKimiFields').isVisible(), false);
+        assert.equal(await page.locator('#claudeProvider').inputValue(), 'auto');
+        assert.equal(await page.locator('#claudeFormat').inputValue(), 'anthropic');
+        assert.equal(await page.locator('#claudeAuth').inputValue(), 'anthropic');
+        assert.equal(await page.locator('#acceptancePlan li').count(), 12);
+        assert.match(await page.locator('#acceptancePlan').innerText(), /注入|缓存|压测|签名|透传/);
+        assert.match(await page.locator('#acceptanceRequestHint').innerText(), /大 token|专业方案/);
+        await page.locator('#claudeSampling').selectOption('stress');
+        assert.equal(await page.locator('#claudeCacheTokens').inputValue(), '12000');
+        assert.equal(await page.locator('#claudeStressRequests').inputValue(), '100');
+        assert.equal(await page.locator('#claudeStressConcurrency').inputValue(), '10');
+        await page.locator('#claudeFormat').selectOption('openai');
+        assert.equal(await page.locator('#claudeAuth').inputValue(), 'bearer');
+        assert.equal(await page.locator('#claudeAuth').isDisabled(), true);
+        assert.equal(await page.locator('#claudeSignatureGroup').isVisible(), false);
+        assert.match(await page.locator('#acceptancePlan').innerText(), /Claude/);
+        assert.equal(state.posts.length, 0, 'Claude plan changes do not start billable work');
+        await page.locator('#claudeProvider').selectOption('aws');
+        await page.locator('#acceptanceModels').click();await waitModelIdle(page);
+        assert.equal(state.modelPosts[0].auth, 'bearer');
+        await page.locator('#acceptanceModelMenu').getByRole('button', { name: '清空选择', exact: true }).click();
+        await page.locator('#acceptanceModelList label').filter({ hasText: 'ccmax' }).locator('input').check();
+        await page.locator('#acceptanceModelList label').filter({ hasText: 'kimi-k3' }).locator('input').check();
+        await page.locator('#acceptanceTitle').click();
+        await page.setViewportSize({ width: 390, height: 844 });
+        await noOverflow(page);
+        await screenshot(page, 'mobile-claude-plan.png');
+        assert.equal(await page.locator('#claudeStressConcurrency').getAttribute('max'),'20');
+        await page.locator('#claudePlanPreview').click();
+        await page.locator('#claudePlanDialog').waitFor({state:'visible'});
+        assert.equal(state.posts.length,0,'preview makes no billable test submission');
+        assert.equal(state.planPosts.length,1);
+        assert.equal(state.planPosts[0].request_format,'openai');
+        assert.equal(state.planPosts[0].suite,'claude');
+        assert.equal(state.planPosts[0].provider,'aws');
+        assert.equal(state.planPosts[0].sampling,'stress');
+        assert.deepEqual(state.planPosts[0].models,['ccmax','kimi-k3']);
+        assert.match(await page.locator('#claudePlanDialog').innerText(),/仅预览.*不向上游/);
+        assert.match(await page.locator('#claudePlanSummary').innerText(),/请求数上限.*6.*24000/s);
+        assert.match(await page.locator('#claudePlanSummary').innerText(),/包含 1 个条件请求/);
+        assert.match(await page.locator('.claude-plan-request').last().innerText(),/条件请求/);
+        assert.match(await page.locator('#claudePlanSummary').innerText(),/已选 2 个模型/);
+        assert.equal(await page.locator('.claude-plan-module').count(),2);
+        await page.locator('.claude-plan-request').first().locator('summary').click();
+        assert.match(await page.locator('.claude-plan-request pre').first().innerText(),/<script>/);
+        assert.equal(await page.evaluate(()=>window.__previewExecuted),undefined,'preview JSON is text, never HTML');
+        assert.equal(await page.locator('#claudePlanDialog script').count(),0);
+        assert.equal(await page.locator('#claudePlanDialog').evaluate(node=>node.scrollWidth<=node.clientWidth),true,'mobile request dialog has no horizontal overflow');
+        await screenshot(page,'mobile-claude-request-preview.png');
+        await page.locator('#claudePlanClose').click();
+        assert.equal(await page.locator('#claudePlanDialog').isVisible(),false);
+        await page.locator('#claudePlanPreview').click();
+        await page.locator('#claudePlanDialog').waitFor({state:'visible'});
+        await page.keyboard.press('Escape');
+        assert.equal(await page.locator('#claudePlanDialog').isVisible(),false,'preview closes with Escape');
+        await page.locator('#acceptanceRun').click();
+        await page.waitForFunction(() => document.getElementById('acceptanceStage').textContent.includes('Claude 专项 · 运行中'));
+        assert.equal(state.posts.length, 1);
+        const request=state.posts[0];
+        for(const [key,value] of Object.entries({suite:'claude',provider:'aws',request_format:'openai',auth:'bearer',cache_tokens:12000,stress_requests:100,stress_concurrency:10,concurrency:10,sampling:'stress'}))assert.equal(request[key],value);
+        assert.deepEqual(request.models,['ccmax','kimi-k3']);
+        assert.deepEqual(request.enabled_modules,['protocol','auth_signature','tools','max_tokens','injection','identity','cache','stress']);
+        assert.equal(await page.locator('[data-suite="kimi"]').isDisabled(),true);
+        state.job={...state.job,batch:true,models:['ccmax','kimi-k3'],completed:7,total:42,request_count:7,events:undefined,current_run_snapshot:{model:'kimi-k3',status:'running',completed:2,total:20,events:[{type:'progress',phase:'sample_complete',message:'缓存第二次命中',case:{id:'cache-hit',title:'缓存命中',status:'passed',expected:'read tokens > 0',detail:'观察到缓存读取'}}]}};
+        await page.waitForFunction(()=>document.getElementById('acceptanceCases').textContent.includes('kimi-k3 · 缓存命中'));
+        assert.equal(await page.locator('#acceptanceCount').innerText(),'7 / 42','batch progress remains parent aggregate');
+        assert.match(await page.locator('#acceptanceSummary').innerText(),/实际 API 请求 7 次.*当前模型：kimi-k3/);
+        assert.match(await page.locator('#acceptanceLog').textContent(),/\[kimi-k3\] 缓存第二次命中/);
+        await suite(page,'general');await suite(page,'claude');
+        assert.equal(await page.locator('.acceptance-module-card input:enabled').count(),0,'rebuilding active plan keeps modules locked');
+        state.job={...state.job,status:'completed',completed:11,result:{...result('claude','completed'),suite:'claude_acceptance'}};
+        await page.waitForFunction(() => document.getElementById('acceptanceStage').textContent.includes('Claude 专项 · 测试已完成'));
+        assert.equal(await page.locator('#claudeAuth').isDisabled(),true);
+        await download(page,'report.html',reportHtml);
+        await suite(page,'ccmax');assert.equal(await page.locator('[data-acceptance-download="report.html"]').isDisabled(),true);
+        await suite(page,'claude');assert.equal(await page.locator('[data-acceptance-download="report.html"]').isEnabled(),true);
+        passed.push('Claude tab/order, provider/auth/native/OpenAI controls, model discovery/batch submission, result routing/downloads, professional plan and mobile fit');
       } finally { await f.close(); }
     }
     {
@@ -565,6 +665,27 @@ async function download(page, format, bytes) {
       } finally { await f.close(); }
     }
     passed.push('incremental KVV call/teardown and CC sample events deduplicate by ID with latest status/evidence');
+    for(const plan of [
+      {saved:{sampling:'quick',signature_samples:1,sse_samples:3,cache_tokens:12000,stress_requests:1,stress_concurrency:1},expected:'quick'},
+      {saved:{sampling:'stress',signature_samples:2,sse_samples:10,cache_tokens:12000,stress_requests:100,stress_concurrency:10},expected:'stress'},
+      {saved:{signature_samples:3,sse_samples:5,cache_tokens:12000,stress_requests:20,concurrency:4},expected:'professional'},
+      {saved:{signature_samples:7,sse_samples:9,cache_tokens:22000,stress_requests:13,stress_concurrency:6},expected:'custom'}
+    ]){
+      const f=await fixture(browser,{latest:'claude',configuration:{provider:'aws',request_format:'anthropic',...plan.saved}});const {page,state}=f;
+      try{
+        await page.waitForFunction(()=>document.getElementById('acceptanceStage').textContent.includes('Claude 专项 · 测试已完成'));
+        assert.equal(await page.locator('#claudeSampling').inputValue(),plan.expected);
+        assert.equal(await page.locator('#claudeCacheTokens').inputValue(),String(plan.saved.cache_tokens));
+        assert.equal(await page.locator('#claudeStressConcurrency').inputValue(),String(plan.saved.stress_concurrency??plan.saved.concurrency));
+        for(const id of ['claudeSignature','claudeSse','claudeCacheTokens','claudeStressRequests','claudeStressConcurrency']){
+          await page.locator('#claudeSampling').selectOption('professional');
+          await page.locator('#'+id).fill('8');
+          assert.equal(await page.locator('#claudeSampling').inputValue(),'custom',id+' edits mark custom plan');
+        }
+        assert.equal(state.posts.length,0,'restoring or editing plans does not submit upstream work');
+      }finally{await f.close();}
+    }
+    passed.push('Claude saved sampling restores quick/stress and legacy inferred/custom plans; numeric edits mark custom');
     for (const plan of [
       { signature: 5, sse: 50, mode: 'batch', total: 62 },
       { signature: 1, sse: 3, mode: 'quick', total: 11 },

@@ -1,6 +1,6 @@
 (function () {
   'use strict';
-  const $ = id => document.getElementById(id), labels = { text: '文本测试', image: '图像生成', video: '视频生成', audio: '音频测试', general: '通用检测', ccmax: 'CCMax 验收', kimi: 'Kimi KVV' }, symbols = { text: 'Aa', image: '▧', video: '▷', audio: '≋', general: '◎', ccmax: 'C', kimi: 'K' };
+  const $ = id => document.getElementById(id), labels = { text: '文本测试', image: '图像生成', video: '视频生成', audio: '音频测试', general: '通用检测', ccmax: 'CCMax 验收', claude: 'Claude 上游验收', kimi: 'Kimi KVV' }, symbols = { text: 'Aa', image: '▧', video: '▷', audio: '≋', general: '◎', ccmax: 'C', claude: 'C', kimi: 'K' };
   if (!$('historyView')) return;
   let token = '', available = false, authenticated = false, ready = false, selected = 'workspace', offset = 0, total = 0, limit = 20, requestSerial = 0, detailSerial = 0, listController = null, detailController = null, searchTimer = null, previousFocus = null, currentRecord = null, connecting = null;
   const stateNames = { passed: '通过', success: '成功', failed: '未通过', error: '请求失败', stopped: '已停止', cancelled: '已取消', pending: '待完成', running: '进行中', inconclusive: '待确认', skipped: '已跳过', completed: '已完成', warning: '需检查' };

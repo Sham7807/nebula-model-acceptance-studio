@@ -27,7 +27,7 @@ REPORTS = Path(os.environ.get('WORKBENCH_REPORTS', str(ROOT / 'reports')))
 TOKEN = secrets.token_urlsafe(32)
 JOBS = {}
 LOCK = threading.RLock()
-SUITES = {'kvv11', 'kvvfull', 'ccmax'}
+SUITES = {'kvv11', 'kvvfull', 'ccmax', 'claude'}
 MAX_BATCH_MODELS = 30
 
 # Capability modules are a presentation and coverage contract shared by the
@@ -51,10 +51,20 @@ MODULES = {
         'security': {'label': '安全与一致性', 'weight': 15},
         'max_tokens': {'label': '参数边界', 'weight': 0},
     },
+    'claude': {
+        'protocol': {'label': 'Claude 协议与透传', 'weight': 18},
+        'auth_signature': {'label': '鉴权与 thinking 签名', 'weight': 14},
+        'tools': {'label': '工具调用与多模态', 'weight': 14},
+        'max_tokens': {'label': 'max_tokens 与长度', 'weight': 10},
+        'injection': {'label': '注入与指令层级', 'weight': 14},
+        'identity': {'label': '来源与行为一致性', 'weight': 10},
+        'cache': {'label': '长前缀缓存', 'weight': 10},
+        'stress': {'label': '受控压测', 'weight': 10},
+    },
 }
 
 def _module_defs(suite):
-    return MODULES['ccmax' if suite == 'ccmax' else 'kvv']
+    return MODULES['claude' if suite in ('claude', 'claude_acceptance') else 'ccmax' if suite in ('ccmax','ccmax_acceptance') else 'kvv']
 
 def _case_modules(entry, suite):
     """Infer capability dimensions for a raw runner case/check."""
@@ -108,6 +118,15 @@ def apply_enabled_modules(result, config):
     for entries in containers:
         for entry in entries:
             if not isinstance(entry, dict): continue
+            if suite in ('claude','claude_acceptance'):
+                # Claude's module selection controls execution, not merely
+                # presentation. A check can also have secondary dimensions.
+                module = entry.get('module') or (entry.get('metadata') or {}).get('module')
+                if module in defs:
+                    if module not in enabled:
+                        entry['status']='not_covered';entry['not_covered']=True;entry['module_disabled']=True
+                        entry['skip_reason']='本轮未启用模块：'+defs[module]['label']
+                    continue
             dims = _case_modules(entry, 'ccmax' if suite in ('ccmax','ccmax_acceptance') else 'kvv')
             entry.setdefault('dimensions', sorted(dims))
             disabled = bool(dims) and not (dims & enabled)
@@ -207,7 +226,7 @@ def normalized_base(raw):
     if not path.endswith('/v1'): path += '/v1'
     return urlunsplit((u.scheme,u.netloc,path,'',''))
 
-def validate(data):
+def validate(data, *, require_key=True):
     if not isinstance(data,dict) or data.get('suite') not in SUITES: raise ValueError('请选择有效的验收套件')
     raw_models=data.get('models')
     if raw_models is not None:
@@ -222,25 +241,48 @@ def validate(data):
         models=[]
     model=str(data.get('model','')).strip() or (models[0] if models else '')
     c = {'suite':data['suite'], 'base':normalized_base(data.get('base','')), 'key':str(data.get('key','')).strip(), 'model':model, 'models':models}
-    if not c['key'] or not c['model']: raise ValueError('请填写 API Key 和渠道模型 ID')
+    claude=c['suite']=='claude'
+    if claude:
+        # Preserve a complete endpoint or explicit version for this adapter.
+        raw_base=str(data.get('base','')).strip().rstrip('/')
+        u=urlsplit(raw_base)
+        if u.scheme not in ('http','https') or not u.hostname or u.username or u.password or u.query or u.fragment or re.search(r'[\x00-\x20\\]',raw_base):
+            raise ValueError('Claude 渠道地址必须为无凭据、查询参数的 HTTP(S) 地址')
+        c['base']=raw_base
+    if not c['model'] or (require_key and not c['key']): raise ValueError('请填写 API Key 和渠道模型 ID')
     if any('\n' in c[k] or '\r' in c[k] for k in ('key','model')): raise ValueError('密钥和模型名不能包含换行')
-    for name, default, low, high in [('timeout',120,5,600),('signature_samples',1,1,20),('sse_samples',3,1,200),('concurrency',2,1,10)]:
+    for name, default, low, high in [('timeout',120,5,600),('signature_samples',3 if claude else 1,1,20),('sse_samples',5 if claude else 3,1,200),('concurrency',4 if claude else 2,1,20 if claude else 10)]:
+        if isinstance(data.get(name),bool):raise ValueError(name+' 必须为整数')
         try: n = int(data.get(name,default))
-        except (ValueError,TypeError): raise ValueError(name+' 必须为整数')
+        except (ValueError,TypeError,OverflowError): raise ValueError(name+' 必须为整数')
+        if claude and str(data.get(name,default)).strip() not in (str(n),str(n)+'.0'):raise ValueError(name+' 必须为整数')
         if not low <= n <= high: raise ValueError(f'{name} 超出范围 {low}–{high}')
         c[name] = n
-    c['think_mode'] = data.get('think_mode','openai' if data.get('request_format')=='openai' and c['suite']!='ccmax' else 'kimi')
+    c['think_mode'] = data.get('think_mode','none' if claude else 'openai' if data.get('request_format')=='openai' and c['suite']!='ccmax' else 'kimi')
     if c['think_mode'] not in ('kimi','opensource','none','openai'): raise ValueError('thinking 格式无效')
-    c['request_format'] = data.get('request_format', 'anthropic' if c['suite']=='ccmax' else 'openai' if c['think_mode']=='openai' else 'native')
-    if c['request_format'] not in (('anthropic','openai') if c['suite']=='ccmax' else ('native','openai')): raise ValueError('请求格式不适用于当前套件')
-    if c['suite']!='ccmax' and (c['request_format']=='openai') != (c['think_mode']=='openai'): raise ValueError('KVV 请求格式与 thinking 配置不一致')
+    c['request_format'] = data.get('request_format', 'anthropic' if c['suite'] in ('ccmax','claude') else 'openai' if c['think_mode']=='openai' else 'native')
+    if c['request_format'] not in (('anthropic','openai') if c['suite'] in ('ccmax','claude') else ('native','openai')): raise ValueError('请求格式不适用于当前套件')
+    if c['suite'] not in ('ccmax','claude') and (c['request_format']=='openai') != (c['think_mode']=='openai'): raise ValueError('KVV 请求格式与 thinking 配置不一致')
     c['auth'] = data.get('auth','anthropic')
-    if c['auth'] not in ('anthropic','bearer'): raise ValueError('CCmax 鉴权方式无效')
+    if c['auth'] not in ('anthropic','bearer'): raise ValueError('验收鉴权方式无效')
     if c['request_format']=='openai': c['auth']='bearer'
     c['thinking'] = bool(data.get('thinking',True))
-    advanced = data.get('advanced', True if c['suite'] == 'ccmax' else False)
-    if not isinstance(advanced, bool): raise ValueError('高级 CCMax 探针开关必须为布尔值')
+    advanced = data.get('advanced', c['suite'] in ('ccmax','claude'))
+    if not isinstance(advanced, bool): raise ValueError('高级探针开关必须为布尔值')
     c['advanced'] = advanced
+    if claude:
+        c['provider']=data.get('provider','auto')
+        if c['provider'] not in ('auto','anthropic','aws'):raise ValueError('Claude 上游来源选项无效')
+        for name,default,low,high in [('cache_tokens',12000,1024,100000),('stress_requests',20,1,200),('stress_concurrency',4,1,20)]:
+            value=data.get(name,default)
+            if isinstance(value,bool):raise ValueError(name+' 必须为整数')
+            try:n=int(value)
+            except (ValueError,TypeError,OverflowError):raise ValueError(name+' 必须为整数')
+            if str(value).strip() not in (str(n),str(n)+'.0') or not low<=n<=high:raise ValueError(f'{name} 超出范围 {low}–{high}')
+            c[name]=n
+        c['concurrency']=c['stress_concurrency']
+        c['sampling']=data.get('sampling','custom')
+        if c['sampling'] not in ('quick','professional','stress','custom'):raise ValueError('Claude 采样方案无效')
     # Module selection is optional for backwards compatibility.  An omitted
     # selection means every reviewed module for the selected suite; invalid
     # names are rejected before any provider request is made.
@@ -297,7 +339,10 @@ def run_job(job,c):
         if parent_emit:
             parent_emit(event)
     try:
-        if c['suite']=='ccmax':
+        if c['suite']=='claude':
+            from claude_acceptance import run
+            result = run(c,emit,job['cancel'].is_set)
+        elif c['suite']=='ccmax':
             from ccmax_acceptance import run
             result = run(c,emit,job['cancel'].is_set)
         else: result = kvv_runner.run(c,emit,job['cancel'].is_set,directory)
@@ -359,9 +404,9 @@ def run_batch(parent, config):
                 with LOCK:
                     parent['events'].append({'model':child_model,**event})
                     if len(parent['events'])>2000: parent['events']=parent['events'][-2000:]
+                    parent['children'][child_index].update({'completed':child.get('completed',0),'total':child.get('total'),'summary':child.get('summary',{})})
                     parent['completed']=sum(int(x.get('completed') or 0) for x in parent['children'])
                     parent['total']=sum(int(x.get('total') or 0) for x in parent['children']) or None
-                    parent['children'][child_index].update({'completed':child.get('completed',0),'total':child.get('total'),'summary':child.get('summary',{})})
             child_config={**config,'model':model,'models':[]}
             child['parent_emit']=relay
             run_job(child,child_config)
@@ -418,6 +463,15 @@ def snapshot(job):
         data['elapsed']=round((job.get('finished_at') or time.time())-job['started_at'],1);data['result']=job.get('result')
         return data
     return {k:v for k,v in job.items() if k not in ('cancel','result','parent_emit')} | {'elapsed': round((job.get('finished_at') or time.time())-job['started_at'],1), 'result':job.get('result')}
+
+def session_job_ids():
+    """Restore the user's top-level run, including batches after a restart."""
+    with LOCK:
+        child_ids={row.get('id') or row.get('run_id') for job in JOBS.values() if job.get('batch') for row in job.get('children',[])}
+        jobs=[job for job in JOBS.values() if not job.get('batch_child') and job['id'] not in child_ids]
+        active=next((job['id'] for job in jobs if job['status']=='running'),None)
+        latest=max(jobs,key=lambda job:job.get('started_at',0))['id'] if jobs else None
+        return active,latest
 
 def report_download_name(result, kind='html'):
     result = result if isinstance(result, dict) else {}
@@ -537,8 +591,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/session':
             # This endpoint authenticates the browser and issues the per-page token.
             if not self.guard(auth=True, token_required=False): return
-            with LOCK: active=next((j['id'] for j in JOBS.values() if j['status']=='running'),None)
-            return self.send_json(200,{'token':TOKEN,'active':active,'latest':next(reversed(JOBS),None),'kvv_revision':'66092cf','ready':True,'auth_enabled':AUTH_STORE.enabled,'username':AUTH_STORE.identity(self.cookie_token()) if AUTH_STORE.enabled else None,'history_enabled':True})
+            active,latest=session_job_ids()
+            return self.send_json(200,{'token':TOKEN,'active':active,'latest':latest,'kvv_revision':'66092cf','ready':True,'auth_enabled':AUTH_STORE.enabled,'username':AUTH_STORE.identity(self.cookie_token()) if AUTH_STORE.enabled else None,'history_enabled':True})
         media_asset = bool(re.fullmatch(r'/api/history/[^/]+/media/\d+', path))
         protected = path.startswith('/api/') and path != '/api/auth'
         if (protected and path != '/api/session'):
@@ -646,6 +700,19 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(200); self.send_header('Content-Type','application/json; charset=utf-8'); self.set_session_cookie(token); self.send_header('Content-Length','0'); self.end_headers(); return
             except Exception as exc: return self.send_json(400, {'error':str(exc)})
         if not self.guard(auth=True):return
+        if path == '/api/claude/plan':
+            # This is the runner's own request builder. Previewing never
+            # contacts the upstream, stores credentials, or creates a job.
+            try:
+                length=int(self.headers.get('Content-Length','0'))
+                if self.headers.get_content_type()!='application/json' or not 0<length<=65536:raise ValueError('请求预览内容无效或过大')
+                data=json.loads(self.rfile.read(length))
+                if not isinstance(data,dict) or data.get('suite')!='claude':raise ValueError('请选择 Claude 专项')
+                config=validate({**data,'key':''},require_key=False)
+                from claude_acceptance import build_plan
+                return self.send_json(200,clean(build_plan(config)))
+            except (ValueError,TypeError,KeyError) as exc:
+                return self.send_json(400,{'error':str(exc)})
         if path == '/api/auth/logout':
             AUTH_STORE.logout(self.cookie_token()); self.send_response(200); self.send_header('Content-Type','application/json; charset=utf-8'); self.clear_session_cookie(); self.send_header('Content-Length','0'); self.end_headers(); return
         if path == '/api/history':
@@ -807,6 +874,7 @@ def restore_reports():
             if not re.fullmatch('[a-f0-9]+',identity):continue
             suite=result.get('configuration',{}).get('suite') or result.get('suite')
             if suite=='ccmax_acceptance':suite='ccmax'
+            if suite=='claude_acceptance':suite='claude'
             config=result.get('configuration',{});summary=result.get('summary',{})
             job={'id':identity,'suite':suite,'model':config.get('model',''),'base':config.get('base',''),
                 'status':result.get('status','error'),'started_at':result.get('started_at',path.stat().st_mtime),

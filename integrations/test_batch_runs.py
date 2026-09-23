@@ -85,6 +85,30 @@ class BatchRunTests(unittest.TestCase):
         self.assertEqual(parent['summary']['not_run'],2)
         self.assertEqual(parent['result']['verdict']['status'],'inconclusive')
 
+    def test_parent_progress_includes_the_current_event(self):
+        parent=self.parent(['one','two'])
+        def runner(c,emit,cancelled,directory):
+            emit({'completed':1,'total':3})
+            snapshot=server.snapshot(parent)
+            running=snapshot['current_run_snapshot']
+            self.assertEqual(running['completed'],1)
+            self.assertEqual(snapshot['completed'],sum(x['completed'] for x in snapshot['children']))
+            self.assertEqual(snapshot['total'],sum(x['total'] or 0 for x in snapshot['children']))
+            self.assertEqual(running['events'][-1]['completed'],1)
+            return self.result(c['model'])
+        with patch.object(server.kvv_runner,'run',side_effect=runner):server.run_batch(parent,self.config(parent['models']))
+
+    def test_session_restores_parent_instead_of_last_inserted_child(self):
+        parent=self.parent(['one','two'])
+        child={'id':'b'*32,'status':'running','started_at':time.time()+1}
+        parent['children'][0]['id']=child['id'];server.JOBS[child['id']]=child
+        self.assertEqual(server.session_job_ids(),(parent['id'],parent['id']))
+        parent['status']='completed';child['status']='completed'
+        self.assertEqual(server.session_job_ids(),(None,parent['id']))
+        standalone={'id':'c'*32,'status':'completed','started_at':time.time()+2}
+        server.JOBS[standalone['id']]=standalone
+        self.assertEqual(server.session_job_ids(),(None,standalone['id']))
+
     def test_restart_marks_queue_incomplete_without_running_provider(self):
         parent=self.parent(['one','two']);parent['children'][0]['status']='running';server._persist_jobs()
         server.JOBS.clear()

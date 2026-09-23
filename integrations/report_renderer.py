@@ -89,7 +89,7 @@ def evidence_records(result, directory=None):
         return records
     if result.get('suite') == 'browser_report':
         return result.get('browser_requests') or []
-    if result.get('suite') in ('ccmax','ccmax_acceptance'):
+    if result.get('suite') in ('ccmax','ccmax_acceptance','claude','claude_acceptance'):
         for sample in result.get('samples',[]):
             response=sample.get('response') or {};evidence=sample.get('evidence') or {};request=sample.get('request') or {}
             records.append({'id':sample.get('id',''), 'case_id':sample.get('probe',''), 'status':sample.get('status'),
@@ -207,7 +207,7 @@ def _auth_name(value):
 
 def render_report(result, directory=None):
     result=redact(copy.deepcopy(result));decorate(result)
-    data=build_report_data(result);cc=result.get('suite') in ('ccmax','ccmax_acceptance');browser=result.get('suite')=='browser_report'
+    data=build_report_data(result);cc=result.get('suite') in ('ccmax','ccmax_acceptance');claude=result.get('suite') in ('claude','claude_acceptance');browser=result.get('suite')=='browser_report'
     checks=data.get('checks',[]);requests=redact(evidence_records(result,directory));config=result.get('configuration') or {}
     status_counts=Counter(c.get('status') for c in checks)
     local_count=sum('tolerance_boundaries' in str(c.get('id','')) for c in checks)
@@ -222,7 +222,17 @@ def render_report(result, directory=None):
             if value:evidence_aliases.setdefault(value,[]).append(target)
     def links(ids):
         items=[];seen=set()
-        for identity in dict.fromkeys(ids or []):
+        identities=list(dict.fromkeys(ids or []))
+        # Local IDs are authoritative. Providers can reuse an upstream header
+        # across many HTTP requests; do not let that alias broaden an explicit
+        # sample relationship to every request sharing the header.
+        exact=[identity for identity in identities if identity in request_anchors]
+        for identity in exact or identities:
+            if identity in request_anchors:
+                anchor=request_anchors[identity]
+                if anchor not in seen:
+                    seen.add(anchor);items.append('<a href="#'+anchor+'">'+esc(identity)+'</a>')
+                continue
             matches=evidence_aliases.get(identity)
             if matches:
                 for anchor,label in matches:
@@ -248,7 +258,12 @@ def render_report(result, directory=None):
     result_rows=[]
     for index, check in enumerate(checks, 1):
         matched={}
-        for identity in check.get('request_ids') or []:
+        identities=check.get('request_ids') or []
+        exact=[identity for identity in identities if identity in request_by_id]
+        for identity in exact or identities:
+            if identity in request_by_id:
+                matched[identity]=request_by_id[identity]
+                continue
             for anchor, identity_id in evidence_aliases.get(identity, []):
                 matched[identity_id]=request_by_id[identity_id]
         failed=sum(row.get('status') in ('failed','error') for row in matched.values())
@@ -344,15 +359,22 @@ def render_report(result, directory=None):
     total=max(1,len(checks));distribution=''.join('<span class="'+s+'" style="width:'+str(n/total*100)+'%"></span>' for s,n in status_counts.items() if s in STATUS)
     runtime_info=[('渠道地址',config.get('base') or '未记录'),('模型 ID',config.get('model') or '未记录'),('检测程序',data.get('engine') or '未记录'),
         ('运行状态',STATUS.get(result.get('status'),result.get('status','未记录'))),('本轮耗时',elapsed_text),
-        ('执行进度',f'{summary.get("completed",0)} / {summary.get("total","未记录")} '+('请求样本' if cc else '观察项' if browser else 'pytest 项')),
+        ('执行进度',f'{summary.get("completed",0)} / {summary.get("total","未记录")} '+('请求样本' if cc else '专项检查' if claude else '观察项' if browser else 'pytest 项')),
         ('单次超时',str(config['timeout'])+' 秒' if config.get('timeout') is not None else '未记录')]
-    openai=result.get('request_format')=='openai' or config.get('request_format')=='openai' or (not cc and config.get('think_mode')=='openai')
-    runtime_info.append(('请求格式',_format_name(config.get('request_format') or config.get('requestFormat')) if browser else 'OpenAI Chat Completions · /v1/chat/completions' if openai else 'Anthropic Messages · /v1/messages' if cc else 'Kimi 原生契约 · Chat Completions'))
+    openai=result.get('request_format')=='openai' or config.get('request_format')=='openai' or (not cc and not claude and config.get('think_mode')=='openai')
+    runtime_info.append(('请求格式',_format_name(config.get('request_format') or config.get('requestFormat')) if browser else 'OpenAI Chat Completions · /v1/chat/completions' if openai else 'Anthropic Messages · /v1/messages' if cc or claude else 'Kimi 原生契约 · Chat Completions'))
     if browser:
         runtime_info.extend([('鉴权方式',_auth_name(config.get('auth'))), ('请求端点',config.get('endpoint') or config.get('path') or '按各项请求证据记录')])
     if cc:
         runtime_info.extend([('采样设置',('签名不适用 · ' if openai else f'签名 {config.get("signature_samples","未记录")} 次 · ')+f'普通 SSE {config.get("sse_samples","未记录")} 次 · 工具与非法模型各 1 次'),
             ('并发 / 鉴权',str(config.get('concurrency','未记录'))+' / '+('x-api-key' if config.get('auth')=='anthropic' else config.get('auth','未记录')))])
+    elif claude:
+        provider_names = {'auto': '未指定 / 自动观察', 'anthropic': 'Anthropic 官方（渠道声明）', 'aws': 'AWS Bedrock（渠道声明）'}
+        runtime_info.extend([('上游来源声明',provider_names.get(config.get('provider'), config.get('provider') or '未指定')),
+            ('来源判读','来源为配置提示，未对官方资源、AWS 账号或模型权重进行认证'),
+            ('缓存目标规模',str(config.get('cache_tokens','未记录'))+' tokens（目标值，实测以 usage 为准）'),
+            ('压测样本 / 并发',str(config.get('stress_requests','未记录'))+' / '+str(config.get('concurrency','未记录'))),
+            ('鉴权方式',_auth_name(config.get('auth')))])
     elif not browser:
         runtime_info.extend([('KVV Schema / 原生版本',result.get('revision','未记录')),('格式范围','全部四个检测层面使用兼容断言，原生专项另行说明' if openai else str(config.get('think_mode','未记录'))+'；原生 K3 专项保留官方字段')])
     info='<dl class="key-value">'+''.join('<dt>'+esc(k)+'</dt><dd>'+esc(v)+'</dd>' for k,v in runtime_info)+'</dl>'
@@ -419,7 +441,7 @@ def render_report(result, directory=None):
         +'<div class="masthead"><span class="brand">小小宇宙无敌</span><span class="eyebrow">CHANNEL ACCEPTANCE REPORT</span><button class="button no-print" id="print-report">打印 / 保存 PDF</button></div>'
         +'<header class="cover"><div class="cover-top"><span class="eyebrow">'+esc(title)+'</span>'+badge(result.get('status'))+'</div><h1>'+esc(model)+'</h1><p>'+esc(config.get('base') or '渠道地址未记录')+'</p><p class="run-id">RUN / '+esc(result.get('run_id') or '未记录')+'</p><div class="cover-meta"><span>'+esc(data.get('engine') or '渠道验收')+'</span><span>'+str(len(checks))+' 项检查</span><span>'+str(request_count)+' 次已记录请求</span><span>依据本轮实测 · 脱敏证据</span></div></header>'
         +'<nav class="nav"><a href="#overview">结论总览</a><a href="#all-results">全项结果</a><a href="#modules">验收模块</a><a href="#score">能力评分</a>'+('<a href="#gpt-quality">GPT 质量</a>' if gpt_html else '')+'<a href="#setup">范围与配置</a><a href="#findings">发现的问题</a><a href="#checks">逐项检查</a><a href="#requests">请求证据</a>'+('<a href="#original-results">原始评分与日志</a>' if original_html else '')+'<a href="#limits">判读说明</a></nav>'
-        +'<section id="overview" class="overview"><div class="verdict-line"><div><h2>'+esc(verdict.get('label',''))+'</h2><p>'+esc(verdict.get('detail',''))+'</p></div>'+badge(verdict.get('status'))+'</div><div class="metrics">'+metrics+'</div><div class="distribution" aria-hidden="true">'+distribution+'</div><p class="legend">本报告列出 '+str(len(checks))+' 个验收项 / 用例；'+('请求样本：通过 '+str(summary.get('passed',0))+'，未通过 '+str(summary.get('failed',0))+'，无法判定 '+str(summary.get('inconclusive',0))+'。' if cc else '浏览器检查结果与实际 HTTP 请求数分别统计。' if browser else '官方用例、附加传输检查与真实请求数分别统计。')+'</p></section>'+toc_html+all_results_html+score_html+gpt_html
+        +'<section id="overview" class="overview"><div class="verdict-line"><div><h2>'+esc(verdict.get('label',''))+'</h2><p>'+esc(verdict.get('detail',''))+'</p></div>'+badge(verdict.get('status'))+'</div><div class="metrics">'+metrics+'</div><div class="distribution" aria-hidden="true">'+distribution+'</div><p class="legend">本报告列出 '+str(len(checks))+' 个验收项 / 用例；'+('请求样本：通过 '+str(summary.get('passed',0))+'，未通过 '+str(summary.get('failed',0))+'，无法判定 '+str(summary.get('inconclusive',0))+'。' if cc else 'Claude 专项检查与真实请求数分别统计；上游来源仅为渠道声明。' if claude else '浏览器检查结果与实际 HTTP 请求数分别统计。' if browser else '官方用例、附加传输检查与真实请求数分别统计。')+'</p></section>'+toc_html+all_results_html+score_html+gpt_html
         +'<section id="setup" class="section"><div class="section-head"><div><span class="index">01 / SCOPE</span><h2>这次测了什么</h2></div></div><div class="grid-two"><div class="panel">'+info+'</div><div class="panel">'+scopes+'</div></div></section>'
         +'<section id="findings" class="section"><div class="section-head"><div><span class="index">02 / FINDINGS</span><h2>问题与影响</h2><p>依据本轮已保存的响应和断言整理；建议用于核对链路，不代替上游日志。</p></div></div>'+finding_html+'</section>'
         +'<section id="checks" class="section"><div class="section-head"><div><span class="index">03 / CHECKS</span><h2>逐项验收说明</h2></div><small id="visible-count"></small></div><div class="filters no-print">'

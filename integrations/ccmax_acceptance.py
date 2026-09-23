@@ -14,12 +14,13 @@ import copy
 import hashlib
 import json
 import math
+import os
 import queue
 import re
 import socket
 import threading
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, unquote
 
 import httpx
 
@@ -409,14 +410,36 @@ def _interrupt_response(response):
         pass
 
 
+def _outbound_proxy():
+    proxy=os.environ.get("WORKBENCH_OUTBOUND_PROXY", "").strip() or None
+    if proxy:
+        try:
+            u=urlsplit(proxy)
+            if u.scheme not in ("http","https") or not u.hostname or u.query or u.fragment or re.search(r"[\x00-\x20\\]",proxy): raise ValueError()
+            _=u.port
+        except ValueError:
+            raise ValueError("服务器出站代理配置无效，请检查 WORKBENCH_OUTBOUND_PROXY。")
+    return proxy
+
+
+def _safe_proxy_error(error, proxy):
+    text=str(error)
+    if proxy:
+        u=urlsplit(proxy)
+        for value in (proxy,u.username,u.password,unquote(u.username or ""),unquote(u.password or "")):
+            if value: text=text.replace(value,"[redacted proxy credential]")
+    return text
+
+
 def _collect_sample(spec, settings, key, transport, cancelled):
     started = time.monotonic()
+    proxy = _outbound_proxy()
     openai = settings.get("request_format") == "openai"
     parser = ccmax_openai.SSEAnalysis() if openai else SSEAnalysis()
     is_stream = spec["probe"] in ("sse", "tool")
     sample = {"id": spec["id"], "probe": spec["probe"], "status": "inconclusive", "issues": [],
               "request_format": settings.get("request_format", "anthropic"),
-              "request": {"method": "POST", "url": _endpoint(settings["base"], settings.get("request_format", "anthropic")), "body": spec["body"]},
+              "request": {"method": "POST", "url": settings.get("endpoint") or _endpoint(settings["base"], settings.get("request_format", "anthropic")), "body": spec["body"]},
               "response": {"status": None, "headers": [], "body": ""},
               "evidence": {"request_ids": [], "message_ids": []}, "assessments": []}
     if spec.get("canary"):
@@ -468,7 +491,7 @@ def _collect_sample(spec, settings, key, transport, cancelled):
         if _cancelled(cancelled):
             state["reason"] = "cancelled"
         else:
-            with httpx.Client(transport=transport, timeout=httpx.Timeout(settings["timeout"], connect=min(settings["timeout"], 10)), follow_redirects=False, trust_env=False) as client:
+            with httpx.Client(transport=transport, timeout=httpx.Timeout(settings["timeout"], connect=min(settings["timeout"], 10)), follow_redirects=False, trust_env=False, proxy=proxy) as client:
                 with client.stream("POST", sample["request"]["url"], headers=headers, json=spec["body"], extensions={"trace": trace}) as response:
                     state["response"] = response
                     sample["response"]["status"] = response.status_code
@@ -493,7 +516,7 @@ def _collect_sample(spec, settings, key, transport, cancelled):
                                 break
     except Exception as exc:
         # An interrupted socket often surfaces as ReadError/RemoteProtocolError.
-        error = {"type": type(exc).__name__, "message": str(exc)}
+        error = {"type": type(exc).__name__, "message": _safe_proxy_error(exc, proxy)}
         if isinstance(exc, httpx.TimeoutException) and not state["reason"]:
             state["reason"] = "timeout"
     finally:

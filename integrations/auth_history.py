@@ -30,7 +30,7 @@ MEDIA_MIMES = {
     'audio': {'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/ogg', 'audio/webm', 'audio/mp4', 'audio/aac', 'audio/flac', 'audio/x-flac'},
     'video': {'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime', 'video/x-matroska'},
 }
-KINDS = {'text', 'image', 'video', 'audio', 'general', 'ccmax', 'kimi'}
+KINDS = {'text', 'image', 'video', 'audio', 'general', 'ccmax', 'claude', 'kimi'}
 STATUSES = {'passed', 'failed', 'cancelled', 'pending', 'inconclusive'}
 SECRET_FIELD = re.compile(r'(?i)^(?:key|api[_-]?key|authorization|proxy-authorization|x-api-key|x-goog-api-key|password|passwd|password_hash|access[_-]?token|refresh[_-]?token|session[_-]?token|cookie|set-cookie|secret|client_secret|token)$')
 
@@ -235,7 +235,7 @@ class Store:
         owner = owner or self.owner
         kind = data.get('kind')
         source = data.get('source')
-        if kind not in KINDS or (acceptance and source != 'acceptance') or (not acceptance and (source not in ('basic', 'general') or kind in ('ccmax', 'kimi'))):
+        if kind not in KINDS or (acceptance and source != 'acceptance') or (not acceptance and (source not in ('basic', 'general') or kind in ('ccmax', 'claude', 'kimi'))):
             raise ValueError('历史记录类型无效')
         status = data.get('status', 'inconclusive')
         if status not in STATUSES: raise ValueError('历史记录状态无效')
@@ -245,7 +245,7 @@ class Store:
             value = data.get(name, '')
             if not isinstance(value, str): raise ValueError(name + ' 必须为文本')
             return redact(value[:length])
-        title = small('title', 240) or {'text':'文本测试','image':'图像测试','video':'视频测试','audio':'音频测试','general':'通用检测','ccmax':'CCMax渠道验收','kimi':'Kimi KVV验证'}[kind]
+        title = small('title', 240) or {'text':'文本测试','image':'图像测试','video':'视频测试','audio':'音频测试','general':'通用检测','ccmax':'CCMax渠道验收','claude':'Claude 上游验收','kimi':'Kimi KVV验证'}[kind]
         model = small('model', 500)
         base = safe_url(small('base', 2048)) or ''
         prompt = small('prompt', 100000)
@@ -316,12 +316,13 @@ class Store:
         run_id = result.get('run_id')
         if not isinstance(run_id, str) or not re.fullmatch(r'[a-f0-9]+', run_id): raise ValueError('报告缺少有效运行编号')
         ccmax = config.get('suite') == 'ccmax' or result.get('suite') == 'ccmax_acceptance'
+        claude = config.get('suite') == 'claude' or result.get('suite') in ('claude', 'claude_acceptance')
         status = result.get('verdict', {}).get('status', 'inconclusive')
         if result.get('status') == 'cancelled': status = 'cancelled'
         finished = result.get('finished_at') or time.time()
         started = result.get('started_at') or finished
-        return self.save({'client_id':'acceptance:' + run_id,'kind':'ccmax' if ccmax else 'kimi','source':'acceptance',
-            'title':'CCMax渠道验收' if ccmax else ('Kimi KVV 11项预检' if config.get('suite') == 'kvv11' else 'Kimi KVV全套验证'),
+        return self.save({'client_id':'acceptance:' + run_id,'kind':'claude' if claude else 'ccmax' if ccmax else 'kimi','source':'acceptance',
+            'title':'Claude 上游验收' if claude else 'CCMax渠道验收' if ccmax else ('Kimi KVV 11项预检' if config.get('suite') == 'kvv11' else 'Kimi KVV全套验证'),
             'model':config.get('model', ''),'base':config.get('base', ''),'prompt':'','status':status,'created_at':started,
             'duration_ms':max(0, (finished - started) * 1000),'result':result,'run_id':run_id}, acceptance=True, only_missing=only_missing)
 

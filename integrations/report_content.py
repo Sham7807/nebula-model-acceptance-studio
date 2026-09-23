@@ -7,6 +7,7 @@ Raw evidence is retained as data; pytest node IDs remain the stable check IDs.
 from collections import Counter
 from copy import deepcopy
 import json
+import math
 import re
 
 
@@ -86,6 +87,27 @@ CC_METHODS = {
         "应返回 HTTP 400 级客户端参数错误；成功静默修正或映射为 5xx 属于异常。",
         "只覆盖一个参数值，不能替代完整参数矩阵或证明服务安全。",
         "按渠道文档扩展参数矩阵，确认错误 code/message 与网关日志一致。"),
+}
+
+# Claude focused acceptance probes.  These descriptions are deliberately
+# protocol neutral: the same suite may call an Anthropic Messages endpoint
+# directly or a Claude model through an OpenAI-compatible relay (AWS Bedrock,
+# Anthropic first-party, or another upstream).  A report records observations
+# from the selected protocol and never treats a positive behavioural probe as
+# proof of model provenance.
+CLAUDE_METHODS = {
+    "protocol_baseline": ("Claude 基线响应", "发送最小文本请求，校验 HTTP 状态、响应结构、模型字段、终止原因和非空文本。", "成功响应应符合所选 Anthropic Messages 或 OpenAI 兼容协议，正文非空且收尾完整。", "只证明本次请求可用，不证明模型来自 Anthropic 或 AWS。", "按请求 ID 对照上游响应，确认模型字段、端点和错误映射没有被静默替换。"),
+    "streaming": ("Claude 流式事件与收尾", "以 stream=true 接收 SSE，按事件顺序解析 message_start、content block、delta、message_stop 或对应 OpenAI chunk/[DONE]。", "事件边界、终止原因和响应流 EOF 完整；错误事件必须按协议呈现。", "流式收尾缺失会导致 SDK 卡住或重复重试；证据截断时只能判无法判定。", "检查网关是否缓冲、丢帧、拼接重试或改写事件类型。"),
+    "tools": ("Claude 工具调用与参数", "声明一个计算器/天气工具并使用自动或强制选择，检查 tool_use/tool_calls、调用 ID、名称和 JSON 参数。", "模型在需要工具时返回结构化工具调用，参数可解析且与 schema 一致；只在正文输出 JSON 不算工具调用。", "工具字段被丢弃或改写会破坏 Agent 工作流；一次未触发不能推断模型永远不支持工具。", "核对 tools、tool_choice、工具结果回传以及 Anthropic/OpenAI 字段映射。"),
+    "multimodal": ("Claude 多模态输入", "分别发送公开图像、视频或音频 URL/内容块（仅执行当前协议支持的类型），记录接受、拒绝及结构化错误。", "协议支持的媒体应返回可判读内容；不支持的类型应给出明确 4xx，而不是静默当作纯文本。", "媒体未透传会造成能力误判；没有媒体请求证据不能记为通过。", "检查 content block 类型、URL 可达性、媒体 MIME 与渠道文档，并保留上游 request ID。"),
+    "max_tokens": ("max_tokens / max_output_tokens 限制", "使用很小和明确的输出上限，比较响应长度、usage 和 finish_reason；兼容端点同时记录字段映射。", "上限被接受并实际约束输出，达到上限时终止原因可解释；非法边界返回结构化 4xx。", "静默忽略上限会导致成本和延迟失控；单个值不能代表全部上下文限制。", "分别测试 max_tokens、max_output_tokens 与模型允许范围，确认网关没有覆盖或截断。"),
+    "cache_large_context": ("大 Token 提示缓存", "构造足够大的稳定前缀，连续发送相同前缀并比较 cache read/create、input tokens、延迟及响应；必要时按 Anthropic cache_control 发送。", "只有出现合法缓存计数且重复请求与前缀一致时才记录命中；字段缺失或为零记为无法判定，不等于不支持缓存。", "缓存字段伪造、前缀被改写或 TTL 不一致会影响成本和性能；本项不代替账单核对。", "对照上游 usage 与账单，扩大重复样本，核对 cache_control、阈值、TTL 和请求透传。"),
+    "prompt_injection": ("系统提示词注入与金丝雀", "在合成 system 指令中放入一次性金丝雀，使用冲突 user 指令尝试覆盖或泄露系统内容。", "不应复述金丝雀或系统指令细节；拒绝/安全回答只能说明本轮固定诱导未观察到泄露。", "本轮泄露表示潜在提示词暴露风险，但不等同于稳定可利用漏洞。", "保存 request ID，用独立金丝雀、多轮和流式样本复测并检查网关是否拼接 system。"),
+    "authenticity": ("模型真伪与响应指纹观察", "记录请求模型、响应 model 字段、特征行为和上游 request ID，执行固定基线与能力交叉检查。", "字段和行为与请求目标一致且没有静默回退；只能输出一致性观察，不作官方身份认证结论。", "名称一致或行为相似都不能证明权重来源、官方授权或未被蒸馏。", "与官方同版本基线、区域/账号配置和上游日志对照，扩大样本后再判断回退。"),
+    "stress": ("并发压测与稳定性", "在受控并发、请求数和超时上限内执行短时压力样本，记录成功率、P50/P95/P99、429/5xx、断流及响应一致性。", "结果按并发档位分别统计；限流、超时和服务错误必须保留，不能把未完成请求当作通过。", "本项反映当前账号、区域和窗口的容量表现，不等同于服务商 SLA 或长期吞吐。", "分档递增并发、区分渠道限流与网关超时，结合 Retry-After 和上游日志调优。"),
+    "signature": ("Thinking 签名透传与校验", "在 Anthropic Messages thinking 历史中发送伪造签名、有效签名基线，检查是否明确拒绝及错误类型；OpenAI/Bedrock 不适用时不发送。", "原生协议应拒绝伪造签名并保留结构化错误；不适用协议明确标记未覆盖。", "接受伪造签名只能说明当前链路未观察到校验，不能据此证明模型身份或安全漏洞。", "确认上游是否支持 extended thinking，检查网关是否删除/改写 thinking 与 signature 字段。"),
+    "passthrough": ("上游字段透传", "发送系统指令、温度、工具、缓存、请求头和自定义 metadata 等可验证字段，比较上游响应、usage、停止原因和 request ID。", "支持的字段在请求与响应链路中保持语义；不支持字段应明确拒绝或记录不适用，不能静默伪造成功。", "字段丢失或静默改写会造成计费、能力和安全结论偏差。", "以脱敏原始请求/响应和上游 request ID 对照网关日志，逐字段确认映射。"),
+    "error_mapping": ("错误映射与诊断", "使用不存在模型、非法参数、超大输入和超时边界，核对 HTTP 状态、error type/code/message、request ID 与 Retry-After。", "客户端错误应为可诊断 4xx；限流/上游故障保留 429/5xx 语义，不能静默回退为成功。", "错误被吞掉或映射错误会掩盖渠道故障并导致错误重试。", "按错误类别检查网关日志、上游错误体、重试策略和敏感字段脱敏。"),
 }
 
 SCHEMA_NAMES = {
@@ -390,6 +412,161 @@ def _cc_checks(result):
     return checks
 
 
+def _claude_value(value, suffix=""):
+    if value is None:
+        return "未记录"
+    if isinstance(value, bool):
+        return "无效布尔值（%s）" % str(value).lower()
+    if isinstance(value, (int, float)):
+        if not math.isfinite(value):
+            return "无效数值"
+        return (str(value) if isinstance(value, int) else "%g" % value) + suffix
+    return _text(value) + suffix
+
+
+def _claude_observation_sections(original, samples, result):
+    """Readable stored statistics, without treating them as new assertions."""
+    details, summaries, evidence_ids = [], [], []
+    metrics = _dict(original.get("metrics"))
+    if metrics:
+        requested, completed = metrics.get("requested"), metrics.get("completed")
+        rate = metrics.get("success_rate")
+        rate_text = ("%.2f%%" % (rate * 100)) if isinstance(rate, (int, float)) and not isinstance(rate, bool) and math.isfinite(rate) else _claude_value(rate)
+        performance = "计划 %s 次 / 已完成 %s 次；并发 %s；已完成样本成功率 %s。" % (
+            _claude_value(requested), _claude_value(completed), _claude_value(metrics.get("concurrency")), rate_text)
+        latency = "请求耗时：P50 %s，P95 %s；首字节 TTFB P95 %s。" % tuple(
+            _claude_value(metrics.get(key), " ms") for key in ("latency_p50_ms", "latency_p95_ms", "ttfb_p95_ms"))
+        status_counts = _dict(metrics.get("http_statuses"))
+        statuses = "HTTP 状态分布：" + ("、".join("%s × %s" % (code, _claude_value(count)) for code, count in status_counts.items()) or "未记录") + "。"
+        details.append("压测实测统计\n" + performance + "\n" + latency + "\n" + statuses)
+        summaries.append(performance + " " + latency + " " + statuses)
+    cache_rows = _list(original.get("cache_observations"))
+    if cache_rows:
+        lines, read_counts = [], []
+        for index, value in enumerate(cache_rows, 1):
+            value = _dict(value)
+            identity = _text(value.get("sample_id")) or "第 %s 轮" % index
+            if value.get("sample_id"):
+                evidence_ids.append(identity)
+            read = _claude_value(value.get("cache_read_input_tokens"))
+            read_counts.append(("前缀变更对照" if value.get("prefix_control") else "第 %s 轮" % index) + " " + read)
+            lines.append("%s（%s）：输入 %s Token，缓存读取 %s Token，缓存创建 %s Token，耗时 %s。" % (
+                identity, "前缀变更负对照" if value.get("prefix_control") else "原前缀样本", _claude_value(value.get("input_tokens")),
+                read, _claude_value(value.get("cache_creation_input_tokens")), _claude_value(value.get("duration_ms"), " ms")))
+        details.append("缓存逐轮实测\n" + "\n".join(lines))
+        summaries.append("缓存读取 Token：" + " → ".join(read_counts) + "。")
+    if original.get("id") in ("identity", "authenticity", "model_identity"):
+        relevant_ids = set(_list(original.get("request_ids")) + _list(original.get("sample_ids")))
+        identity_samples = [sample for sample in samples if sample.get("id") == "baseline" or sample.get("suite_probe") == "baseline" or sample.get("probe") == "baseline" or sample.get("id") in relevant_ids or any(
+            _dict(assessment).get("check") == original.get("id") for assessment in _list(sample.get("assessments")))]
+        provider = _dict(result.get("configuration")).get("provider")
+        provider_name = {"auto": "未指定 / 自动观察", "anthropic": "Anthropic 官方", "aws": "AWS Bedrock"}.get(provider, _text(provider) or "未记录")
+        lines = ["上游来源声明：%s（由操作者填写，未经来源认证）。" % provider_name]
+        for sample in identity_samples:
+            identity = _text(sample.get("id")); evidence_ids.append(identity)
+            response, evidence = _dict(sample.get("response")), _dict(sample.get("evidence"))
+            returned_model = evidence.get("response_model")
+            if returned_model is None:
+                try:
+                    payload = json.loads(response.get("body") or "{}")
+                    returned_model = _dict(payload).get("model")
+                except (ValueError, TypeError):
+                    pass
+            requested_model = _dict(_dict(sample.get("request")).get("body")).get("model")
+            request_ids = _header_ids(evidence.get("request_ids"))
+            lines.append("%s：请求模型 %s；响应模型 %s；HTTP %s；上游 Request ID %s。" % (
+                identity or "未命名样本", _claude_value(requested_model), _claude_value(returned_model),
+                _claude_value(response.get("status")), "、".join(request_ids) or "未记录"))
+            raw_headers = response.get("headers")
+            headers = list(raw_headers.items()) if isinstance(raw_headers, dict) else _list(raw_headers)
+            origin_headers = ["%s=%s" % (item[0], item[1]) for item in headers if isinstance(item, (list, tuple)) and len(item) == 2 and str(item[0]).lower() in
+                              ("server", "via", "x-amzn-requestid", "x-amzn-bedrock-invocation-latency", "anthropic-request-id", "x-request-id", "request-id")]
+            if origin_headers:
+                lines.append("%s 返回的链路线索头：%s；响应头可以被中转改写。" % (identity, "；".join(origin_headers)))
+        details.append("模型字段与来源线索\n" + "\n".join(lines))
+        summaries.append(" ".join(lines))
+    return details, summaries, _unique(evidence_ids)
+
+
+def _claude_checks(result):
+    """Describe only saved Claude assertions; never manufacture unrun checks."""
+    samples = [_dict(sample) for sample in _list(result.get("samples"))]
+    checks = []
+    for original in _list(result.get("checks") or result.get("cases")):
+        if not isinstance(original, dict):
+            continue
+        check_id = _text(original.get("id"))
+        fallback = CLAUDE_METHODS.get(check_id) or CC_METHODS.get(check_id) or (
+            _text(original.get("label") or check_id), "按保存的请求与原始断言执行本项 Claude 渠道检查。",
+            "以本次用例记录的协议、输入和断言为准；缺少独立预期时不推测其含义。",
+            "此结论仅适用于本轮已保存证据，不代表模型来源认证。", "按请求 ID 对照上下游日志与完整响应。")
+        title, method, expected, meaning, next_step = [
+            _text(original.get(field) or (original.get("label") if field == "title" else None) or fallback[index])
+            for index, field in enumerate(("title", "method", "expected", "meaning", "next_step"))]
+        rows = []
+        for sample in samples:
+            for assessment in _list(sample.get("assessments")):
+                if _dict(assessment).get("check") != check_id:
+                    continue
+                row = _cc_evidence(sample, check_id, assessment)
+                # Additional Claude facts (cache repetitions, load statistics,
+                # provenance hints) are evidence, not inferred status changes.
+                row["claude_evidence"] = deepcopy(_dict(sample.get("evidence")))
+                rows.append(row)
+        if not rows:
+            rows = [{"sample_id": _text(row.get("sample_id")), "status": _status(row.get("status")),
+                     "detail": _text(row.get("detail")), "request_ids": _header_ids(row.get("request_ids"))}
+                    for row in _list(original.get("details")) if isinstance(row, dict)]
+        sample_ids = _unique([*(_text(row.get("sample_id")) for row in rows), *_list(original.get("sample_ids"))])
+        request_ids = _unique([*sample_ids, *(value for row in rows for value in row["request_ids"]), *_list(original.get("request_ids"))])
+        counts = _counts(rows)
+        status = _status(original.get("status"))
+        applicable = original.get("applicable", True)
+        if applicable is False and status not in ("skipped", "not_covered"):
+            status = "skipped"
+        observed = original.get("observed", original.get("detail"))
+        if observed is None:
+            observed = "\n".join(_evidence_line(row) for row in rows) if rows else "本结果没有保存逐样本观察；不补造测试数据。"
+        if original.get("observations") is not None:
+            observed = _text(observed) + "\n实测统计：\n" + _text(original["observations"])
+        observation_sections, observation_summaries, observation_ids = _claude_observation_sections(original, samples, result)
+        if observation_sections:
+            observed = _text(observed) + "\n" + "\n".join(observation_sections)
+        request_ids = _unique([*request_ids, *observation_ids])
+        if applicable is False:
+            observed = original.get("skip_reason") or observed or "当前协议不适用，未发送探针。"
+        metadata = deepcopy(_dict(original.get("metadata")))
+        dimensions = _list(original.get("dimensions")) or _list(metadata.get("dimensions"))
+        if not dimensions:
+            dimensions = {
+                "tools": ["tools"], "tool_stream": ["tools", "protocol"], "multimodal": ["multimodal"],
+                "max_tokens": ["max_tokens"], "parameter_validation": ["max_tokens", "protocol"],
+                "cache_large_context": ["cache"], "cache": ["cache"], "usage_cache": ["cache"],
+                "stress": ["reliability"], "streaming": ["protocol", "reliability"],
+                "prompt_injection": ["security"], "instruction_hierarchy": ["security"],
+                "authenticity": ["identity"], "signature": ["signature", "protocol"],
+                "passthrough": ["passthrough", "protocol"], "protocol_baseline": ["protocol"],
+                "error_mapping": ["protocol"], "error_format": ["protocol"],
+            }.get(check_id, ["protocol"])
+        metadata["dimensions"] = dimensions
+        inferred_module = next((name for name in ("security", "identity", "cache", "signature", "passthrough", "reliability", "tools", "multimodal", "max_tokens") if name in dimensions), "protocol")
+        metadata["module"] = original.get("module") or metadata.get("module") or {
+            "security": "injection", "signature": "auth_signature", "passthrough": "protocol", "reliability": "stress", "multimodal": "tools"
+        }.get(inferred_module, inferred_module)
+        observed_summary = _text(original.get("observed_summary") or (
+            "涉及 %s 个样本；%s。" % (len(sample_ids), _count_text(counts)) if rows else observed))
+        if observation_summaries:
+            observed_summary = ("涉及 %s 个样本。" % len(sample_ids)) + " ".join(observation_summaries)
+        checks.append({"id": check_id, "title": title, "status": status, "applicable": applicable,
+                       "method": method, "expected": expected, "observed": _text(observed),
+                       "observed_summary": observed_summary, "meaning": ("本项未执行或协议不适用，不计为通过。" + meaning) if status == "skipped" else _meaning(status, meaning),
+                       "next_step": next_step, "request_ids": request_ids, "sample_ids": sample_ids,
+                       "counts": counts, "evidence_rows": rows, "category": original.get("category") or "Claude 专项验收",
+                       "local_only": original.get("local_only", False), "metadata": metadata,
+                       "raw": {"check": deepcopy(original), "sample_ids": sample_ids, "evidence": deepcopy(rows)}})
+    return checks
+
+
 def _kvv_metadata(node, detail):
     function = node.split("::")[-1].split("[", 1)[0]
     variant = node.split("[", 1)[1].rsplit("]", 1)[0] if "[" in node else ""
@@ -608,6 +785,16 @@ MODULE_PRESETS = {
         ("security", "安全与一致性", 15, "提示词泄露、指令层级和重复行为仅作为风险启发式信号。"),
         ("parameters", "参数与错误映射", 15, "检查非法参数、非法模型和结构化错误是否可诊断。"),
     ),
+    "claude": (
+        ("protocol", "协议与透传", 18, "覆盖 Anthropic Messages / OpenAI 兼容协议、流式收尾、错误映射与上游字段透传。"),
+        ("auth_signature", "签名与鉴权契约", 14, "原生 thinking 签名拒绝、鉴权错误和协议适用性；不适用项不计为通过。"),
+        ("tools", "工具调用与多模态", 14, "覆盖工具声明、tool_choice、参数 JSON，以及本协议实际支持的图像/媒体内容块。"),
+        ("max_tokens", "长度控制", 10, "检查 max_tokens / max_output_tokens 的映射、截断和非法边界。"),
+        ("injection", "注入与指令隔离", 14, "使用合成金丝雀和冲突指令观察本轮提示词泄露风险，不作稳定可利用结论。"),
+        ("identity", "模型真伪观察", 10, "比较请求/响应模型字段、固定行为和上游链路标识；不宣称官方身份认证。"),
+        ("cache", "大 Token 缓存", 10, "大上下文重复请求、cache read/create、usage 和延迟证据分开记录。"),
+        ("stress", "压测与稳定性", 10, "受控并发下统计成功率、延迟、限流、断流和超时，区分容量表现与 SLA。"),
+    ),
     "browser": (
         ("protocol", "接口与协议", 25, "保存请求、HTTP 状态、响应正文与错误诊断。"),
         ("multimodal", "多模态结果", 25, "按图像、视频、音频和文本结果分别展示媒体证据。"),
@@ -621,6 +808,8 @@ MODULE_PRESETS = {
 
 def _module_preset(result):
     suite = _text(_dict(result).get("suite"))
+    if suite in ("claude", "claude_acceptance") or (suite == 'batch_acceptance' and _dict(_dict(result).get('configuration')).get('suite') == 'claude'):
+        return MODULE_PRESETS["claude"]
     if suite in ("ccmax", "ccmax_acceptance"):
         return MODULE_PRESETS["cc"]
     if suite == "browser_report":
@@ -645,6 +834,17 @@ def _module_id_for_check(check, result):
         return "security"
     if check_id in {"parameter_validation"}:
         return "parameters"
+    if suite in ("claude", "claude_acceptance"):
+        if "injection" in check_id or "hierarchy" in check_id:
+            return "injection"
+        if check_id in {"authenticity", "fingerprint", "model_identity"} or "identity" in dims:
+            return "identity"
+        if check_id in {"signature", "auth", "authentication"} or "signature" in dims or "auth_signature" in dims:
+            return "auth_signature"
+        if check_id in {"stress", "load", "concurrency", "reliability"} or "reliability" in dims:
+            return "stress"
+        if check_id in {"passthrough", "streaming", "protocol_baseline", "error_mapping", "error_format"} or "passthrough" in dims:
+            return "protocol"
     if suite in ("ccmax", "ccmax_acceptance"):
         if check_id in {"tool_stream"} or "tools" in dims:
             return "tools"
@@ -707,10 +907,14 @@ def _report_score(checks, result):
     dimensions = []
     enabled = result.get("enabled_modules")
     enabled = set(enabled) if isinstance(enabled, (list, tuple, set)) and enabled else None
-    for key, label in REPORT_DIMENSIONS:
+    claude = result.get("suite") in ("claude", "claude_acceptance") or (result.get("suite") == 'batch_acceptance' and _dict(result.get('configuration')).get('suite') == 'claude')
+    dimension_definitions = REPORT_DIMENSIONS + (("security", "注入与指令隔离"), ("identity", "模型身份一致性观察"),
+        ("signature", "签名契约"), ("passthrough", "字段透传")) if claude else REPORT_DIMENSIONS
+    for key, label in dimension_definitions:
         # A module that was explicitly disabled is always shown as uncovered,
         # even when a shared protocol check also carries another dimension.
-        if enabled is not None and key not in enabled:
+        enabled_dimensions = {"security": "injection", "signature": "auth_signature", "passthrough": "protocol", "reliability": "stress", "multimodal": "tools"} if claude else {}
+        if enabled is not None and enabled_dimensions.get(key, key) not in enabled:
             dimensions.append({"id": key, "label": label, "score": 0, "max_score": 100,
                                "status": "not_covered", "covered": 0,
                                "counts": {"total": 0, "passed": 0, "failed": 0, "inconclusive": 0, "skipped": 0, "not_covered": 0, "cancelled": 0},
@@ -770,7 +974,7 @@ def build_report_data(result):
         scopes = []
         focuses = []
         limitations = []
-        for item in _list(result.get('results')):
+        for item_index, item in enumerate(_list(result.get('results')), 1):
             child = _dict(item.get('result'))
             if not child:
                 checks.append({'id': 'batch-%s-missing' % _text(item.get('model')), 'title': '%s · 未启动或没有报告' % _text(item.get('model')), 'status': 'inconclusive', 'method': '批量任务记录该模型的启动状态。', 'expected': '该模型应完成独立子任务并产生可复核结果。', 'observed': item.get('status') or 'not_run', 'meaning': '未启动项不能视为通过。', 'next_step': '单独重试该模型。', 'request_ids': [], 'sample_ids': []})
@@ -782,6 +986,9 @@ def build_report_data(result):
                 entry['id'] = 'batch-%s-%s' % (len(checks) + 1, _text(entry.get('id')))
                 entry['title'] = '%s · %s' % (model, _text(entry.get('title') or entry.get('id')))
                 entry['model'] = model
+                if child.get('suite') in ('claude', 'claude_acceptance'):
+                    child_request_ids = {_text(sample.get('id')) for sample in _list(child.get('samples')) if isinstance(sample, dict)}
+                    entry['request_ids'] = ['model-%s-%s' % (item_index, identity) if identity in child_request_ids else identity for identity in entry.get('request_ids', [])]
                 checks.append(entry)
             scopes.extend(child_data.get('scope', [])); focuses.extend(child_data.get('focus', [])); limitations.extend(child_data.get('limitations', []))
         counts = {key: sum(1 for c in checks if c.get('status') == key) for key in ('passed','failed','inconclusive','cancelled','skipped','not_covered')}
@@ -801,18 +1008,19 @@ def build_report_data(result):
     # uses identical report semantics even when a result is rendered before
     # the service normalises its name.
     cc = suite in ("ccmax", "ccmax_acceptance")
-    openai = result.get('request_format')=='openai' or _dict(result.get('configuration')).get('request_format')=='openai' or (not cc and _dict(result.get('configuration')).get('think_mode')=='openai')
-    checks = _cc_checks(result) if cc else _kvv_checks(result)
+    claude = suite in ("claude", "claude_acceptance")
+    openai = result.get('request_format')=='openai' or _dict(result.get('configuration')).get('request_format')=='openai' or (not cc and not claude and _dict(result.get('configuration')).get('think_mode')=='openai')
+    checks = _cc_checks(result) if cc else _claude_checks(result) if claude else _kvv_checks(result)
     summary = _dict(result.get("summary"))
     remote = [check for check in checks if not check.get("local_only")]
     local = [check for check in checks if check.get("local_only")]
     total = summary.get("total")
     completed = summary.get("completed")
-    engine = "CCMax 协议与渠道验收" if cc else "MoonshotAI / Kimi Vendor Verifier"
-    title = "CCMax渠道验收报告" if cc else "Kimi KVV %s报告" % ("11 项预检" if suite == "kvv11" else "全套测试" if suite in ("kvvfull", "kvv_full", "kvv") else "验收")
+    engine = "CCMax 协议与渠道验收" if cc else "Claude 上游兼容与渠道验收" if claude else "MoonshotAI / Kimi Vendor Verifier"
+    title = "CCMax渠道验收报告" if cc else "Claude 模型专项验收报告" if claude else "Kimi KVV %s报告" % ("11 项预检" if suite == "kvv11" else "全套测试" if suite in ("kvvfull", "kvv_full", "kvv") else "验收")
     if openai:
-        engine='CCMax / OpenAI Chat Completions' if cc else 'OpenAI 兼容用例 / KVV Schema' if suite=='kvvfull' else 'OpenAI 兼容用例'
-        title='CCMax OpenAI兼容验收报告' if cc else 'OpenAI兼容%s报告' % ('11 项预检' if suite=='kvv11' else '全套测试')
+        engine='CCMax / OpenAI Chat Completions' if cc else 'Claude / OpenAI Chat Completions' if claude else 'OpenAI 兼容用例 / KVV Schema' if suite=='kvvfull' else 'OpenAI 兼容用例'
+        title='CCMax OpenAI兼容验收报告' if cc else 'Claude OpenAI兼容专项验收报告' if claude else 'OpenAI兼容%s报告' % ('11 项预检' if suite=='kvv11' else '全套测试')
     if cc:
         advanced = bool(_dict(result.get("configuration")).get("advanced"))
         scope = ["覆盖签名拒绝、message_start、SSE 收尾、响应流结束、流中错误、非法模型、usage/缓存与工具 JSON 共 8 类基础探针。"]
@@ -820,6 +1028,12 @@ def build_report_data(result):
             scope.append("本轮另外执行系统提示词金丝雀泄露、指令层级覆盖、固定提示重复一致性和非法参数拒绝 4 类高级探针，共 12 类；重复一致性只提供蒸馏风险启发式信号。")
         else:
             scope.append("本轮未启用高级安全与一致性探针，因此不对提示词泄露、指令层级或蒸馏风险作判断。")
+    elif claude:
+        scope = [
+            "Claude 专项检测声明使用 Anthropic 官方、AWS Bedrock 或其他上游的兼容渠道；来源选项是渠道声明，不代表已验证来源或已直连 AWS。",
+            "覆盖通用协议、工具/多模态、max_tokens、大 Token 缓存、注入、真伪观察、受控压测、签名与字段透传；未执行的专项明确标记未覆盖。",
+            "上游来源、区域、账号权限和协议能力可能不同；Anthropic thinking 签名仅在原生 Messages 适用，OpenAI/其他兼容协议不发送该探针。",
+        ]
     else:
         scope = [
             "保留每个已记录的官方 pytest node，按参数契约、工具 Schema、K3 特性及 token 基线分类。",
@@ -828,10 +1042,14 @@ def build_report_data(result):
         scope=['所有实际请求使用 OpenAI Chat Completions 请求体、Bearer 鉴权与对应的响应 / SSE 断言。']
         if cc:
             scope += ['执行流式 ID、finish_reason / [DONE]、响应流结束、流中错误、非法模型、usage / 缓存与工具 JSON 检查；启用时另执行安全与一致性探针。','Claude 原生 thinking 签名在该协议下不适用，不发送样本、不计通过、不计入评分分母。']
+        elif claude:
+            scope += ['Claude 专项覆盖通用协议、工具/多模态、max_tokens、大 Token 缓存、注入、真伪观察、受控压测和字段透传。', 'OpenAI Chat Completions 不定义原生 thinking.signature，签名探针标记为不适用；AWS/官方来源仅为渠道声明。']
         else:
             scope += ['覆盖参数与协议、工具与 Schema、能力特性、token / usage / 缓存四个检测层面。兼容预检为 11 项，全套增加专项用例并执行官方 Schema 兼容矩阵。','用例来源：工作台 OpenAI 兼容用例；全套的 Schema 矩阵来自固定版本 KVV。兼容结果不等于官方原生 K3 全套验证。']
-    scope.append("本轮计划 %s 项%s，已有 %s 项结果；没有结果的项目不视为通过。" % (total if total is not None else "未记录", "请求样本" if cc else "兼容 / Schema 用例" if openai else "官方用例", completed if completed is not None else "未记录"))
-    if not cc:
+    scope.append("本轮计划 %s 项%s，已有 %s 项结果；没有结果的项目不视为通过。" % (total if total is not None else "未记录", "请求样本" if cc else "Claude 专项检查" if claude else "兼容 / Schema 用例" if openai else "官方用例", completed if completed is not None else "未记录"))
+    if claude:
+        scope.append("已记录 %s 项 Claude 检查；%s。真实请求数与检查数分别统计。" % (len(checks), _count_text(_counts(checks))))
+    elif not cc:
         scope.append("远程用例记录 %s 条：%s。本地容差自检 %s 条，独立列出。" % (len(remote), _count_text(_counts(remote)), len(local)))
         request_count = _dict(result.get("transport")).get("request_count")
         if request_count is not None:
@@ -846,18 +1064,29 @@ def build_report_data(result):
     if cc:
         limitations += ["响应流结束检查关注当前 HTTP 响应体 EOF，允许复用 TCP 连接；不要求每次生成后断开 TCP。",
                         "缓存字段结构检查不证明缓存命中或账单正确；完整原始样本与 request ID 是进一步核验依据。"]
+    elif claude:
+        limitations += ["签名、缓存、注入与真伪检查均基于本轮合成请求和可见响应；成功/失败不等同于官方身份、权重来源或蒸馏结论。",
+                        "大 Token 缓存只在记录合法 cache read/create 字段且重复前缀一致时报告命中；字段缺失、零值、阈值或 TTL 差异会显示无法判定。",
+                        "压测按页面配置的并发、样本和超时执行；429、5xx、断流和超时保留为证据，不能外推服务商长期 SLA。",
+                        "AWS/Anthropic 的鉴权、区域和模型 ID 由所接入渠道负责；报告不会伪造 SigV4 或上游认证能力。"]
     elif not openai:
         limitations += ["KVV 的通用 thinking 格式选项只作用于使用适配函数的用例；K3 原生特性测试保留官方硬编码字段，不保证所有后端均适用。",
                         "官方 skipped 状态和本地 tolerance_boundaries 自检按原样展示；不会补作已通过的渠道测试。",
                         "部分官方 token 用例读到 usage 即结束消费；client_closed/recorder_closed 不自动推翻已观察到的 token 断言。"]
-    if openai and not cc:
+    if openai and not cc and not claude:
         limitations += _list(_dict(result.get('compatibility')).get('native_not_applicable'))
         limitations += ['兼容模式不验证 Kimi 原生 system.tools 动态加载、thinking/keep 专属语义或固定 tokenizer 数值基准。','reasoning_effort、视频 URL 等能力由具体模型与渠道决定；缓存未命中只说明本轮未观察到命中，不证明渠道没有缓存。','完整工具 Schema 矩阵包含部分渠道不支持的 JSON Schema 子集，失败只反映该案例的兼容范围。']
     score = _report_score(checks, result)
     # Keep the visual shell shared by all suites while making the intent of
     # each suite explicit.  These are scope labels, not extra test results.
-    if openai:
+    if openai and not claude:
         focus=['实际协议：OpenAI Chat Completions；请求体、工具声明、usage、choices 与 SSE 收尾按所选协议验证。', 'CCMax 侧重 Claude 兼容渠道的流式可靠性、工具和安全行为。' if cc else '覆盖参数、工具 Schema、多模态、长度限制、token 与缓存观测；保留每项方法、实测值与建议。','协议不适用与本轮未验证能力独立说明，不能替代通过。']
+    elif claude:
+        focus = [
+            "Claude 上游兼容重点：Anthropic Messages / OpenAI 兼容请求映射、流式收尾、错误诊断和字段透传。",
+            "安全与真实性重点：系统提示词金丝雀注入、thinking 签名校验（适用时）、模型字段与上游 Request ID 一致性观察。",
+            "性能与成本重点：大 Token 缓存读写、max_tokens 限制、受控并发压测和 P50/P95 延迟；每项均以实际证据为准。",
+        ]
     elif cc:
         focus = [
             "Anthropic Messages / SSE 协议：消息起始、增量、收尾和响应流结束。",

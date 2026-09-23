@@ -8,6 +8,20 @@ from auth_history import Store, hash_password, verify_password
 
 
 class HistoryStoreTests(unittest.TestCase):
+    def test_claude_acceptance_keeps_distinct_history_kind_and_rejects_browser_spoof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory) / 'history.sqlite3')
+            result = {'suite':'claude_acceptance','run_id':'a'*32,'status':'completed',
+                      'configuration':{'suite':'claude','model':'claude-fixture','base':'https://relay.test/v1'},
+                      'verdict':{'status':'inconclusive'},'cases':[]}
+            saved = store.save_acceptance(result)
+            self.assertEqual(store.listing(kind='claude')['total'], 1)
+            record=store.detail(saved['id'])
+            self.assertEqual(record['kind'], 'claude')
+            self.assertEqual(record['title'], 'Claude 上游验收')
+            with self.assertRaises(ValueError):
+                store.save({'kind':'claude','source':'basic','client_id':'spoof','result':{}})
+
     def test_connection_context_closes_connection(self):
         """The per-operation connection must not remain open after ``with``."""
         with tempfile.TemporaryDirectory() as directory:
