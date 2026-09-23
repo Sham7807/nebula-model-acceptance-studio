@@ -18,6 +18,7 @@ function syncModelContext(){
   const changed=!!modelContextIdentity;
   modelContextIdentity=next;modelFetchEpoch++;modelFetchController?.abort();modelFetchController=null;
   modelCatalog=[];modelCatalogLoaded=false;modelFetchState='idle';modelFetchError='';
+  window.ModelDiscovery?.showDetails($('modelHint'),null);
   if(changed)modelSelection.clear({emit:false});
   modelSelection.setOptions([],{reconcile:false});
   closeModelMenu();updateModelFetchUI();renderModelOptions();
@@ -259,6 +260,10 @@ function setTextMode(mode){
   $('textModes').hidden=kind!=='text';$('textKindCard').classList.toggle('active',kind==='text');$('basicView').hidden=deep;$('legacyView').hidden=!deep;
   $('basicBtn').classList.toggle('active',!deep);$('basicBtn').setAttribute('aria-selected',String(!deep));
   $('legacyBtn').classList.toggle('active',deep);$('legacyBtn').setAttribute('aria-selected',String(deep));
+  // A hidden iframe can miss the responsive resize event. Request one
+  // measurement when returning to deep mode; the child answers once and does
+  // not receive another request from the parent, so this cannot recurse.
+  if(deep&&legacyLoaded)requestAnimationFrame(()=>{try{$('legacyFrame').contentWindow?.postMessage({type:'workbench:deep-resize-request'},'*');}catch{}});
 }
 function switchKind(next){
   if(busy)return;if(next===kind){setTextMode('basic');return;}
@@ -674,6 +679,7 @@ async function loadModels(){
   if(c.auth!=='none'&&!c.key){notify('请先填写 API Key，或选择不使用鉴权。',true);return;}
   modelFetchController?.abort();const epoch=++modelFetchEpoch,identity=discoveryIdentity(c),ctrl=new AbortController();modelFetchController=ctrl;modelFetchState='loading';modelFetchError='';
   updateModelFetchUI();openModelMenu();notify('');
+  window.ModelDiscovery.showDetails($('modelHint'),null);
   try{
     const result=await window.ModelDiscovery.list(c,{signal:ctrl.signal});
     if(epoch!==modelFetchEpoch||identity!==discoveryIdentity()||ctrl.signal.aborted)return;
@@ -681,9 +687,11 @@ async function loadModels(){
     if(!Array.isArray(list))throw new Error('模型列表响应格式无法识别');
     modelCatalog=[...new Set(list.map(m=>typeof m==='string'?m:typeof m?.id==='string'?m.id:typeof m?.name==='string'?m.name:'').filter(Boolean))];
     modelCatalogLoaded=true;modelFetchState='success';modelFetchError='';$('modelSearch').value='';modelSelection.setOptions(modelCatalog);
+    window.ModelDiscovery.showDetails($('modelHint'),result);
   }catch(e){
     if(epoch!==modelFetchEpoch||identity!==discoveryIdentity())return;
     modelFetchState=ctrl.signal.aborted?'canceled':'error';modelFetchError=scrub(e.message||'未知错误');
+    window.ModelDiscovery.showDetails($('modelHint'),e);
   }finally{
     if(epoch===modelFetchEpoch){modelFetchController=null;updateModelFetchUI();renderModelOptions();}
   }
@@ -834,7 +842,10 @@ window.addEventListener('message',event=>{
   if(event.origin!==location.origin&&!(location.protocol==='file:'&&event.origin==='null'))return;
   const height=Number(event.data?.height);
   if(event.data?.type==='workbench:deep-resize'&&Number.isFinite(height)&&height>0){
-    frame.style.height=Math.min(Math.max(Math.ceil(height),700),200000)+'px';
-    requestAnimationFrame(()=>{try{frame.contentWindow?.postMessage({type:'workbench:deep-resize-request'},'*');}catch{}});
+    const nextHeight=Math.min(Math.max(Math.ceil(height),700),200000)+'px';
+    if(frame.style.height!==nextHeight)frame.style.height=nextHeight;
+    // The child observes its own content. Asking it to measure again here
+    // creates a feedback loop: each answer used to queue several more answers,
+    // eventually blocking clicks across every workbench panel.
   }
 });

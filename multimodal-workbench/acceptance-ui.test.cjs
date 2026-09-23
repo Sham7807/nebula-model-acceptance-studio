@@ -36,6 +36,12 @@ function result(suite, status = 'cancelled') {
 async function fixture(browser, options = {}) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1050 }, acceptDownloads: true });
   page.setDefaultTimeout(10000);
+  await page.addInitScript(() => {
+    window.__deepResizeMessages = 0;
+    window.addEventListener('message', event => {
+      if (event.data?.type === 'workbench:deep-resize') window.__deepResizeMessages++;
+    });
+  });
   page.on('pageerror', error => errors.push(error.message));
   const restored = options.active || options.latest;
   const restoredJob = restored ? running(restored, options.total) : null;
@@ -170,6 +176,11 @@ async function download(page, format, bytes) {
         await page.locator('[data-suite="general"]').click();
         await page.frameLocator('#legacyFrame').locator('#btnRun').waitFor();
         assert.equal(await page.locator('#legacyFrame').isVisible(), true);
+        await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 300)));
+        const resizeStart = await page.evaluate(() => window.__deepResizeMessages);
+        await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 500)));
+        assert.ok((await page.evaluate(() => window.__deepResizeMessages)) - resizeStart < 10,
+          'deep iframe resize messages settle instead of triggering an exponentially growing feedback loop');
         await page.locator('#backBtn').click();
         assert.equal(await page.locator('#basicView').isVisible(), true);
         assert.equal(state.calls.length, 0, 'file mode never calls local API automatically');
@@ -451,14 +462,15 @@ async function download(page, format, bytes) {
         await page.locator('#acceptanceModels').click();await heldRequest;
         await page.waitForFunction(() => document.getElementById('acceptanceModels').disabled);
         assert.equal(state.modelPending.length, 1);
+        const cancelledRequest = page.waitForEvent('requestfailed', { predicate: r => r.url().endsWith('/api/models') });
         await page.locator('#acceptanceBase').fill('https://new-relay.test/v1');
+        assert.match((await cancelledRequest).failure().errorText, /ABORT|CANCEL/i);
         assert.equal(await page.locator('#acceptanceModels').isEnabled(), true);
         state.modelHold = false;state.models = ['new-model-a', 'new-model-b'];
         await page.locator('#acceptanceModels').click();await waitModelIdle(page);
         const picker = page.locator('#acceptanceModelPicker');
         assert.equal(await picker.getByRole('checkbox', { name: 'new-model-a' }).count(), 1);
-        const staleResponse = page.waitForResponse(r => r.url().endsWith('/api/models'));
-        state.modelPending.shift()();await (await staleResponse).finished();await page.evaluate(() => new Promise(requestAnimationFrame));
+        state.modelPending.shift()();await page.evaluate(() => new Promise(requestAnimationFrame));
         assert.equal(await picker.getByRole('checkbox', { name: 'stale-model' }).count(), 0, 'late old-channel response cannot replace the new list');
         assert.equal(await picker.getByRole('checkbox', { name: 'new-model-b' }).count(), 1);
         assert.equal(await page.locator('#acceptanceModel').inputValue(), 'preserved-manual-id');
@@ -507,7 +519,7 @@ async function download(page, format, bytes) {
         await noOverflow(page);assert.equal(await frame.locator('body').evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
         await suite(page, 'kimi');assert.equal(await page.locator('#legacyFrame').isVisible(), false);assert.equal(await page.locator('#acceptanceVerdict').isVisible(), true);
         await page.setViewportSize({ width: 1440, height: 1050 });await suite(page, 'general');
-        await page.waitForFunction(() => parseFloat(document.querySelector('#legacyFrame').style.height) < 1500);
+        await page.waitForFunction(height => Math.abs(parseFloat(document.querySelector('#legacyFrame').style.height)-height)<2, desktopHeight);
         assert.equal((await page.locator('#legacyFrame').boundingBox()).height, desktopHeight, 'iframe shrinks back after responsive/suite transitions');
         await suite(page, 'kimi');assert.equal(state.posts.length, 0);await screenshot(page, 'desktop-transport-verdict.png');
         passed.push('verdict states, transport request evidence and legacy autoheight across responsive suite switching');

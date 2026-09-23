@@ -80,7 +80,7 @@ async function noOverflow(page) { assert.equal(await page.evaluate(() => documen
       await page.locator('#historyPrevious').click(); await page.locator('#historyRange').filter({ hasText: '1–20' }).waitFor();
       await page.locator('#historyKind').selectOption('ccmax'); await page.locator('.history-record').filter({ hasText: 'claude-fixture' }).waitFor(); assert.equal(await page.locator('.history-record').count(), 1);
       await page.locator('.history-record').click(); await page.locator('.history-detail-check').filter({ hasText: '缺少 message_stop' }).waitFor();
-      const dl = page.waitForEvent('download'); await page.getByRole('button', { name: '下载详细报告' }).click(); assert.match((await dl).suggestedFilename(), /report.html$/);
+      const dl = page.waitForEvent('download'); await page.getByRole('button', { name: '下载详细报告' }).click(); assert.match((await dl).suggestedFilename(), /^测试报告-claude-fixture-\d{8}-\d{6}\.html$/);
       await page.keyboard.press('Escape'); assert.equal(await page.locator('#historyDetail').isVisible(), false);
       await page.locator('#historyKind').selectOption('image'); await page.locator('.history-record').click(); await page.locator('.history-media img').waitFor();
       assert.equal(await page.locator('.history-detail-text img').count(), 0); assert.equal(await page.locator('.history-media video').count(), 0); assert.equal(await page.locator('.history-media .media-load').count(), 1); assert.equal(await page.locator('.history-media a[href^="javascript"]').count(), 0);

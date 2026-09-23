@@ -75,12 +75,11 @@ test('all supported auth modes use the same hosted discovery endpoint', async ()
   }
 });
 
-test('a fresh attempt reacquires a session token after the server restarts', async () => {
+test('a stale page token is refreshed once automatically after the server restarts', async () => {
   const h = harness([
     json({ token: 'old-token' }), json({ error: '会话已过期' }, 403),
     json({ token: 'new-token' }), json({ models: ['recovered-model'] }),
   ]);
-  await assert.rejects(h.list(config()), error => error.status === 403);
   const recovered = await h.list(config());
   assert.deepEqual(plain(recovered.models), ['recovered-model']);
   assert.deepEqual(h.calls.map(call => call.url), ['/api/session', '/api/models', '/api/session', '/api/models']);
@@ -124,10 +123,16 @@ test('standalone HTML normalizes root/prefix/version without requesting a local 
     ['https://relay.test', 'bearer', '/v1/models'],
     ['https://relay.test/v1/', 'bearer', '/v1/models'],
     ['https://relay.test/prefix/v1', 'bearer', '/prefix/v1/models'],
-    ['https://relay.test/prefix/v1beta', 'bearer', '/prefix/v1/models'],
+    ['https://relay.test/prefix/v1beta', 'bearer', '/prefix/v1beta/models'],
     ['https://relay.test/prefix', 'gemini', '/prefix/v1beta/models'],
-    ['https://relay.test/prefix/v1/', 'gemini', '/prefix/v1beta/models'],
+    ['https://relay.test/prefix/v1/', 'gemini', '/prefix/v1/models'],
     ['https://relay.test/prefix/v1beta/', 'gemini', '/prefix/v1beta/models'],
+    ['https://relay.test/api/v1', 'bearer', '/api/v1/models'],
+    ['https://relay.test/openai/v1', 'bearer', '/openai/v1/models'],
+    ['https://relay.test/v2', 'bearer', '/v2/models'],
+    ['https://relay.test/v1beta/openai', 'bearer', '/v1beta/openai/models'],
+    ['https://relay.test/api/v1/models', 'bearer', '/api/v1/models'],
+    ['https://relay.test/prefix/v1/chat/completions', 'bearer', '/prefix/v1/models'],
   ];
   for (const [base, auth, expected] of cases) {
     const h = harness([json(auth === 'gemini' ? { models: [{ name: 'models/gemini-fixture' }] } : { data: [{ id: 'fixture' }] })], 'file:');
@@ -139,6 +144,24 @@ test('standalone HTML normalizes root/prefix/version without requesting a local 
     assert.equal(h.calls[0].init.redirect, 'error');
     assert.deepEqual(plain(result.models), [auth === 'gemini' ? 'gemini-fixture' : 'fixture']);
   }
+});
+
+test('structured diagnostics keep upstream status separate from the service response and redact secrets', async () => {
+  const diagnostic={endpoint:'https://relay.test/v1/models',auth:'bearer',code:'authentication',suggestion:'更换密钥',attempts:[{status:401,url:'https://relay.test/v1/models',message:secret}]};
+  const h=harness([json({token:'token'}),json({error:'渠道鉴权失败',code:'authentication',diagnostics:diagnostic},400)]);
+  await assert.rejects(h.list(config()),err=>{
+    assert.equal(err.code,'authentication');assert.equal(err.diagnostics.attempts[0].status,401);
+    assert.ok(!JSON.stringify(err.diagnostics).includes(secret));assert.equal(err.sessionExpired,false);return true;
+  });
+  const ok=harness([json({token:'token'}),json({models:['a'],diagnostics:diagnostic})]);
+  assert.equal((await ok.list(config())).diagnostics.attempts[0].message,'[已隐藏]');
+});
+
+test('invalid browser session gives a login recovery link state, provider auth failure does not', async () => {
+  const hosted=harness([json({error:'请先登录'},401)]);
+  await assert.rejects(hosted.list(config()),e=>e.sessionExpired===true);
+  const direct=harness([json({},401)],'file:');
+  await assert.rejects(direct.list(config()),e=>e.sessionExpired===false&&!e.message.includes('登录已失效'));
 });
 
 test('standalone auth selects exactly the provider header requested', async () => {

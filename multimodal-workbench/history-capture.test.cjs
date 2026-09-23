@@ -11,6 +11,19 @@ await page.route('**/*',async route=>{
  const request=route.request(),url=new URL(request.url());
  if(url.hostname==='history.test'){
   if(url.pathname==='/api/session')return route.fulfill({status:failSession?503:200,contentType:'application/json',body:JSON.stringify(failSession?{error:'暂时离线'}:{token:'history-test-csrf',history_enabled:historyEnabled})});
+  if(url.pathname==='/api/proxy'){
+   assert.equal(request.headers()['x-workbench-token'],'history-test-csrf');
+   const payload=JSON.parse(request.postData()),target=new URL(payload.url);assert.equal(target.hostname,'relay.test');
+   modelCalls.push({path:target.pathname,method:payload.method});
+   let status=200,content_type='application/json',body_base64,text;
+   if(target.pathname==='/v1/failure'){status=400;text=JSON.stringify({error:{message:'test-secret-api-key is invalid'}});}
+   else if(target.pathname==='/v1/slow'){await new Promise(r=>setTimeout(r,900));text=JSON.stringify({choices:[{message:{content:'done'}}]});}
+   else if(target.pathname==='/v1/chat/completions')text=JSON.stringify({choices:[{message:{content:'test-secret-api-key 391'},finish_reason:'stop'}],usage:{prompt_tokens:5,completion_tokens:5}});
+   else if(target.pathname==='/v1/images/generations')text=JSON.stringify({data:[{b64_json:png}]});
+   else if(target.pathname==='/v1/audio/speech'){content_type='audio/wav';body_base64=Buffer.from('RIFF'+'.'.repeat(80)).toString('base64');}
+   else throw new Error('Unplanned proxied request '+target.pathname);
+   return route.fulfill({contentType:'application/json',body:JSON.stringify({status,url:payload.url,content_type,headers:{'content-type':content_type},text,body_base64})}).catch(()=>{});
+  }
   if(url.pathname==='/api/models'){
    assert.equal(request.headers()['x-workbench-token'],'history-test-csrf');
    assert.match(JSON.parse(request.postData()).base,/^https:\/\/relay\.test(?:\/v1)?$/);

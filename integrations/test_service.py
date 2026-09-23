@@ -53,6 +53,8 @@ class ServiceTests(unittest.TestCase):
                                 response=client.post(url+'/api/models',headers=headers,json=payload)
                             self.assertEqual(response.status_code,400)
                             self.assertIn(expected,response.json()['error'])
+                            self.assertIn('code',response.json())
+                            self.assertIn('advice',response.json())
                             self.assertNotIn('fixture-secret',response.text)
                         for auth in ['bearer','anthropic','gemini','none']:
                             body={**payload,'auth':auth,'key':'' if auth=='none' else 'fixture-secret'}
@@ -62,6 +64,40 @@ class ServiceTests(unittest.TestCase):
                             self.assertEqual(response.json(),{'models':['fixture-model'],'total':1})
                             fetch.assert_called_once_with(body['base'],body['key'],auth)
                 finally:srv.shutdown();srv.server_close()
+
+    def test_discovery_diagnostics_preserve_upstream_cause_without_keys(self):
+        from channel_discovery import DiscoveryError
+        exception=DiscoveryError('upstream HTTP 403: fixture-secret', diagnostics={
+            'code':'upstream_forbidden', 'suggestion':'Check region and permission',
+            'endpoint':'https://relay.test/v1/models', 'auth':'bearer',
+            'attempts':[{'message':'fixture-secret'}],
+        }, status=403)
+        payload=server.model_discovery_failure(exception,'fixture-secret')
+        self.assertEqual(payload['code'],'upstream_forbidden')
+        self.assertEqual(payload['upstream_status'],403)
+        self.assertEqual(payload['advice'],'Check region and permission')
+        self.assertEqual(payload['diagnostics']['attempts'][0]['message'],'[已隐藏]')
+        self.assertNotIn('fixture-secret',json.dumps(payload))
+
+    def test_discovery_fallback_network_diagnostics_are_distinct(self):
+        cases=[
+            (httpx.ReadTimeout('private-detail'),'timeout','超时'),
+            (httpx.ConnectError('SSL certificate verify failed'),'tls','TLS'),
+            (httpx.ConnectError('getaddrinfo failed'),'dns','域名'),
+            (httpx.ConnectError('[Errno 113] No route to host'),'network','无法连接'),
+        ]
+        for exc,code,label in cases:
+            with self.subTest(code=code):
+                payload=server.model_discovery_failure(exc,'private-detail')
+                self.assertEqual(payload['code'],code)
+                self.assertIn(label,payload['error'])
+                self.assertTrue(payload['advice'])
+                self.assertNotIn('private-detail',json.dumps(payload))
+
+    def test_discovery_diagnostics_remove_encoded_credential(self):
+        key='fixture+token/secret'
+        payload=server.model_discovery_failure(ValueError('Bad key fixture%2Btoken%2Fsecret'),key)
+        self.assertNotIn('fixture',json.dumps(payload))
 
     def test_proxy_forwards_json_and_multipart_without_cors(self):
         class Provider(BaseHTTPRequestHandler):
@@ -81,8 +117,12 @@ class ServiceTests(unittest.TestCase):
                 response=client.post(base+'/api/proxy',headers=headers,json={'url':target,'method':'POST','headers':{'Authorization':'Bearer [hidden]','Content-Type':'application/json'},'body':'{"hello":"world"}'})
                 self.assertEqual(response.status_code,200); self.assertEqual(response.json()['status'],200); self.assertIn('proxy-ok',response.json()['text'])
                 self.assertEqual(len(Provider.requests),1); self.assertIn(b'hello',Provider.requests[0][1])
-                response=client.post(base+'/api/proxy',headers=headers,json={'url':target,'method':'POST','form':{'fields':{'model':'fixture'},'files':[{'field':'file','name':'a.bin','type':'application/octet-stream','data':'AAE='}]}})
+                response=client.post(base+'/api/proxy',headers=headers,json={'url':target,'method':'POST','form':{'fields':{'model':'fixture','image':['https://image.test/a.png','https://image.test/b.png']},'files':[{'field':'file','name':'a.bin','type':'application/octet-stream','data':'AAE='}]}})
                 self.assertEqual(response.status_code,200); self.assertEqual(len(Provider.requests),2); self.assertIn(b'a.bin',Provider.requests[1][1]); self.assertIn(b'\x00\x01',Provider.requests[1][1])
+                self.assertIn('multipart/form-data; boundary=',Provider.requests[1][0])
+                self.assertEqual(Provider.requests[1][1].count(b'name="image"'),2)
+                self.assertIn(b'https://image.test/a.png',Provider.requests[1][1])
+                self.assertIn(b'https://image.test/b.png',Provider.requests[1][1])
         finally: provider.shutdown(); provider.server_close(); service.shutdown(); service.server_close()
 
     def test_normalization_validation(self):
@@ -170,7 +210,7 @@ class ServiceTests(unittest.TestCase):
                     if result['status']!='running':break
                     time.sleep(.03)
                 self.assertEqual(result['status'],'completed')
-                self.assertEqual(result['completed'],9)
+                self.assertEqual(result['completed'],len(result['result']['checks']))
                 self.assertEqual(len(result['result']['checks']),12)
                 for artifact in ['report.html','report.json','evidence.zip']:
                     response=client.get(url+'/api/runs/'+run+'/'+artifact,headers=headers)

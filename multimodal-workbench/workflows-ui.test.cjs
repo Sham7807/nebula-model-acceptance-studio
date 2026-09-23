@@ -172,6 +172,9 @@ async function dimensions(page) {
 
         await page.locator('[data-kind="image"]').click();
         await page.locator('#preset').selectOption('openai-image');
+        // Switching the protocol invalidates the model catalog/context; enter
+        // the provider model again before previewing the new request.
+        await page.locator('#model').fill('workflow-image-poster');
         const poster = await scenarioPrompt(page, 'image', 'live-sale-poster');
         assert.equal(typeof poster, 'string', 'the live sale poster scenario exists');
         assert.ok(poster.length > 500 && poster.split('\n').length >= 5, 'poster remains a complete multiline test prompt');
@@ -263,6 +266,7 @@ async function dimensions(page) {
         assert.equal(await page.locator('#promptScenario').inputValue(), 'multi-compose');
         assert.equal(await page.locator('#inputPreview img').count(), 2, 'parked image draft returns intact');
         await page.locator('#preset').selectOption('gemini-image');
+        await page.locator('#model').fill('workflow-image');
         assert.equal(await page.locator('#imageMode').inputValue(), 'reference');
         const gemini = await preview(page);
         assert.deepEqual(gemini.body.contents[0].parts.slice(1).map(part => part.inlineData.data), [referenceA.buffer.toString('base64'), referenceB.buffer.toString('base64')]);

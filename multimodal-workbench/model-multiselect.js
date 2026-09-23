@@ -122,7 +122,11 @@
         if (event.key === 'Escape' && !this.menu.hidden) { event.preventDefault(); this.close(); this.input.focus(); }
         if (event.key === 'Tab') setTimeout(() => { if (!this.wrapper.contains(document.activeElement)) this.close(); }, 0);
       });
-      document.addEventListener('pointerdown', event => { if (!this.wrapper.contains(event.target)) this.close(); });
+      // Closing on pointerdown changes layout before pointerup (especially
+      // beside a stretched fetch button), so the browser can drop the click.
+      // Capture click after its target is fixed, before an outside action
+      // such as "fetch models" opens this picker again.
+      document.addEventListener('click', event => { if (!this.wrapper.contains(event.target)) this.close(); }, true);
       this.observer = new MutationObserver(() => this.syncDisabled());
       this.observer.observe(this.input, { attributes: true, attributeFilter: ['disabled'] });
       const fieldset = this.input.closest('fieldset');

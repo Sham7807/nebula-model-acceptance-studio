@@ -33,4 +33,11 @@
 .mm-picker.is-disabled{opacity:.7}
 .mm-picker button:disabled,.mm-picker input:disabled{cursor:not-allowed}
 .mm-picker [hidden]{display:none!important}
+.discovery-details{margin:10px 0 0;border:1px solid #dce5d8;border-radius:9px;background:#f7faf4;padding:10px 12px;color:#50664c;font:11px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;overflow-wrap:anywhere}
+.discovery-details[data-state="error"]{border-color:#ebd8c9;background:#fcf7f1;color:#805c45}
+.discovery-details>summary{cursor:pointer;font-weight:600;color:inherit}
+.discovery-details dl{display:grid;grid-template-columns:62px minmax(0,1fr);gap:5px 8px;margin:10px 0}
+.discovery-details dt{color:#84907d}.discovery-details dd{margin:0;font-family:ui-monospace,monospace;font-size:10px}
+.discovery-details p{margin:8px 0}.discovery-details ol{margin:8px 0 0;padding-left:18px;border-top:1px solid #e4e8df;font:10px/1.8 ui-monospace,monospace}
+.discovery-details li{padding-top:7px}.discovery-details a{display:inline-block;margin-top:8px;color:#256b52;font-weight:600}
 @media(max-width:650px){.mm-picker .mm-search{font-size:16px}.mm-picker .mm-option{font-size:12px;min-height:42px}.mm-chip{font-size:11px}.mm-picker .mm-clear,.mm-picker .mm-toggle{flex-basis:34px}}

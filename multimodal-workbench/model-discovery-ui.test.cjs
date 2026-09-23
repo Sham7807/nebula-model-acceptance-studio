@@ -39,7 +39,7 @@ async function fixture(browser, bundled = false) {
       state.posts.push(JSON.parse(request.postData()));
       const plan = state.plans.shift() || { models: state.models };
       if (plan.gate) { state.held.add(plan); plan.started.resolve(); await plan.gate.promise; state.held.delete(plan); }
-      return route.fulfill({ status: plan.status || 200, contentType: 'application/json', body: JSON.stringify(plan.error ? { error: plan.error } : { models: plan.models, total: plan.models.length }) }).catch(() => {});
+      return route.fulfill({ status: plan.status || 200, contentType: 'application/json', body: JSON.stringify({...(plan.error ? { error: plan.error } : { models: plan.models, total: plan.models.length }),diagnostics:plan.diagnostics}) }).catch(() => {});
     }
     const asset = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
     assert.match(asset, /^[a-zA-Z0-9_.-]+$/, 'unexpected service request: ' + request.url());
@@ -138,5 +138,40 @@ async function basicLoad(page, expected = 3) {
       assert.deepEqual(state.errors, []);
       console.log('PASS: hosted service errors preserve the catalog and cancelled responses cannot overwrite a new list');
     } finally { await f.close(); }
+
+    // Every suite renders the same diagnostic contract and can recover after
+    // a failed request. Provider prose is text, never executable HTML.
+    for (const bundled of [false,true]) {
+      const f=await fixture(browser,bundled),{page,state}=f;
+      const diagnostics={endpoint:'https://no-cors-channel.test/api/v1/models',auth:'bearer',code:'network_error',elapsed_ms:1200,suggestion:'请检查服务器出站网络。',attempts:[{url:'https://no-cors-channel.test/api/v1/models',status:503,message:'<script>bad</script> '+key}]};
+      try{
+        const targets=[['basic','loadModels','modelHint'],['general','loadGeneralModels','generalModelHint'],['ccmax','acceptanceModels','acceptanceModelHint'],['kimi','acceptanceModels','acceptanceModelHint'],['gpt','gptModels','gptModelHint']];
+        for(const [suite,button,hint] of targets){
+          let surface=page;
+          if(suite!=='basic'){
+            if(suite==='general')await page.locator('#legacyBtn').click();
+            await page.locator(`[data-suite="${suite}"]`).click();
+            if(suite==='general'){surface=page.frameLocator('#legacyFrame');await surface.locator('#inBase').fill('https://no-cors-channel.test/api/v1');await surface.locator('#inKey').fill(key);}
+          }
+          state.plans.push({status:400,error:'服务器无法连接渠道',diagnostics});
+          await surface.locator('#'+button).click();
+          const panel=surface.locator('#'+hint+'DiscoveryDetails');await panel.waitFor();
+          assert.equal(await panel.getAttribute('open'),'');
+          assert.match(await panel.innerText(),/HTTP 503/);assert.match(await panel.innerText(),/出站网络/);
+          assert.ok(!(await panel.innerText()).includes(key),'diagnostic never leaks provider key');
+          assert.equal(await panel.locator('script').count(),0);
+          state.plans.push({models:state.models,diagnostics:{...diagnostics,code:'ok',suggestion:'模型列表已获取。',attempts:[{url:diagnostics.endpoint,status:200}]}});
+          await surface.locator('#'+button).click();
+          await panel.locator('summary').filter({hasText:'连接成功'}).waitFor({state:'attached'});
+          await panel.scrollIntoViewIfNeeded();
+          assert.equal(await panel.getAttribute('open'),null,'success diagnostics remain compact');
+        }
+        await page.setViewportSize({width:390,height:844});
+        assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'diagnostics fit narrow viewport');
+        assert.deepEqual(state.errors,[]);assert.deepEqual(state.external,[]);
+        await page.screenshot({path:path.join(__dirname,'qa-discovery-diagnostics.png'),fullPage:true});
+        console.log('PASS: five panels share safe diagnostics and recover from errors ('+(bundled?'bundle':'source')+')');
+      }finally{await f.close();}
+    }
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

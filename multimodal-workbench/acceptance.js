@@ -2,7 +2,7 @@
 (function(){
 'use strict';
 const el=id=>document.getElementById(id),make=(tag,cls,text)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;};
-let modelFetchEpoch=0,modelCatalog=[],acceptanceModelPicker=null;
+let modelFetchEpoch=0,modelCatalog=[],acceptanceModelPicker=null,modelController=null;
 let selected='general',runningSuite='',token='',runId='',active=false,pollTimer=null,serviceReady=false;
 let serviceState='connecting',kvvRevision='';
 const suiteRuns=new Map(),historyNotified=new Set();
@@ -278,14 +278,14 @@ el('acceptanceRun').addEventListener('click',start);
 el('acceptanceStop').addEventListener('click',async()=>{if(!runId)return;el('acceptanceStop').disabled=true;try{await api('/api/runs/'+runId+'/cancel',{method:'POST',body:'{}'});message('已请求取消，正在关闭后台请求并整理已完成结果。');}catch(e){message(e.message,true);el('acceptanceStop').disabled=false;}});
 for(const button of document.querySelectorAll('[data-acceptance-download]'))button.addEventListener('click',async()=>{const saved=suiteRuns.get(selected),id=displayedRunId;if(!saved||saved.id!==id||!saved.data.result)return;button.disabled=true;try{const r=await api('/api/runs/'+id+'/'+button.dataset.acceptanceDownload);const blob=await r.blob(),url=URL.createObjectURL(blob),a=make('a');a.href=url;a.download=reportDownloadName(saved.data,button.dataset.acceptanceDownload);a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);}catch(e){message(e.message,true);}finally{syncDownloads();}});
 async function loadModels(){
- if(active||!serviceReady)return;
+ if(active)return;
  const c=config();if(!c.base||!c.key){message('请先填写渠道地址和 API Key。',true);return;}
- const epoch=++modelFetchEpoch;el('acceptanceModels').disabled=true;el('acceptanceModelHint').textContent='正在获取…';
- try{const data=await window.ModelDiscovery.list({base:c.base,key:c.key,auth:selected==='ccmax'?c.auth:'bearer'});if(epoch!==modelFetchEpoch)return;modelCatalog=data.models;if(acceptanceModelPicker)acceptanceModelPicker.search.value='';acceptanceModelPicker?.setOptions(modelCatalog);acceptanceModelPicker?.open({focus:true});el('acceptanceModelHint').textContent=`已获取 ${modelCatalog.length} 个模型，可勾选多个后按顺序测试；未列出的映射模型可手动添加。`;message('');}
- catch(e){if(epoch===modelFetchEpoch){el('acceptanceModelHint').textContent='获取失败；仍可手动填写模型 ID。';message(e.message,true);}}
- finally{if(epoch===modelFetchEpoch)el('acceptanceModels').disabled=false;}
+ const epoch=++modelFetchEpoch;modelController?.abort();modelController=new AbortController();el('acceptanceModels').disabled=true;el('acceptanceModelHint').textContent='正在获取模型列表（最多 30 秒）…';window.ModelDiscovery.showDetails(el('acceptanceModelHint'),null);
+ try{const data=await window.ModelDiscovery.list({base:c.base,key:c.key,auth:selected==='ccmax'?c.auth:'bearer'},{signal:modelController.signal});if(epoch!==modelFetchEpoch)return;modelCatalog=data.models;if(acceptanceModelPicker)acceptanceModelPicker.search.value='';acceptanceModelPicker?.setOptions(modelCatalog);acceptanceModelPicker?.open({focus:true});el('acceptanceModelHint').textContent=`已获取 ${modelCatalog.length} 个模型，可勾选多个后按顺序测试；未列出的映射模型可手动添加。`;window.ModelDiscovery.showDetails(el('acceptanceModelHint'),data);message('');if(!serviceReady&&data.transport==='service')connect();}
+ catch(e){if(epoch===modelFetchEpoch){el('acceptanceModelHint').textContent='获取失败：'+e.message+'；仍可手动填写模型 ID。';window.ModelDiscovery.showDetails(el('acceptanceModelHint'),e);message(e.message,true);}}
+ finally{if(epoch===modelFetchEpoch){el('acceptanceModels').disabled=false;modelController=null;}}
 }
-function invalidateModels(){modelFetchEpoch++;modelCatalog=[];/* retain manually entered/selected IDs while invalidating the catalog */acceptanceModelPicker?.setOptions([],{reconcile:false});acceptanceModelPicker?.close();el('acceptanceModels').disabled=false;el('acceptanceModelHint').textContent='渠道配置已变化，请重新获取模型列表；支持手动添加。';}
+function invalidateModels(){modelFetchEpoch++;modelController?.abort();modelController=null;modelCatalog=[];window.ModelDiscovery?.showDetails(el('acceptanceModelHint'),null);/* retain manually entered/selected IDs while invalidating the catalog */acceptanceModelPicker?.setOptions([],{reconcile:false});acceptanceModelPicker?.close();el('acceptanceModels').disabled=false;el('acceptanceModelHint').textContent='渠道配置已变化，请重新获取模型列表；支持手动添加。';}
 for(const id of ['acceptanceBase','acceptanceKey','acceptanceAuth'])el(id).addEventListener('input',invalidateModels);
 el('acceptanceModels').addEventListener('click',loadModels);
 acceptanceModelPicker=window.ModelMultiselect?.attach(el('acceptanceModel'),{label:'渠道模型',max:30,ids:{wrapper:'acceptanceModelPicker',menu:'acceptanceModelMenu',search:'acceptanceModelSearch',list:'acceptanceModelList',status:'acceptanceModelStatus',toggle:'acceptanceModelToggle',clear:'acceptanceModelClear',all:'acceptanceModelShowAll'},onChange:(ids)=>{el('acceptanceModelHint').textContent=ids.length>1?`已选 ${ids.length} 个模型，将按顺序逐个测试。`:'已选 1 个模型，可继续勾选或开始测试。';}});

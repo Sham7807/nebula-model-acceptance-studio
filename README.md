@@ -15,7 +15,11 @@
 
 每种模态都提供代表性测试场景。选择场景后提示词会直接填入，可继续编辑；图像任务支持上传本地参考图、逐行填写图片 URL，或使用附加 JSON 自定义 `image`、`model`、`aspect_ratio`、`size` 等字段。
 
-模型 ID 可以手动填写，也可以从渠道的 `/v1/models` 获取并搜索选择；Gemini 原生鉴权使用 `/v1beta/models`。从工作台服务网址打开时，文本、图像、视频、音频、通用检测、CCMax 和 KVV 均通过登录会话保护的 `/api/models` 获取列表，避免渠道缺少浏览器 CORS 配置时出现入口之间结果不一致。直接打开单文件 HTML 仍需渠道允许 CORS。模型名称本身不会改变渠道协议；渠道鉴权、路径、请求体和返回格式不兼容时，需要增加对应适配器。
+模型 ID 可以手动填写，也可以获取后搜索、多选。基础、通用、CCMax、KVV、GPT 专项共用登录会话保护的 `/api/models`，由服务器访问渠道，避免浏览器 CORS 导致入口之间结果不一致。地址会保留 `/api/v1`、`/openai/v1`、`/compatible-mode/v1` 等前缀和显式版本，也接受完整模型列表或对话接口地址；未填写版本时会有限尝试常见路径。
+
+服务支持 Bearer、Anthropic、Gemini 和无鉴权，以及同源鉴权兼容、分页和短暂故障重试。每次获取会显示可展开的连接诊断：实际接口、鉴权、HTTP 状态、耗时和处理建议，密钥始终脱敏。401/403 渠道拒绝与工作台登录失效分开提示。获取列表仅发送 GET；生成和验收请求不会因此自动重复。直接打开单文件 HTML 仍需渠道允许 CORS。
+
+国外渠道还取决于**工作台服务器**的出站网络与上游地区政策。本机浏览器能访问，不代表服务器能访问；可按[部署说明](docs/server-deployment.md#模型列表与国外渠道连通性)配置模型发现的专用出站代理。列表权限也可能与推理权限不同；渠道未开放列表时，可手动填写模型 ID。模型名称不会自动改变测试协议。
 
 ## 快速开始
 
@@ -152,6 +156,7 @@ Node.js 20+ 的离线和 UI 回归测试：
 npm ci
 npx playwright install chromium
 npm test
+npm run test:models
 npm run test:choices
 npm run test:acceptance
 npm run test:workflows

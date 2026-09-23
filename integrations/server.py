@@ -150,6 +150,53 @@ def clean(value, key=''):
         return re.sub(r'(?i)(Bearer\s+)[^\s"<>]+', r'\1[已隐藏]', value)
     return value
 
+def model_discovery_failure(exc, key=''):
+    """Return an actionable, redacted catalog error without confusing login and upstream auth.
+
+    The workbench request itself is authenticated before this helper runs. An
+    upstream 401/403 therefore remains an upstream diagnostic, not a signal to
+    clear the user's workbench login session.
+    """
+    from httpx import TimeoutException, RequestError
+    diagnostics = getattr(exc, 'diagnostics', None)
+    diagnostics = dict(diagnostics) if isinstance(diagnostics, dict) else {}
+    status = getattr(exc, 'status', None)
+    detail = str(exc)
+    if not diagnostics:
+        if isinstance(exc, TimeoutException):
+            code = 'timeout'
+            message = '获取模型列表超时，工作台服务器未及时收到渠道响应。'
+            suggestion = '检查渠道状态与服务器出站网络；海外渠道还需确认服务器所在地区可访问该服务。'
+        elif isinstance(exc, RequestError):
+            code = 'network'
+            message = '服务器无法连接渠道。'
+            suggestion = '检查渠道域名、端口和服务器出站网络；海外渠道可配置工作台专用出站代理，或使用可访问的兼容中转地址。'
+            lowered = detail.lower()
+            if any(marker in lowered for marker in ('certificate', 'ssl', 'tls')):
+                code = 'tls'
+                message = '服务器与渠道的 TLS 连接校验失败。'
+                suggestion = '检查渠道证书是否过期、域名是否匹配和服务器时间；修复证书链后重试。'
+            elif any(marker in lowered for marker in ('name or service', 'getaddrinfo', 'nodename', 'name resolution')):
+                code = 'dns'
+                message = '工作台服务器无法解析渠道域名。'
+                suggestion = '核对域名拼写并检查服务器 DNS 配置；浏览器能打开不代表服务器也能解析。'
+        else:
+            code = 'invalid_request'
+            message = detail or '模型列表请求无效。'
+            suggestion = '核对 Base URL、API Key 和鉴权方式。'
+        diagnostics = {'code': code, 'suggestion': suggestion}
+    else:
+        message = detail or '获取模型列表失败。'
+    payload = {'error': message, 'code': diagnostics.get('code', 'discovery_failed'),
+               'advice': diagnostics.get('suggestion', ''), 'retryable': bool(diagnostics.get('retryable')), 'diagnostics': diagnostics}
+    if isinstance(status, int):
+        payload['upstream_status'] = status
+    payload = clean(payload, key)
+    # Encoded credentials can otherwise survive in a provider-generated URL.
+    if key:
+        payload = clean(payload, quote(key, safe=''))
+    return payload
+
 def normalized_base(raw):
     u = urlsplit(str(raw).strip())
     if u.scheme not in ('http','https') or not u.hostname or u.username or u.password or u.query or u.fragment:
@@ -614,10 +661,14 @@ class Handler(BaseHTTPRequestHandler):
                 if isinstance(form,dict):
                     fields=form.get('fields') or {}
                     if not isinstance(fields,dict): raise ValueError('代理表单字段格式无效')
-                    data=[]
+                    # httpx 0.28 treats a top-level list of tuples as a raw
+                    # byte iterator, even when files are supplied. A mapping
+                    # with list values preserves repeated multipart fields
+                    # and lets httpx generate the multipart stream correctly.
+                    data={}
                     for field, value in fields.items():
                         values = value if isinstance(value, list) else [value]
-                        data.extend((str(field), str(item)) for item in values)
+                        data[str(field)]=[str(item) for item in values] if isinstance(value,list) else str(value)
                     files=[]
                     for item in form.get('files') or []:
                         if not isinstance(item,dict): continue
@@ -655,9 +706,7 @@ class Handler(BaseHTTPRequestHandler):
                 from channel_discovery import fetch_models
                 return self.send_json(200,fetch_models(base,key,auth))
             except Exception as exc:
-                from httpx import TimeoutException, RequestError
-                message='获取模型列表超时，请检查渠道连通性后重试。' if isinstance(exc,TimeoutException) else '服务器无法连接渠道，请检查渠道地址、TLS 证书和网络设置。' if isinstance(exc,RequestError) else str(exc)
-                return self.send_json(400,{'error':clean(message,locals().get('key',''))})
+                return self.send_json(400,model_discovery_failure(exc,locals().get('key','')))
         if path!='/api/runs':return self.send_json(404,{'error':'Not found'})
         try:
             if self.headers.get_content_type()!='application/json': raise ValueError('请求必须为 JSON')
