@@ -84,7 +84,7 @@ async function basicLoad(page, expected = 3) {
           await page.locator(`[data-suite="${suite}"]`).click();
           await page.locator('#acceptanceBase').fill('https://no-cors-channel.test/v1');
           await page.locator('#acceptanceKey').fill(key);
-          await page.locator('#acceptanceModels').click();
+          await page.locator('#acceptanceModels').dispatchEvent('click');
           await page.waitForFunction(() => document.getElementById('acceptanceModelHint').textContent.includes('已获取 3'));
           const picker = page.locator('.choice-picker').filter({ has: page.locator('#acceptanceModel') });
           assert.equal(await picker.getByRole('option').count(), 3);
@@ -94,6 +94,24 @@ async function basicLoad(page, expected = 3) {
         assert.deepEqual(state.external, [], 'no catalog request escaped to the CORS-blocked channel');
         assert.deepEqual(state.errors, []);
         console.log('PASS: all seven model catalog entry points use service mode (' + (bundled ? 'bundled srcdoc' : 'source assets') + ')');
+      } finally { await f.close(); }
+    }
+
+    // GPT 专项必须复用工作台同源模型发现代理；直接请求渠道会被 CORS 拦截。
+    for (const bundled of [false, true]) {
+      const f = await fixture(browser, bundled), { page, state } = f;
+      try {
+        await page.locator('[data-kind="text"]').click();
+        await page.locator('#legacyBtn').click();
+        await page.locator('[data-suite="gpt"]').click();
+        await page.locator('#gptBase').fill('https://no-cors-channel.test/v1');
+        await page.locator('#gptKey').fill(key);
+        await page.locator('#gptModels').dispatchEvent('click');
+        await page.waitForFunction(() => document.querySelectorAll('#gptModelList option').length === 3);
+        assert.equal(state.posts.length, 1);
+        assert.deepEqual(state.posts[0], { base: 'https://no-cors-channel.test/v1', key, auth: 'bearer' });
+        assert.deepEqual(state.external, []);
+        console.log('PASS: GPT model discovery uses service mode (' + (bundled ? 'bundled srcdoc' : 'source assets') + ')');
       } finally { await f.close(); }
     }
 
