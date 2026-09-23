@@ -11,7 +11,8 @@ import time
 DIMENSIONS = [('multimodal', '多模态能力'), ('tools', '工具调用'), ('max_tokens', 'max_tokens / 长度控制'),
               ('cache', '缓存与 usage'), ('protocol', '协议与错误'), ('reliability', '稳定性与性能')]
 STATUS = {'success': 'passed', 'passed': 'passed', 'error': 'failed', 'failed': 'failed',
-          'stopped': 'cancelled', 'cancelled': 'cancelled', 'demo': 'skipped'}
+          'stopped': 'cancelled', 'cancelled': 'cancelled', 'demo': 'skipped',
+          'skipped': 'skipped', 'not_covered': 'not_covered', 'inconclusive': 'inconclusive'}
 KINDS = {'text': '文本', 'image': '图像', 'video': '视频', 'audio': '音频'}
 LIMITS = ['只评价本轮已保存的观察。基础请求返回内容，不代表专项工具调用、缓存命中、max_tokens 契约或媒体内容质量已通过验收。',
           '不同模型的检查和请求分别标注；汇总分是本报告已覆盖检查的表现，不是模型排行榜或官方能力认证。',
@@ -102,17 +103,57 @@ def dimensions_for(name):
     return dimensions or ['protocol']
 
 
+def _configuration(record, result):
+    config = {**_dict(record.get('config')), **_dict(result.get('config'))}
+    # Keep the saved protocol contract, never export credentials as settings.
+    out = {k: deepcopy(config[k]) for k in ('base', 'model', 'models', 'requestFormat', 'request_format', 'format', 'auth', 'path', 'endpoint', 'timeout', 'conc', 'concurrency', 'mode', 'preset') if k in config}
+    request_format = config.get('request_format') or config.get('requestFormat') or config.get('format')
+    if request_format:
+        out['request_format'] = request_format
+    for key in ('requestFormat', 'request_format', 'auth', 'path', 'endpoint'):
+        if key not in out and record.get(key) is not None:
+            out[key] = deepcopy(record[key])
+    if record.get('kind') == 'general' and isinstance(config.get('timeout'), (int, float)):
+        out['timeout_ms'] = config['timeout']
+        out['timeout'] = config['timeout'] / 1000
+    return out
+
+
+def _references(value, plural, singular):
+    values = _list(value.get(plural))
+    if value.get(singular) is not None:
+        values = values + [value[singular]]
+    return list(dict.fromkeys(str(x) for x in values if isinstance(x, (str, int)) and not isinstance(x, bool)))
+
+
 def request_record(raw, identity, model, case_id=''):
     raw = _dict(raw)
     code = raw.get('status') if isinstance(raw.get('status'), int) else raw.get('http_status')
     raw_status = str(raw.get('status') or '').lower()
     status = 'failed' if raw.get('error') or raw_status in ('failed','error') or (isinstance(code, int) and code >= 400) else 'completed' if raw_status in ('success','passed','completed') or code else 'inconclusive'
-    return {'id': identity, 'model': raw.get('model') or model, 'case_id': case_id,
-            'status': status, 'http_status': code, 'duration_ms': raw.get('duration_ms', raw.get('elapsedMs')),
-            'method': raw.get('method'), 'url': raw.get('url'), 'request_body': raw.get('request', raw.get('body')),
-            'response_body': raw.get('response', raw.get('raw')), 'response_headers': raw.get('headers'),
+    observed_fields = {key: raw.get(key) for key in ('model','finish_reason','completion_tokens','prompt_tokens','cached_tokens','tool_calls','usage','media_count','input_tokens','output_tokens','total_tokens','cache_read_input_tokens','cache_creation_input_tokens','usageMetadata') if raw.get(key) is not None}
+    response_body = raw.get('response_body', raw.get('response', raw.get('raw')))
+    response_object = response_body
+    if isinstance(response_object, str):
+        try: response_object = json.loads(response_object)
+        except ValueError: response_object = None
+    if isinstance(response_object, dict):
+        usage = _dict(response_object.get('usage'))
+        native_usage = _dict(response_object.get('usageMetadata'))
+        if usage:
+            observed_fields.setdefault('usage', deepcopy(usage))
+            for key in ('prompt_tokens','completion_tokens','total_tokens','input_tokens','output_tokens','cache_read_input_tokens','cache_creation_input_tokens'):
+                if usage.get(key) is not None: observed_fields.setdefault(key, usage[key])
+        if native_usage:
+            observed_fields.setdefault('usageMetadata', deepcopy(native_usage))
+            for key in ('promptTokenCount','candidatesTokenCount','totalTokenCount','cachedContentTokenCount','thoughtsTokenCount'):
+                if native_usage.get(key) is not None: observed_fields.setdefault(key, native_usage[key])
+    return {'id': identity, 'source_id': raw.get('id') or raw.get('request_id'), 'model': raw.get('model') or model, 'case_id': case_id,
+            'status': status, 'http_status': code, 'duration_ms': raw.get('duration_ms', raw.get('durationMs', raw.get('elapsedMs'))),
+            'method': raw.get('method'), 'url': raw.get('url') or raw.get('endpoint'), 'request_body': raw.get('request_body', raw.get('request', raw.get('body'))),
+            'response_body': response_body, 'response_headers': raw.get('response_headers', raw.get('headers')),
             'notes': [raw['error']] if raw.get('error') else [], 'extra': raw, 'assessments': [],
-            'observed_fields': {key: raw.get(key) for key in ('model','finish_reason','completion_tokens','prompt_tokens','cached_tokens','tool_calls','usage','media_count') if raw.get(key) is not None}}
+            'observed_fields': observed_fields}
 
 
 def normalize_browser_report(payload):
@@ -126,11 +167,16 @@ def normalize_browser_report(payload):
             if not isinstance(case, dict): raise ValueError('检查项格式无效')
         for row in result['browser_requests']:
             if not isinstance(row, dict): raise ValueError('请求记录格式无效')
+        known = {row.get('id') for row in result['browser_requests'] if isinstance(row.get('id'), str)}
+        for case in result['cases']:
+            case['request_ids'] = [identity for identity in _list(case.get('request_ids')) if isinstance(identity, str) and identity in known]
+            if case.get('applicable') is False and case.get('status') not in ('skipped', 'not_covered'):
+                case['status'] = 'skipped'
         return result
     records = payload.get('records')
     if records is None and payload.get('kind'): records = [payload]
     if not isinstance(records, list) or not records or len(records) > 500: raise ValueError('请提供 1 至 500 条测试记录')
-    cases, requests, models, bases, originals = [], [], [], [], []
+    cases, requests, models, bases, originals, configurations = [], [], [], [], [], []
     gpt_evaluations = []
     started, finished = [], []
     general = False
@@ -139,33 +185,41 @@ def normalize_browser_report(payload):
         result = _dict(record.get('result')) or record
         kind = record.get('kind') or 'text'; general = general or kind == 'general'
         gpt_evaluation = _gpt_evaluation(record, result)
-        config = _dict(result.get('config'))
+        config = _configuration(record, result)
         model = str(record.get('model') or config.get('model') or '未记录模型')
         base = str(record.get('base') or config.get('base') or '未记录')
         if gpt_evaluation:
             gpt_evaluations.append({'model': model, **_gpt_summary(gpt_evaluation)})
         if model not in models: models.append(model)
         if base not in bases: bases.append(base)
+        configurations.append({**config, 'model': model, 'base': base})
         created = _number(record.get('created_at'), time.time())
         started.append(created); finished.append(created + _number(record.get('duration_ms', result.get('elapsedMs'))) / 1000)
         prefix = 'record-%s' % (index + 1)
-        record_requests = []
+        record_requests, request_sources, request_aliases = [], [], {}
         for ri, raw in enumerate(_list(result.get('requests'))):
             identity = '%s-request-%s' % (prefix, ri + 1)
             requests.append(request_record(raw, identity, model, prefix if kind != 'general' else ''))
             record_requests.append(identity)
+            request_sources.append((_dict(raw), requests[-1]))
+            for alias in set(_references(_dict(raw), 'ids', 'id') + _references(_dict(raw), 'request_ids', 'request_id')):
+                request_aliases.setdefault(alias, []).append(requests[-1])
         if kind == 'general':
-            originals.append({'model': model, 'total': result.get('total'), 'scores': result.get('scores'), 'batch': result.get('batch'), 'logs': result.get('logs'), 'gpt_evaluation': _gpt_summary(gpt_evaluation) if gpt_evaluation else None})
+            originals.append({'model': model, 'configuration': configurations[-1], 'mode': result.get('mode'), 'total': result.get('total'), 'scores': deepcopy(result.get('scores')), 'batch': deepcopy(result.get('batch')), 'logs': deepcopy(result.get('logs')), 'intelligence': deepcopy(result.get('intelligence')), 'gpt_evaluation': _gpt_summary(gpt_evaluation) if gpt_evaluation else None})
             for ci, check in enumerate(_list(result.get('checks'))):
                 if not isinstance(check, dict): continue
                 name = str(check.get('name') or check.get('title') or '通用检查')
-                status = check.get('status') if check.get('status') in ('passed', 'failed', 'inconclusive', 'cancelled', 'skipped') else 'inconclusive'
+                status = STATUS.get(check.get('status'), 'inconclusive')
+                if check.get('applicable') is False and status not in ('skipped', 'not_covered'):
+                    status = 'skipped'
                 check_model = check.get('model') or (model if not _list(result.get('batch')) else '旧记录未保存逐项模型')
                 fields = {key: check.get(key) for key in ('model','finish_reason','completion_tokens','prompt_tokens','cached_tokens','tool_calls','http_status','duration_ms') if check.get(key) is not None}
                 observed = check.get('result', check.get('observed'))
                 if fields:
                     observed = '%s\n实测字段：%s' % (observed or '已记录检查结果', json.dumps(fields, ensure_ascii=False, default=str))
-                metadata = {'dimensions': dimensions_for(name), 'module': dimensions_for(name)[0]}
+                metadata = deepcopy(_dict(check.get('metadata')))
+                dimensions = _list(check.get('dimensions')) or _list(metadata.get('dimensions')) or dimensions_for(name)
+                metadata.update(dimensions=dimensions, module=check.get('module') or metadata.get('module') or dimensions[0])
                 if gpt_evaluation:
                     metadata['gpt_evaluation'] = _gpt_summary(gpt_evaluation)
                     # Keep the two GPT assertions attributable: HTML/SVG
@@ -181,12 +235,34 @@ def normalize_browser_report(payload):
                     if usage:
                         details.append('token input=%s output=%s total=%s consistent=%s' % (usage.get('input', usage.get('prompt_tokens', '—')), usage.get('output', usage.get('completion_tokens', '—')), usage.get('total', usage.get('total_tokens', '—')), usage.get('consistent', '—')))
                     if details: observed = '%s\nGPT 专项实测：%s' % (observed or '已记录检查结果', '；'.join(details))
-                cases.append({'id': '%s-check-%s' % (prefix, ci+1), 'title': '%s · %s' % (check_model, name), 'model': check_model,
-                    'status': status, 'method': '运行通用检测内置“%s”用例，并保留本次返回的判定。' % name,
+                case_id = '%s-check-%s' % (prefix, ci+1)
+                linked = []
+                for alias in _references(check, 'request_ids', 'request_id') + _references(check, 'requestIds', 'requestId'):
+                    matches = request_aliases.get(alias, [])
+                    if check.get('model'):
+                        matches = [row for row in matches if row.get('model') == check_model]
+                    if len(matches) > 1:
+                        matches = [row for row in matches if row.get('model') == check_model]
+                    if len(matches) == 1 and matches[0] not in linked:
+                        linked.append(matches[0])
+                # Reverse references must be explicit; order and timing are not
+                # evidence that a request belongs to a particular assertion.
+                source_case_id = check.get('id') or check.get('check_id')
+                if source_case_id is not None:
+                    for source, row in request_sources:
+                        refs = _references(source, 'case_ids', 'case_id') + _references(source, 'check_ids', 'check_id')
+                        if str(source_case_id) in refs and row not in linked and (not check.get('model') or row.get('model') == check_model):
+                            linked.append(row)
+                for row in linked:
+                    case_ids = row.setdefault('case_ids', [])
+                    if case_id not in case_ids: case_ids.append(case_id)
+                    row['case_id'] = '、'.join(case_ids)
+                cases.append({'id': case_id, 'source_id': source_case_id, 'title': '%s · %s' % (check_model, name), 'model': check_model,
+                    'status': status, 'applicable': check.get('applicable', True), 'local_only': check.get('local_only', False), 'method': check.get('method') or '运行通用检测内置“%s”用例，并保留本次返回的判定。' % name,
                     'expected': check.get('expected') or ('返回可执行的 HTML/SVG 鹈鹕骑自行车 2D 动画，并提供可核对的 input/output/total token usage。' if gpt_evaluation else '符合该内置用例的输出与协议断言；旧记录未保存独立预期值，详见原始判定。'),
-                    'observed': observed, 'meaning': check.get('judge') or ('GPT 专项只评价本次生成中可观察的 HTML/SVG 结构与 token 字段一致性，不等同于模型身份认证或内容审美评分。' if gpt_evaluation else '依据保存的原始判定；单项不能推导所有能力。'),
-                    'next_step': '优先按模型和请求地址核对失败项，再重跑该专项。' if status != 'passed' else '此结论仅适用于当前样本；可增加输入、并发和重复测试。',
-                    'metadata': metadata, 'raw': check, 'request_ids': []})
+                    'observed': observed, 'skip_reason': check.get('skip_reason') or check.get('reason'), 'meaning': check.get('meaning') or check.get('judge') or ('GPT 专项只评价本次生成中可观察的 HTML/SVG 结构与 token 字段一致性，不等同于模型身份认证或内容审美评分。' if gpt_evaluation else '依据保存的原始判定；单项不能推导所有能力。'),
+                    'next_step': check.get('next_step') or ('此项不适用于当前协议，不参与计分。' if check.get('applicable') is False else '优先按模型和请求地址核对失败项，再重跑该专项。' if status != 'passed' else '此结论仅适用于当前样本；可增加输入、并发和重复测试。'),
+                    'metadata': metadata, 'raw': check, 'request_ids': [row['id'] for row in linked]})
         else:
             status = STATUS.get(record.get('status') or result.get('status'), 'inconclusive')
             title = result.get('preset') or (KINDS.get(kind, kind) + '基础测试')
@@ -202,10 +278,15 @@ def normalize_browser_report(payload):
         cases = [{'id': 'missing-evidence', 'title': '检查证据不完整', 'status': 'inconclusive', 'model': '、'.join(models),
                   'method': '读取已保存的测试记录。', 'expected': '至少保留一项实际检查结果。', 'observed': '没有可用于逐项判定的记录。',
                   'meaning': '不把空记录视为通过。', 'next_step': '重新运行检测并确认历史保存完成。', 'metadata': {'dimensions': []}}]
-    counts = {key: sum(1 for c in cases if c.get('status') == key) for key in ('passed','failed','inconclusive','cancelled','skipped')}
-    overall = 'failed' if counts['failed'] else 'inconclusive' if counts['inconclusive'] or counts['cancelled'] or counts['skipped'] else 'passed'
+    counts = {key: sum(1 for c in cases if c.get('status') == key) for key in ('passed','failed','inconclusive','cancelled','skipped','not_covered')}
+    overall = 'failed' if counts['failed'] else 'inconclusive' if counts['inconclusive'] or counts['cancelled'] or counts['skipped'] or counts['not_covered'] else 'passed'
+    configuration = {'model': '、'.join(models), 'models': models, 'base': '、'.join(bases), 'records': configurations}
+    for key in ('requestFormat', 'request_format', 'auth', 'path', 'endpoint', 'timeout'):
+        values = [c[key] for c in configurations if c.get(key) is not None]
+        if values and all(value == values[0] for value in values) and len(values) == len(configurations):
+            configuration[key] = values[0]
     return {'suite': 'browser_report', 'report_kind': 'general' if general else 'basic', 'status': 'completed',
-            'run_id': payload.get('run_id') or 'browser-export', 'configuration': {'model': '、'.join(models), 'models': models, 'base': '、'.join(bases)},
+            'run_id': payload.get('run_id') or 'browser-export', 'configuration': configuration,
             'started_at': min(started), 'finished_at': max(finished), 'cases': cases, 'browser_requests': requests,
             'summary': {'total': len(cases), 'completed': len(cases), **counts},
             'verdict': {'status': overall, 'label': '存在失败或证据不足' if overall != 'passed' else '本轮已执行检查通过',

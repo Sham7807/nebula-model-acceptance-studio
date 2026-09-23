@@ -90,3 +90,20 @@ class GPTReportTests(unittest.TestCase):
         html = render_report(normalize_browser_report(payload)).decode()
         self.assertIn('输入 tokens</th><td>未记录', html)
         self.assertIn('SVG 输出</th><td><span class="badge failed">未通过', html)
+
+    def test_gpt_derived_or_inapplicable_total_is_not_verified(self):
+        from browser_reports import normalize_browser_report
+        for flag in ({'total_derived': True}, {'total_tokens_derived': True}, {'accounting_applicable': False}):
+            for consistent in (None, True):
+                with self.subTest(flag=flag, consistent=consistent):
+                    payload = {'records': [{'kind': 'general', 'model': 'old-gpt-usage', 'result': {
+                        'checks': [{'name': 'GPT usage', 'status': 'inconclusive'}],
+                        'gpt_evaluation': {'token_usage': {'input': 10, 'output': 20, 'total': 30, 'consistent': consistent, **flag}}}}]}
+                    html = render_report(normalize_browser_report(payload)).decode()
+                    self.assertIn('未验证渠道上报总量', html)
+                    self.assertNotIn('输入 + 输出 = 总数</th><td><span class="badge passed">', html)
+                    if flag.get('accounting_applicable') is False:
+                        self.assertIn('不适用 · 未验证总量', html)
+                    else:
+                        self.assertIn('总 tokens</th><td>30（派生）', html)
+                        self.assertIn('派生值 · 未验证总量', html)

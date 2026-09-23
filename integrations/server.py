@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import re
 import secrets
+import select
+import socket
 import threading
 import time
 import uuid
@@ -473,6 +475,53 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Content-Disposition', "attachment; filename=\"%s\"; filename*=UTF-8''%s" % (fallback, quote(str(filename), safe='')))
         self.end_headers();self.wfile.write(data)
     def send_json(self,status,data): self.send_bytes(status,json.dumps(data,ensure_ascii=False).encode(),'application/json; charset=utf-8')
+    def stream_proxy_response(self,response,method):
+        """Forward one upstream response without waiting for its body to finish.
+
+        HTTP chunk framing makes an interrupted upstream distinguishable from a
+        successful EOF. It is decoded by fetch automatically; provider cookies,
+        compression metadata and hop-by-hop headers never reach the browser.
+        """
+        self.protocol_version='HTTP/1.1'
+        self.close_connection=True
+        no_body=method=='HEAD' or response.status_code in (204,304)
+        self.send_response(response.status_code)
+        self.send_header('Content-Type',response.headers.get('content-type','application/octet-stream'))
+        for name in ('x-request-id','request-id','retry-after'):
+            if name in response.headers:self.send_header(name,response.headers[name])
+        self.send_header('Cache-Control','no-store')
+        self.send_header('X-Accel-Buffering','no')
+        self.send_header('X-Content-Type-Options','nosniff')
+        self.send_header('Referrer-Policy','no-referrer')
+        self.send_header('X-Frame-Options','SAMEORIGIN')
+        self.send_header('Connection','close')
+        if not no_body:self.send_header('Transfer-Encoding','chunked')
+        self.end_headers();self.wfile.flush()
+        if no_body:return
+        finished=threading.Event()
+        disconnected=threading.Event()
+        def watch_disconnect():
+            # A cancelled browser fetch may stop receiving while the provider
+            # is idle. Close that response promptly instead of waiting for its
+            # next token or sending a second, billable upstream request.
+            while not finished.wait(.1):
+                try:
+                    readable,_,_=select.select([self.connection],[],[],0)
+                    if readable and self.connection.recv(1,socket.MSG_PEEK)==b'':
+                        disconnected.set();response.close();return
+                except (OSError,ValueError):return
+        watcher=threading.Thread(target=watch_disconnect,daemon=True)
+        watcher.start()
+        try:
+            for chunk in response.iter_bytes():
+                if disconnected.is_set():return
+                if chunk:
+                    self.wfile.write(('%X\r\n'%len(chunk)).encode('ascii')+chunk+b'\r\n')
+                    self.wfile.flush()
+            if not disconnected.is_set():
+                self.wfile.write(b'0\r\n\r\n');self.wfile.flush()
+        finally:
+            finished.set()
     def do_GET(self):
         path=urlsplit(self.path).path
         if path in ('/login','/login.html','/login.css','/login.js','/api/auth'):
@@ -635,13 +684,17 @@ class Handler(BaseHTTPRequestHandler):
             # relay origins directly when the relay does not enable CORS.
             # Execute the already-built request server-side and return a small
             # response envelope so the browser can keep the same parser and
-            # diagnostics as direct requests.
+            # diagnostics as direct requests. An explicit stream:true returns
+            # the upstream response directly for SSE-capable callers.
+            stream_started=False
             try:
                 length=int(self.headers.get('Content-Length','0'))
                 if self.headers.get_content_type()!='application/json' or not 0<length<=50*1024*1024:
                     raise ValueError('代理请求格式无效或内容过大')
                 payload=json.loads(self.rfile.read(length))
                 if not isinstance(payload,dict): raise ValueError('代理请求必须是 JSON 对象')
+                streaming=payload.get('stream',False)
+                if not isinstance(streaming,bool):raise ValueError('stream 必须是布尔值')
                 target=str(payload.get('url','')).strip(); method=str(payload.get('method','POST')).upper()
                 parsed=urlsplit(target)
                 if parsed.scheme not in ('http','https') or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
@@ -682,7 +735,18 @@ class Handler(BaseHTTPRequestHandler):
                 elif payload.get('body') is not None:
                     body=str(payload.get('body'))
                 import base64, httpx
-                with httpx.Client(timeout=timeout,follow_redirects=False,trust_env=False) as client:
+                proxy=os.environ.get('WORKBENCH_OUTBOUND_PROXY','').strip() or None
+                if proxy:
+                    try:
+                        proxy_url=urlsplit(proxy)
+                        if proxy_url.scheme not in ('http','https') or not proxy_url.hostname or proxy_url.query or proxy_url.fragment or re.search(r'[\x00-\x20\\]',proxy):raise ValueError()
+                        _=proxy_url.port
+                    except ValueError:raise ValueError('服务器出站代理配置无效，请检查 WORKBENCH_OUTBOUND_PROXY。')
+                with httpx.Client(timeout=timeout,follow_redirects=False,trust_env=False,proxy=proxy) as client:
+                    if streaming:
+                        with client.stream(method,target,headers=upstream_headers,content=body,data=data,files=files) as response:
+                            stream_started=True
+                            return self.stream_proxy_response(response,method)
                     response=client.request(method,target,headers=upstream_headers,content=body,data=data,files=files)
                 ctype=response.headers.get('content-type','application/octet-stream')
                 is_text=('text/' in ctype.lower() or 'json' in ctype.lower() or 'javascript' in ctype.lower() or 'xml' in ctype.lower() or 'event-stream' in ctype.lower())
@@ -693,6 +757,11 @@ class Handler(BaseHTTPRequestHandler):
                     envelope['body_base64']=base64.b64encode(response.content).decode('ascii')
                 return self.send_json(200,envelope)
             except Exception as exc:
+                # Once headers/body have been sent, a second JSON response
+                # would corrupt SSE. Closing an incomplete chunked stream
+                # makes fetch reject it, preserving the failure for the UI.
+                if stream_started or isinstance(exc,(BrokenPipeError,ConnectionResetError)):
+                    self.close_connection=True;return
                 from httpx import TimeoutException, RequestError
                 message='代理请求超时，请检查渠道连通性后重试。' if isinstance(exc,TimeoutException) else '服务器无法连接渠道，请检查渠道地址、TLS 证书和网络设置。' if isinstance(exc,RequestError) else str(exc)
                 return self.send_json(400,{'error':clean(message,locals().get('headers',{}).get('Authorization',''))})

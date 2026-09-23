@@ -36,6 +36,7 @@
   .field label,.mode-label{display:block;font-size:11px;font-weight:500;color:#637759;margin-bottom:7px}
   .field label>span{font-size:9px;font-weight:400;color:#97a28e;margin-left:5px}
   .field input,.field select{width:100%;min-width:0;background:#fafbf8;border:1px solid #e0e6dd;border-radius:7px;color:var(--text);padding:10px 11px;font-size:11px;transition:border-color .15s,box-shadow .15s}
+  .protocol-settings{margin-bottom:18px;border:1px solid var(--border);border-radius:9px;padding:11px;background:#fbfcfa}.protocol-settings summary{font-size:11px;color:var(--accent);cursor:pointer}.protocol-settings .field{margin-top:13px;margin-bottom:8px}.protocol-preview{white-space:pre-wrap;overflow-wrap:anywhere;font:10px/1.6 ui-monospace,monospace;color:var(--text);margin-top:12px}.protocol-settings .btn{margin-top:8px}
   .field input::placeholder{color:#9aa494}
   .field input:focus,.field select:focus{outline:none;border-color:#79a089;box-shadow:0 0 0 3px #256b520a;background:#fff}
   .settings-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
@@ -171,6 +172,8 @@
       <div class="field"><label for="inKey">API Key <span>仅用于本次会话</span></label>
         <div class="keyrow"><input id="inKey" type="password" placeholder="sk-…" autocomplete="off">
           <label><input type="checkbox" onclick="$('inKey').type=this.checked?'text':'password'" aria-label="显示 API Key">显示</label></div></div>
+      <div class="field"><label for="inFormat">请求格式 <span>按渠道接口文档选择</span></label><select id="inFormat"><option value="openai-chat">OpenAI · Chat Completions</option><option value="openai-responses">OpenAI · Responses</option><option value="anthropic">Anthropic · Messages</option><option value="gemini">Gemini · GenerateContent</option></select><small id="generalFormatHint">工具、图像输入、流式与 Token 字段随协议适配。</small></div>
+      <details class="protocol-settings"><summary>接口路径与鉴权</summary><div class="field"><label for="inPath">自定义路径 <span>留空使用所选协议默认值</span></label><input id="inPath" placeholder="例如 /openai/v1/chat/completions" autocomplete="off"><small>以 / 开头，同一渠道内覆盖路径；Gemini 可使用 {model} 占位符。</small></div><div class="field"><label for="inAuth">鉴权方式</label><select id="inAuth"><option value="auto">跟随请求格式</option><option value="bearer">Authorization: Bearer</option><option value="anthropic">x-api-key</option><option value="gemini">x-goog-api-key</option><option value="none">不使用鉴权</option></select></div><button type="button" class="btn ghost" id="generalPreview">预览请求（不发送）</button><pre id="generalRequestPreview" class="protocol-preview" hidden></pre></details>
       <div class="field"><label for="inModel">渠道模型 ID <span>获取后可直接勾选多个，也可手动填写</span></label>
         <div class="model-row"><input id="inModel" placeholder="勾选一个或多个模型，也可手动填写 ID" autocomplete="off"><button id="loadGeneralModels" class="model-load" type="button">获取模型</button></div>
         <input id="inBatch" type="hidden">
@@ -213,11 +216,15 @@
       <section class="panel" id="detailSection"><div class="panel-title"><span class="dot"></span>测试明细</div><div class="table-scroll"><table><thead><tr><th>测试项</th><th>结果</th><th>判定</th></tr></thead><tbody id="detailBody"></tbody></table></div></section>
     </main>
   </div>
-  <footer>适用于兼容 Chat Completions 的文本渠道。评分用于渠道质量参考，不能单独证明模型身份。</footer>
+  <footer>支持 Chat Completions / Responses / Messages / GenerateContent。评分用于渠道质量参考，不能单独证明模型身份。</footer>
 </div>
 
 <script src="model-discovery.js"></script>
 <script src="model-multiselect.js"></script>
+<script src="general-format.js"></script>
+<script src="general-check-content.js"></script>
+<script src="report-theme.js"></script>
+<script src="client-report.js"></script>
 <script>
 /* ================= 基础 ================= */
 const $=id=>document.getElementById(id);
@@ -243,6 +250,21 @@ function requestScope(){
 }
 const S={logs:[],details:[],intel:[],scores:{},fp:new Set(),batch:[],requests:[],t0:null,tEnd:null,total:null,mode:'',gptEvaluation:null};
 const historyResponses=new WeakMap();
+let probeContext=null;
+function hostedWorkbench(){
+  return /^https?:$/.test(location.protocol)||/^https?:/i.test(document.baseURI);
+}
+async function generalFetch(url,options={},stream=false){
+  if(!hostedWorkbench())return fetch(url,{...options,credentials:'omit',redirect:'error'});
+  const sessionResponse=await fetch('/api/session',{credentials:'same-origin',cache:'no-store',signal:options.signal});
+  const session=await sessionResponse.json();
+  if(!sessionResponse.ok||!session.token)throw new Error(session.error||'登录会话失效，请重新登录后重试。');
+  const response=await fetch('/api/proxy',{method:'POST',credentials:'same-origin',redirect:'error',signal:options.signal,headers:{'Content-Type':'application/json','X-Workbench-Token':session.token},body:JSON.stringify({url,method:options.method||'POST',headers:options.headers,body:options.body,stream,timeout:cfg().timeout/1000})});
+  if(stream)return response;
+  const data=await response.json();
+  if(!response.ok||data.error)throw new Error(data.error||'工作台代理请求失败：HTTP '+response.status);
+  return new Response([204,205,304].includes(data.status)?null:(data.text||''),{status:data.status,headers:data.headers});
+}
 
 function historySafe(value){
   const key=RUN_CONFIG?.key||'';const seen=new WeakSet();
@@ -251,7 +273,7 @@ function historySafe(value){
     if(typeof v==='string'){
       if(key)v=v.split(key).join('[已隐藏]').split(encodeURIComponent(key)).join('[已隐藏]');
       v=v.replace(/(Bearer\s+)[^\s"<>]+/gi,'$1[已隐藏]').replace(/\bsk-[A-Za-z0-9_-]{8,}/g,'[已隐藏]').replace(/([?&](?:api[_-]?key|key|access_token|secret)=)[^&#\s"<>]*/gi,'$1[已隐藏]');
-      return v.length>16000?v.slice(0,16000)+'\n[已截取过长证据]':v;
+      return v.length>1048576?v.slice(0,1048576)+'\n[证据超过 1 MiB，已截取；此记录不是完整正文]':v;
     }
     if(!v||typeof v!=='object')return v;if(seen.has(v))return '[重复引用]';seen.add(v);
     if(Array.isArray(v))return v.map(x=>safe(x));const out={};for(const [name,val]of Object.entries(v))out[name]=safe(val,name);return out;
@@ -260,20 +282,17 @@ function historySafe(value){
 }
 async function historyFetch(url,options={}){
   const t=performance.now();let body=options.body;try{body=JSON.parse(body);}catch{}
-  const row=historySafe({id:'request-'+(S.requests.length+1),model:cfg().model,url,method:options.method||'GET',request:body,started_at:Date.now()/1000});S.requests.push(row);
-  try{const response=await fetch(url,options);row.status=response.status;row.duration_ms=performance.now()-t;row.headers=historySafe(Object.fromEntries(response.headers.entries()));historyResponses.set(response,row);return response;}
+  const row=historySafe({id:'request-'+(S.requests.length+1),model:cfg().model,url,method:options.method||'GET',request:body,request_format:cfg().requestFormat,auth:cfg().auth,transport:hostedWorkbench()?'workbench-proxy':'direct',started_at:Date.now()/1000});S.requests.push(row);probeContext?.requestIds.push(row.id);
+  try{const response=await generalFetch(url,options,options.stream===true);row.status=response.status;row.duration_ms=performance.now()-t;row.headers=historySafe(Object.fromEntries(response.headers.entries()));historyResponses.set(response,row);return response;}
   catch(error){row.status=options.signal?.aborted?'cancelled':'network_error';row.error=historySafe(error.message);row.duration_ms=performance.now()-t;throw error;}
 }
 function historyResponse(response,body){const row=historyResponses.get(response);if(row)row.response=historySafe(body);}
 function publishGeneralHistory(outcome,error=''){
   if(!S.historyId)return;
-  const plain=html=>{const template=document.createElement('template');template.innerHTML=html;return template.content.textContent||'';};
-  const checks=S.details.map(item=>({...item,name:item.name,result:item.result,status:item.cls==='bad'?'failed':item.cls==='ok'?'passed':'inconclusive',judge:item.judge,model:item.model||S.config?.model||''}));
-  const batchFailed=S.batch.some(item=>!item.stream||!item.tools||!item.json||item.conc!=='3/3');
-  const status=outcome==='cancelled'?'cancelled':outcome==='failed'?'failed':batchFailed||checks.some(item=>item.status==='failed')?'failed':!checks.length||checks.some(item=>item.status==='inconclusive')?'inconclusive':'passed';
-  const data=historySafe({client_id:S.historyId,kind:'general',source:'general',title:'通用深度检测 · '+(S.config.models.length?S.config.models.join('、'):S.config.model),model:S.config.models.length?S.config.models.join(', '):S.config.model,base:S.config.base,prompt:'内置通用检测用例 · '+S.mode,status,created_at:S.createdAt/1000,duration_ms:(S.tEnd||performance.now())-S.t0,media:[],result:{config:S.config,mode:S.mode,total:S.total,scores:S.scores,checks,logs:S.logs,intelligence:S.intel.map(plain),batch:S.batch,requests:S.requests,error: error||undefined,gpt_evaluation:S.gptEvaluation||undefined}});
+  const data=S.reportRecord||generalReportRecord(outcome,error);
   if(window.parent!==window)window.parent.postMessage({type:'workbench:general-history',record:data},location.origin==='null'?'*':location.origin);
 }
+
 function ts(){return new Date().toTimeString().slice(0,8);}
 function log(msg,cls='inf'){
   S.logs.push({t:ts(),cls,msg});
@@ -296,16 +315,18 @@ function setProgress(label){
 }
 
 function readCfg(){
-  let base=$('inBase').value.trim().replace(/\/+$/,'');
-  if(base.endsWith('/v1'))base=base.slice(0,-3);
-  return{base,key:$('inKey').value.trim(),model:$('inModel').value.trim(),
+  const base=$('inBase').value.trim().replace(/\/+$/,''),requestFormat=$('inFormat').value;
+  const auth=$('inAuth').value==='auto'?({anthropic:'anthropic',gemini:'gemini'}[requestFormat]||'bearer'):$('inAuth').value;
+  return{base,key:$('inKey').value.trim(),model:$('inModel').value.trim(),requestFormat,request_format:requestFormat,auth,path:$('inPath').value.trim(),
     timeout:Math.max(10,parseInt($('inTimeout').value)||180)*1000,
     conc:parseInt($('inConc').value)||5};
 }
 function cfg(){const c=RUN_CONFIG||readCfg();return{...c,model:MODEL_OVERRIDE||c.model};}
 const resultCfg=()=>S.config||cfg();
-const CHAT=()=>cfg().base+'/v1/chat/completions';
-const MODELS=()=>cfg().base+'/v1/models';
+function buildGeneralRequest(payload,keyOverride){
+  if(!window.GeneralFormat)throw new Error('请求格式模块未加载，请刷新后重试。');
+  return window.GeneralFormat.build(payload,{...cfg(),key:keyOverride??cfg().key});
+}
 
 /* 模型列表在通用检测开始前即可获取；运行中的请求不会被刷新列表打断。 */
 let generalModelCatalog=[],generalModelFetchEpoch=0,generalModelController=null;
@@ -315,7 +336,7 @@ function closeGeneralModelPicker(){ generalSelection?.close(); }
 async function loadGeneralModels(){
   if(RUNNING)return;
   const c=readCfg();
-  if(!c.base||!c.key){ $('generalModelHint').textContent='请先填写渠道地址和 API Key。'; generalSelection?.open(); return; }
+  if(!c.base||(c.auth!=='none'&&!c.key)){ $('generalModelHint').textContent='请先填写渠道地址和 API Key，或选择不使用鉴权。'; generalSelection?.open(); return; }
   try{const target=new URL(c.base);if(!/^https?:$/.test(target.protocol))throw new Error();}catch{ $('generalModelHint').textContent='渠道地址无效，请填写 HTTP / HTTPS 地址。'; generalSelection?.open(); return;}
   const epoch=++generalModelFetchEpoch,button=$('loadGeneralModels');
   if(generalModelController)generalModelController.abort();
@@ -323,7 +344,7 @@ async function loadGeneralModels(){
   button.disabled=true;button.textContent='获取中…';generalSelection?.open();generalSelection?.setStatus('正在获取模型列表（最多 30 秒）…');
   window.ModelDiscovery.showDetails($('generalModelHint'),null);
   try{
-    const result=await window.ModelDiscovery.list({base:$('inBase').value.trim(),key:c.key,auth:'bearer'},{signal:controller.signal});const ids=result.models;
+    const result=await window.ModelDiscovery.list({base:c.base,key:c.key,auth:c.auth},{signal:controller.signal});const ids=result.models;
     if(epoch!==generalModelFetchEpoch)return;
     generalModelCatalog=[...new Set(ids)]; generalSelection?.setOptions(generalModelCatalog); generalSelection?.setStatus(`已获取 ${generalModelCatalog.length} 个模型`); $('generalModelHint').textContent='勾选一个或多个模型后即可测试；选择会同步到批量测试。';
     window.ModelDiscovery.showDetails($('generalModelHint'),result);
@@ -359,16 +380,15 @@ async function post(payload,keyOverride){
   const t=performance.now();
   try{
     checkStop();
-    const resp=await historyFetch(CHAT(),{method:'POST',signal:ctrl.signal,
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+(keyOverride||c.key)},
-      body:JSON.stringify(payload)});
+    const spec=buildGeneralRequest(payload,keyOverride);
+    const resp=await historyFetch(spec.url,{method:spec.method||'POST',signal:ctrl.signal,headers:spec.headers,body:typeof spec.body==='string'?spec.body:JSON.stringify(spec.body)});
     const dt=(performance.now()-t)/1000;
     let body=null;try{body=await resp.json();}catch(e){if(ctrl.signal.aborted)throw e;}
     checkStop();
     const h={};resp.headers.forEach((v,k)=>h[k.toLowerCase()]=v);
     scanFp(h,body);historyResponse(resp,body);
-    return{ok:resp.ok,status:resp.status,body,dt,headers:h};
-  }catch(e){checkStop();return{ok:false,status:ctrl.signal.aborted?'timeout':'network',body:null,dt:(performance.now()-t)/1000,headers:null,err:e.message};}
+    return{ok:resp.ok&&!body?.error,status:resp.status,body:window.GeneralFormat.normalize(body,c.requestFormat),raw:body,dt,headers:h};
+  }catch(e){checkStop();if(e.code==='not_applicable')throw e;return{ok:false,status:ctrl.signal.aborted?'timeout':'network',body:null,dt:(performance.now()-t)/1000,headers:null,err:e.message};}
   finally{scope.clear();}
 }
 /* 思维链耗尽自动重试：content 为空 + finish_reason=length → max_tokens 加倍重发一次 */
@@ -468,11 +488,24 @@ function setCard(id,score,html,tag){
 }
 function detail(name,result,cls,judge){
   const meta=arguments[4]||{};
-  S.details.push({name,result:String(result),cls,judge,model:cfg().model,...meta});
+  S.details.push({name,result:String(result),cls,judge,model:cfg().model,request_ids:[...(probeContext?.requestIds||[])],...GeneralCheckContent.describe(name,meta.status||cls),...meta});
   const tr=document.createElement('tr');
   tr.innerHTML=`<td></td><td></td><td class="${cls}"></td>`;
   tr.children[0].textContent=name;tr.children[1].textContent=result;tr.children[2].textContent=judge;
   $('detailBody').appendChild(tr);$('detailSection').style.display='block';
+}
+async function runProbe(name,fn){
+  const previous=probeContext;probeContext={name,requestIds:[]};const before=S.details.length;
+  try{const value=await fn();if(S.mode==='batch(quick)'&&S.details.length===before){
+    const passed=typeof value==='boolean'?value:typeof value==='number'?value===3:value?.ok===true;
+    const status=passed?'passed':name==='缓存'?'inconclusive':'failed';
+    detail(name,typeof value==='object'?JSON.stringify(value):String(value),status==='passed'?'ok':status==='failed'?'bad':'mid',passed?'✅':'⚠️ 需复核',{status,expected:name==='缓存'?'重复前缀请求中观察到缓存读取':'返回符合专项断言的协议响应'});
+  }return value;}
+  catch(error){
+    if(error.code!=='not_applicable')throw error;
+    detail(name,error.message,'mid','— 当前格式不适用',{status:'skipped',applicable:false,expected:'按所选协议验证此项能力',method:'检查所选格式是否具备该字段契约',meaning:'未发起此专项请求，不代表模型不支持',next_step:'如渠道提供此功能，请改用对应兼容协议后复测。'});
+    log(name+'：'+error.message,'mid');return null;
+  }finally{probeContext=previous;}
 }
 
 /* GPT 专项：只检查模型返回的 HTML/SVG 源码与 usage 账本，不执行模型生成的脚本。
@@ -490,21 +523,23 @@ async function tGptGeneration(){
   const refusal=/(无法|不能|抱歉|我不能|作为\s*AI|cannot|can't|unable)/i.test(source)&&!hasSvg;
   const u=usage(r)||{};
   const integer=v=>Number.isInteger(v)&&v>=0;
-  const usageFields={prompt_tokens:u.prompt_tokens,completion_tokens:u.completion_tokens,total_tokens:u.total_tokens};
+  const usageDerived=u.total_tokens_derived===true;
+  const usageFields={prompt_tokens:u.prompt_tokens,completion_tokens:u.completion_tokens,total_tokens:u.total_tokens,total_tokens_derived:usageDerived,raw_usage:u.raw_usage};
   const usagePresent=integer(u.prompt_tokens)&&integer(u.completion_tokens)&&integer(u.total_tokens);
-  const usageConsistent=usagePresent&&u.total_tokens===u.prompt_tokens+u.completion_tokens;
+  const usageConsistent=usagePresent&&!usageDerived&&u.total_tokens===u.prompt_tokens+u.completion_tokens;
   const codeScore=[hasHtml,hasSvg,hasBird,hasBike,hasAnimation,hasCanvasOrShapes].filter(Boolean).length;
   const generationPass=valid(r)&&!refusal&&codeScore>=5&&source.length>=400;
-  const status=!valid(r)||refusal?'bad':generationPass&&usageConsistent?'ok':codeScore>=3||usagePresent?'mid':'bad';
+  const status=!valid(r)||refusal?'bad':generationPass?'ok':codeScore>=3?'mid':'bad';
   const summary=generationPass?`返回 ${source.length} 字符 HTML；HTML ${hasHtml?'✓':'✗'} · SVG ${hasSvg?'✓':'✗'} · 鹈鹕 ${hasBird?'✓':'✗'} · 自行车 ${hasBike?'✓':'✗'} · 动画 ${hasAnimation?'✓':'✗'} · 图形元素 ${hasCanvasOrShapes?'✓':'✗'}`:`HTTP ${r.status||'网络'}；源码 ${source.length} 字符，结构项 ${codeScore}/6${refusal?'；疑似拒答或未生成代码':''}`;
-  const tokenSummary=usagePresent?`prompt_tokens=${u.prompt_tokens} · completion_tokens=${u.completion_tokens} · total_tokens=${u.total_tokens} · ${usageConsistent?'总数自洽':'总数不等于输入+输出'}`:'未返回完整 usage（prompt/completion/total）';
+  const tokenSummary=usageDerived?`输入=${u.prompt_tokens??'未返回'} · 输出=${u.completion_tokens??'未返回'} · 展示总量=${u.total_tokens??'无法计算'}（由适配器计算，供应商未返回独立 total；不执行加总核验）`:usagePresent?`prompt_tokens=${u.prompt_tokens} · completion_tokens=${u.completion_tokens} · total_tokens=${u.total_tokens} · ${usageConsistent?'总数自洽':'总数不等于输入+输出'}`:'未返回完整 usage（prompt/completion/total）';
   detail('GPT HTML / SVG 动画生成',summary,status,generationPass?'✅ 已返回可保存的动画源码（未在本地执行）':status==='mid'?'⚠️ 返回部分可用，需人工查看源码':'❌ 未生成满足要求的 HTML/SVG',{
     id:'gpt_html_svg_generation',dimensions:['protocol','gpt'],module:'protocol',expected:'返回包含 HTML、SVG、鹈鹕、自行车和动画机制的完整源码；本地不执行生成脚本。',observed:summary,source_length:source.length,code_features:{hasHtml,hasSvg,hasBird,hasBike,hasAnimation,hasCanvasOrShapes},usage:usageFields,prompt_tokens:u.prompt_tokens,completion_tokens:u.completion_tokens,total_tokens:u.total_tokens});
-  detail('GPT usage token 账本一致性',tokenSummary,usageConsistent?'ok':usagePresent?'mid':'bad',usageConsistent?'✅ total_tokens = prompt_tokens + completion_tokens':usagePresent?'⚠️ 返回数值但加总不一致':'❌ 缺少完整 token 计数',{
+  detail('GPT usage token 账本一致性',tokenSummary,usageDerived?'mid':usageConsistent?'ok':usagePresent?'mid':'bad',usageDerived?'— 原生无独立 total，不适用':usageConsistent?'✅ total_tokens = prompt_tokens + completion_tokens':usagePresent?'⚠️ 返回数值但加总不一致':'❌ 缺少完整 token 计数',{
+    ...(usageDerived?{status:'skipped',applicable:false,meaning:'Anthropic 原生输入/输出字段可用；展示总量是本地加总，不能用同一个加总结果验证自身。'}:{}),
     id:'gpt_usage_token_accounting',dimensions:['cache','gpt'],module:'cache',expected:'usage 返回非负整数 prompt_tokens、completion_tokens、total_tokens，且 total = prompt + completion。',observed:tokenSummary,usage:usageFields,prompt_tokens:u.prompt_tokens,completion_tokens:u.completion_tokens,total_tokens:u.total_tokens});
-  S.gptEvaluation={prompt,html_detected:hasHtml,svg_detected:hasSvg,animation_detected:hasAnimation,html_valid:hasHtml&&hasSvg&&hasCanvasOrShapes,token_usage:{input:u.prompt_tokens,output:u.completion_tokens,total:u.total_tokens,consistent:usageConsistent},signals:{features:{html:hasHtml,svg:hasSvg,bird:hasBird,bicycle:hasBike,animation:hasAnimation,shapes:hasCanvasOrShapes},code_score:codeScore,source_length:source.length},html_preview:source.slice(0,24000),verdict:generationPass&&usageConsistent?'passed':status==='mid'?'inconclusive':'failed'};
-  log(`GPT 专项: HTML/SVG ${generationPass?'✓':'✗'}（${codeScore}/6） · token 账本 ${usageConsistent?'✓ 一致':usagePresent?'⚠️ 不一致':'✗ 缺失'}`,status);
-  return {generationPass,usageConsistent,usagePresent,codeScore,sourceLength:source.length,features:{hasHtml,hasSvg,hasBird,hasBike,hasAnimation,hasCanvasOrShapes},usage:usageFields,source:source.slice(0,24000)};
+  S.gptEvaluation={prompt,html_detected:hasHtml,svg_detected:hasSvg,animation_detected:hasAnimation,html_valid:hasHtml&&hasSvg&&hasCanvasOrShapes,token_usage:{input:u.prompt_tokens,output:u.completion_tokens,total:u.total_tokens,consistent:usageDerived?null:usageConsistent,total_derived:usageDerived,accounting_applicable:!usageDerived,raw_usage:u.raw_usage},signals:{features:{html:hasHtml,svg:hasSvg,bird:hasBird,bicycle:hasBike,animation:hasAnimation,shapes:hasCanvasOrShapes},code_score:codeScore,source_length:source.length},html_preview:source.slice(0,24000),verdict:generationPass&&(usageConsistent||usageDerived)?'passed':status==='mid'||generationPass?'inconclusive':'failed'};
+  log(`GPT 专项: HTML/SVG ${generationPass?'✓':'✗'}（${codeScore}/6） · token 账本 ${usageDerived?'— 原生无独立total':usageConsistent?'✓ 一致':usagePresent?'⚠️ 不一致':'✗ 缺失'}`,status);
+  return {generationPass,usageConsistent,usagePresent,usageDerived,codeScore,sourceLength:source.length,features:{hasHtml,hasSvg,hasBird,hasBike,hasAnimation,hasCanvasOrShapes},usage:usageFields,source:source.slice(0,24000)};
 }
 function intel(html){
   S.intel.push(html);
@@ -516,10 +551,10 @@ function intel(html){
 async function tModels(){
   checkStop();const scope=requestScope();const {ctrl}=scope;
   const started=performance.now(),row={id:'request-'+(S.requests.length+1),model:cfg().model,channel:cfg().base,operation:'model_discovery',started_at:Date.now()/1000};
-  S.requests.push(row);
+  S.requests.push(row);probeContext?.requestIds.push(row.id);
   try{
     checkStop();
-    const d=await window.ModelDiscovery.list({base:cfg().base,key:cfg().key,auth:'bearer'},{signal:ctrl.signal});
+    const d=await window.ModelDiscovery.list({base:cfg().base,key:cfg().key,auth:cfg().auth},{signal:ctrl.signal});
     row.status='completed';row.transport=d.transport;row.response=historySafe(d);
     checkStop();
     const ids=d.models;
@@ -545,46 +580,42 @@ async function tIdentity(){
   detail('身份自述',txt.slice(0,80),match===false?'mid':'ok',
     match==null?'— 未识别品牌':match?'✅ 符合 '+eb.name:'⚠️ 非 '+eb.name+' 口吻');
   const retModel=String(r?.body?.model||'');
-  if(retModel&&retModel!==c.model)intel(`<b>上游命名泄露：</b>请求 <code>${esc(c.model)}</code> 返回 <code>${esc(retModel)}</code> —— 可推断真实上游渠道`);
-  const usageOk=u.prompt_tokens!=null&&u.completion_tokens!=null&&u.total_tokens!=null;
-  return{match,hasReasoning:!!rc,retModel,dt:r.dt,usageOk,tps};
+  if(retModel&&retModel!==c.model)intel(`<b>上游命名泄露：</b>请求 <code>${esc(c.model)}</code> 返回 <code>${esc(retModel)}</code> —— 仅是返回的模型字段，不能单凭此验证真实上游身份`);
+  const usageDerived=u.total_tokens_derived===true,usageOk=u.prompt_tokens!=null&&u.completion_tokens!=null&&(usageDerived||u.total_tokens!=null);
+  return{match,hasReasoning:!!rc,retModel,dt:r.dt,usageOk,usageDerived,tps};
 }
 
-async function tStream(){
-  checkStop();const c=cfg();const scope=requestScope();const {ctrl}=scope;
-  const t0=performance.now();let ttfb=null,chunks=0,usageSeen=false,lastT=null,historyStreamResponse=null;
+async function streamProbe(prompt,maxTokens){
+  checkStop();const c=cfg(),scope=requestScope(),t0=performance.now();let response=null,ttfb=null,lastT=null,chunks=0,usageSeen=false,finished=false,error='',raw='';
   try{
-    checkStop();
-    const resp=await historyFetch(CHAT(),{method:'POST',signal:ctrl.signal,
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+c.key},
-      body:JSON.stringify({model:c.model,stream:true,stream_options:{include_usage:true},messages:Q('数到20，每个数字一行'),max_tokens:2500})});historyStreamResponse=resp;
-    checkStop();
-    const h={};resp.headers.forEach((v,k)=>h[k.toLowerCase()]=v);scanFp(h,null);
-    if(!resp.ok){const b=await resp.text().catch(()=>'');
-      log(`流式: HTTP ${resp.status} ${b.slice(0,80)}`,'bad');
-      detail('流式输出','HTTP '+resp.status,'bad','❌');return{ttfb:null,ok:false,fake:null};}
-    const reader=resp.body.getReader();const dec=new TextDecoder();let buf='';
-    while(true){
-      checkStop();const{done,value}=await reader.read();checkStop();if(done)break;
-      buf+=dec.decode(value,{stream:true});
-      const lines=buf.split('\n');buf=lines.pop();
-      for(const ln of lines)if(ln.startsWith('data:')){
-        chunks++;const now=(performance.now()-t0)/1000;
-        if(ttfb===null)ttfb=now;lastT=now;
-        if(ln.includes('"usage"')&&!ln.includes('"usage":null'))usageSeen=true;
+    const spec=buildGeneralRequest({model:c.model,stream:true,stream_options:{include_usage:true},messages:Q(prompt),max_tokens:maxTokens});
+    response=await historyFetch(spec.url,{method:'POST',headers:spec.headers,body:typeof spec.body==='string'?spec.body:JSON.stringify(spec.body),signal:scope.ctrl.signal,stream:true});
+    if(!response.ok){raw=await response.text();error=`HTTP ${response.status} ${raw.slice(0,240)}`;return{ok:false,ttfb:null,fake:null,error};}
+    if(!/text\/event-stream/i.test(response.headers.get('content-type')||'')){raw=await response.text();error='接口未返回 text/event-stream，不能证明流式支持';return{ok:false,ttfb:null,fake:null,error};}
+    const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='';
+    const consume=block=>{
+      const events=window.GeneralFormat.parseSSE(block+'\n\n',c.requestFormat);
+      for(const event of events){
+        if(event.malformed)throw new Error('收到无法解析的 SSE JSON 事件');
+        if(event.error)throw new Error(typeof event.error==='string'?event.error:JSON.stringify(event.error));
+        if(event.usage)usageSeen=true;if(event.done||event.finishReason)finished=true;
+        if(event.text||event.reasoning||event.toolCalls?.length){chunks++;const now=(performance.now()-t0)/1000;if(ttfb===null)ttfb=now;lastT=now;}
       }
-    }
-    if(chunks===0){log('流式: 连接成功但 0 个 chunk','bad');detail('流式输出','0 chunks','bad','❌');return{ttfb:null,ok:false,fake:null};}
-    /* 假流式检测：TTFB 很长，但之后全部 chunk 瞬间到齐 = 网关缓冲后一次性灌出 */
-    const spread=(lastT??ttfb)-ttfb;
-    const fake=ttfb>3&&chunks>=8&&spread<Math.max(1.5,ttfb*0.3);
-    log(`流式: ${chunks} chunks, TTFB=${ttfb.toFixed(1)}s, chunk分布=${spread.toFixed(1)}s, usage随流=${usageSeen?'✓':'✗'}${fake?' ⚠️疑似假流式':''}`,fake?'mid':'ok');
-    if(fake)intel(`<b>⚠️ 疑似假流式：</b>TTFB ${ttfb.toFixed(1)}s，但 ${chunks} 个 chunk 在之后 ${spread.toFixed(1)}s 内全部到达 —— 网关大概率等上游生成完再一次性灌出，并非真边生成边推流`);
-    detail('流式输出',`${chunks} chunks, TTFB ${ttfb.toFixed(1)}s, 分布 ${spread.toFixed(1)}s${fake?'，假流式':''}`,fake?'mid':'ok',fake?'⚠️ 假流式':'✅');
-    return{ttfb,ok:true,usageSeen,fake,chunks};
-  }catch(e){checkStop();log('流式失败: '+(ctrl.signal.aborted?'超时':e.message),'bad');
-    detail('流式输出',ctrl.signal.aborted?'超时':e.message,'bad','❌');return{ttfb:null,ok:false,fake:null};}
-  finally{if(historyStreamResponse)historyResponse(historyStreamResponse,{stream:true,chunks,ttfb_seconds:ttfb,spread_seconds:ttfb==null?null:(lastT??ttfb)-ttfb,note:'流式输出保留分块与时序摘要'});scope.clear();}
+    };
+    while(true){checkStop();const {done,value}=await reader.read();checkStop();if(done)break;const text=decoder.decode(value,{stream:true});if(raw.length<1048576)raw+=text.slice(0,1048576-raw.length);buffer+=text;let match;while((match=/\r?\n\r?\n/.exec(buffer))){const block=buffer.slice(0,match.index);buffer=buffer.slice(match.index+match[0].length);consume(block);}}
+    buffer+=decoder.decode();if(buffer.trim())consume(buffer);
+    const spread=ttfb===null?null:(lastT??ttfb)-ttfb;
+    const fake=ttfb!==null&&ttfb>3&&chunks>=8&&spread<Math.max(1.5,ttfb*.3);
+    error=!chunks?'未收到有效文本或工具增量':!finished?'流式提前结束，缺少完成事件':'';
+    return{ok:chunks>0&&finished,ttfb,fake,chunks,usageSeen,spread,error};
+  }catch(e){checkStop();if(e.code==='not_applicable')throw e;error=scope.ctrl.signal.aborted?'请求超时':e.message;return{ok:false,ttfb,fake:null,error};}
+  finally{if(response)historyResponse(response,{stream:true,raw_sse:raw,raw_truncated:raw.length>=1048576,chunks,ttfb_seconds:ttfb,spread_seconds:ttfb===null?null:(lastT??ttfb)-ttfb,finished,error,request_format:c.requestFormat});scope.clear();}
+}
+async function tStream(){
+  const result=await streamProbe('数到20，每个数字一行',2500);
+  const description=result.ok?`${result.chunks} 个内容分块 · TTFB ${result.ttfb.toFixed(1)}s · 分布 ${result.spread.toFixed(1)}s · usage ${result.usageSeen?'已返回':'未返回'}`:result.error;
+  detail('流式输出',description,result.ok?(result.fake?'mid':'ok'):'bad',result.ok?(result.fake?'⚠️ 疑似缓冲':'✅'):'❌');
+  log('流式输出：'+description,result.ok?'ok':'bad');return result;
 }
 
 async function tCache(){
@@ -600,7 +631,7 @@ async function tCache(){
   }
   const hit=cached.some(v=>v>0);
   const reported=raw.some(v=>v&&Object.keys(v).length);
-  detail('上下文缓存 ×3','读取: '+cached.map(v=>v??'—').join(' / ')+'；创建: '+created.map(v=>v??'—').join(' / ')+(reported?'（已返回缓存字段）':'（未上报缓存字段）')+(fails?`（${fails}次失败）`:''),hit?'ok':reported?'mid':'bad',hit?'✅ 命中':reported?'⚠️ 已上报但未命中':'❌ 无缓存');
+  detail('上下文缓存 ×3','读取: '+cached.map(v=>v??'—').join(' / ')+'；创建: '+created.map(v=>v??'—').join(' / ')+(reported?'（已返回缓存字段）':'（未上报缓存字段）')+(fails?`（${fails}次失败）`:''),hit?'ok':fails===3?'bad':'mid',hit?'✅ 命中':reported?'⚠️ 已上报但未命中':'— 未观测缓存字段');
   return{hit,cached,created,raw,fails,reported};
 }
 
@@ -822,39 +853,26 @@ async function tErrors(){
 
 /* ========== 参数支持度 ========== */
 async function tParams(){
-  const m=cfg().model;const res={};
-  const q=Q('用一句话形容秋天');
-  const a=await postSmart({model:m,max_tokens:3000,temperature:0,messages:q});
-  checkStop();
-  const b=await postSmart({model:m,max_tokens:3000,temperature:0,messages:q});
-  const ca=content(a),cb=content(b);
-  res.temp0=a.ok&&b.ok&&ca.length>0&&ca===cb;
-  log(`temp=0 两次一致: ${res.temp0?'✓ 逐字相同':'✗ '+(ca.length&&cb.length?'不一致（参数可能被改写）':'内容为空无法判定')}`,res.temp0?'ok':'mid');
-  detail('temperature=0 复现',res.temp0?'两次输出逐字相同':(ca.length&&cb.length?'两次输出不同':'输出为空，无法判定'),res.temp0?'ok':'mid',res.temp0?'✅':'⚠️');
-  const s=await postSmart({model:m,max_tokens:2000,stop:['E'],messages:Q('从字母A开始连续输出大写英文字母ABCD…不要任何多余内容')});
-  const sc=content(s);
-  res.stop=s.ok&&sc.length>0&&!sc.includes('E');
-  detail('stop 停止词',sc.length===0?'输出为空，无法判定':res.stop?'生效，输出止于 E 前':`未生效: ${sc.slice(0,30)}`,sc.length===0?'mid':res.stop?'ok':'mid',sc.length===0?'—':res.stop?'✅':'⚠️');
-  const mt=await post({model:m,max_tokens:30,messages:Q('写一篇500字作文')});
-  const fr=mt.body?.choices?.[0]?.finish_reason;
-  res.maxtok=mt.ok&&fr==='length';
-  detail('max_tokens 截断',res.maxtok?'finish_reason=length ✓':'finish_reason='+(fr??('HTTP '+mt.status)),res.maxtok?'ok':'mid',res.maxtok?'✅':'⚠️');
-  const one=await post({model:m,max_tokens:1,stream:false,messages:[{role:'user',content:'hi'}]});
-  const oneFinish=one.body?.choices?.[0]?.finish_reason;
-  res.maxOne=one.ok&&oneFinish==='length';
-  detail('max_tokens=1 边界值',one.ok?`finish_reason=${oneFinish??'未返回'}${usage(one).completion_tokens!=null?` · completion_tokens=${usage(one).completion_tokens}`:''}`:'HTTP '+one.status,res.maxOne?'ok':one.status===400||one.status===422?'mid':'bad',res.maxOne?'✅ 严格截断':one.status===400||one.status===422?'⚠️ 渠道拒绝边界值':'❌ 未按预期截断');
-  const n2=await post({model:m,max_tokens:1000,n:2,messages:Q('说一个数字')});
-  res.n2=n2.ok&&(n2.body?.choices?.length===2);
-  detail('n=2 多候选',res.n2?'返回 2 个 choices':(n2.ok?'只返回 '+(n2.body?.choices?.length??0)+' 个':'HTTP '+n2.status),res.n2?'ok':'mid',res.n2?'✅':'⚠️ 不支持');
-  const pen=await post({model:m,max_tokens:500,presence_penalty:1.5,frequency_penalty:1.5,messages:Q('说一个字')});
-  res.pen=pen.status!==400&&pen.status!=='timeout'&&pen.status!=='network';
-  detail('penalty 参数',pen.status===400?'被 400 拒绝':'接受（HTTP '+pen.status+'）',pen.status===400?'mid':'ok',pen.status===400?'⚠️':'✅');
-  const sd=await post({model:m,max_tokens:500,seed:42,temperature:0,messages:Q('说一个动物')});
-  res.seed=sd.status!==400&&sd.status!=='network'&&sd.status!=='timeout';
-  detail('seed 参数',sd.status===400?'被 400 拒绝':'接受',sd.status===400?'mid':'ok',sd.status===400?'⚠️':'✅');
-  const lp=await post({model:m,max_tokens:50,logprobs:true,top_logprobs:3,messages:Q('好')});
-  res.logprobs=lp.ok&&lp.body?.choices?.[0]?.logprobs!=null;
-  detail('logprobs',lp.status===400?'400 拒绝':(res.logprobs?'返回了 logprobs':'接受但未返回'),lp.status===400?'mid':res.logprobs?'ok':'mid',lp.status===400?'⚠️':res.logprobs?'✅':'⚠️');
+  const m=cfg().model,res={};
+  const a=await postSmart({model:m,max_tokens:3000,temperature:0,messages:Q('用一句话形容秋天')});
+  const b=await postSmart({model:m,max_tokens:3000,temperature:0,messages:Q('用一句话形容秋天')});
+  res.temp0=a.ok&&b.ok&&content(a).length>0&&content(a)===content(b);
+  detail('temperature=0 复现',res.temp0?'两次输出逐字相同':'输出不一致或请求失败，确定性不保证；请查看响应',res.temp0?'ok':'mid',res.temp0?'✅':'⚠️');
+  const probes=[
+    ['stop','stop 停止词',{max_tokens:2000,stop:['E'],messages:Q('从字母A开始连续输出大写英文字母ABCD…不要任何多余内容')},r=>r.ok&&content(r).length>0&&!content(r).includes('E')],
+    ['maxtok','max_tokens 截断',{max_tokens:30,messages:Q('写一篇500字作文')},r=>r.ok&&r.body?.choices?.[0]?.finish_reason==='length'],
+    ['maxOne','max_tokens=1 边界值',{max_tokens:1,stream:false,messages:Q('hi')},r=>r.ok&&r.body?.choices?.[0]?.finish_reason==='length'&&(usage(r).completion_tokens==null||usage(r).completion_tokens<=1)],
+    ['n2','n=2 多候选',{max_tokens:1000,n:2,messages:Q('说一个数字')},r=>r.ok&&r.body?.choices?.length===2],
+    ['pen','penalty 参数',{max_tokens:500,presence_penalty:1.5,frequency_penalty:1.5,messages:Q('说一个字')},r=>valid(r)],
+    ['seed','seed 参数',{max_tokens:500,seed:42,temperature:0,messages:Q('说一个动物')},r=>valid(r)],
+    ['logprobs','logprobs',{max_tokens:50,logprobs:true,top_logprobs:3,messages:Q('好')},r=>r.ok&&r.body?.choices?.[0]?.logprobs!=null]
+  ];
+  for(const [key,name,payload,assertion] of probes){
+    res[key]=await runProbe(name,async()=>{
+      const r=await post({model:m,...payload}),ok=assertion(r),u=usage(r);
+      detail(name,`HTTP ${r.status} · finish_reason=${r.body?.choices?.[0]?.finish_reason??'未返回'} · 输出 tokens=${u.completion_tokens??'未返回'} · ${content(r).slice(0,70)||r.err||r.body?.error?.message||'无文本'}`,ok?'ok':r.ok?'mid':'bad',ok?(['pen','seed'].includes(key)?'✅ 参数被接受（效果需复核）':'✅'):'⚠️ 未满足断言');return ok;
+    });
+  }
   return res;
 }
 
@@ -908,7 +926,7 @@ async function tRobust(identityRes){
   const pt=usage(tk).prompt_tokens;
   res.tokenEff=pt;
   if(pt!=null){
-    intel(`<b>中文 token 效率：</b>20 个汉字 prompt 计费 <code>${esc(pt)}</code> tokens（≈${(pt/20).toFixed(2)} token/字）。国产模型一般 0.6~1.0，显著偏高说明 tokenizer 被换或计费注水`);
+    intel(`<b>中文 token 效率：</b>20 个汉字 prompt 计费 <code>${esc(pt)}</code> tokens（≈${(pt/20).toFixed(2)} token/字）。计数包含协议包装与可能的系统上下文，不能据此认定 tokenizer 或计费被篡改`);
     detail('中文 token 效率',`${pt} tokens / 20字 ≈ ${(pt/20).toFixed(2)}`,(pt/20)<=1.2?'ok':'mid',(pt/20)<=1.2?'✅':'⚠️ 偏高');
   }
   const dts=[];
@@ -925,8 +943,8 @@ async function tRobust(identityRes){
   const huge=await post({model:m,max_tokens:99999999,messages:Q('hi')});
   res.hugeOk=huge.status!==500&&huge.status!=='timeout';
   detail('max_tokens=1e8','HTTP '+huge.status,huge.status===500?'bad':'ok',huge.status===500?'❌':'✅ 不崩');
-  res.usageOk=identityRes?.usageOk??true;
-  detail('usage 字段完整性',res.usageOk?'prompt/completion/total 齐全':'字段缺失',res.usageOk?'ok':'mid',res.usageOk?'✅':'⚠️');
+  res.usageOk=identityRes?.usageOk===true;res.usageDerived=identityRes?.usageDerived===true;
+  detail('usage 字段完整性',res.usageDerived?(res.usageOk?'原生输入/输出字段齐全；展示 total 为适配器加总，不作原生 total 核验':'原生输入/输出字段缺失'):res.usageOk?'原生输入/输出/总量字段齐全':'字段缺失',res.usageOk?'ok':'mid',res.usageOk?'✅ 协议字段齐全':'⚠️',{expected:res.usageDerived?'Anthropic usage 返回原生 input_tokens 与 output_tokens；缓存字段按协议另行计入输入。':'usage 返回原生输入、输出和总量计数。',meaning:'只验证所选协议的计数字段存在，不验证独立 token 计数或计费准确性。',total_tokens_derived:res.usageDerived});
   return res;
 }
 
@@ -937,29 +955,8 @@ async function qIdentity(){
   const match=eb?eb.re.test(content(r)):null;
   return{ok:valid(r),match,dt:r.dt};
 }
-async function qStream(){
-  checkStop();const c=cfg();const scope=requestScope();const {ctrl}=scope;
-  const t0=performance.now();let ttfb=null,chunks=0,lastT=null,historyStreamResponse=null;
-  try{
-    checkStop();
-    const resp=await historyFetch(CHAT(),{method:'POST',signal:ctrl.signal,
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+c.key},
-      body:JSON.stringify({model:c.model,stream:true,messages:Q('数到10'),max_tokens:2000})});historyStreamResponse=resp;
-    if(!resp.ok)return{ok:false,ttfb:null,fake:null};
-    const reader=resp.body.getReader();const dec=new TextDecoder();let buf='';
-    while(true){
-      checkStop();const{done,value}=await reader.read();checkStop();if(done)break;
-      buf+=dec.decode(value,{stream:true});
-      const lines=buf.split('\n');buf=lines.pop();
-      for(const ln of lines)if(ln.startsWith('data:')){chunks++;const now=(performance.now()-t0)/1000;if(ttfb===null)ttfb=now;lastT=now;}
-    }
-    if(!chunks)return{ok:false,ttfb:null,fake:null};
-    const spread=(lastT??ttfb)-ttfb;
-    const fake=ttfb>3&&chunks>=8&&spread<Math.max(1.5,ttfb*0.3);
-    return{ok:true,ttfb,fake};
-  }catch(e){checkStop();return{ok:false,ttfb:null,fake:null};}
-  finally{if(historyStreamResponse)historyResponse(historyStreamResponse,{stream:true,chunks,ttfb_seconds:ttfb,spread_seconds:ttfb==null?null:(lastT??ttfb)-ttfb,note:'流式输出保留分块与时序摘要'});scope.clear();}
-}
+async function qStream(){return streamProbe('数到10',2000);}
+
 async function qTools(){
   const r=await postSmart({model:cfg().model,max_tokens:2500,tool_choice:'auto',
     tools:[{type:'function',function:{name:'get_weather',description:'查询城市天气',parameters:{type:'object',properties:{city:{type:'string'}},required:['city']}}}],
@@ -1000,13 +997,13 @@ async function runBatch(models){
     log(`—— [${i}/${models.length}] ${m} ——`,'phase');
     const row={model:m,identity:'—',ttfb:null,stream:false,fake:null,tools:false,json:false,vision:false,cache:false,conc:'—',mini:0};
     try{
-      const idn=await qIdentity();row.identity=idn.match===false?'存疑':idn.match===null?'?':'✓';
-      const st=await qStream();row.stream=st.ok;row.ttfb=st.ttfb;row.fake=st.fake;
-      row.tools=await qTools();checkStop();
-      row.json=await qJson();
-      row.vision=await qVision();checkStop();
-      row.cache=await qCache();
-      const good=await qConc(3);row.conc=good+'/3';
+      const idn=await runProbe('身份自述',()=>qIdentity())||{ok:false,match:null};row.identity=idn.match===false?'存疑':idn.match===null?'?':'✓';
+      const st=await runProbe('流式输出',()=>qStream())||{};row.stream=st.ok;row.ttfb=st.ttfb;row.fake=st.fake;
+      row.tools=await runProbe('工具调用',()=>qTools());checkStop();
+      row.json=await runProbe('JSON Mode',()=>qJson());
+      row.vision=await runProbe('图像输入',()=>qVision());checkStop();
+      row.cache=await runProbe('缓存',()=>qCache());
+      const good=await runProbe('并发',()=>qConc(3));row.conc=good+'/3';
       row.mini=Math.round(((st.ok?2:0)+(row.tools?2:0)+(row.json?1.5:0)+(row.vision?1.5:0)+(row.cache?1.5:0)+(idn.match?1:0)+(good===3?0.5:0))*10)/10;
       if(st.fake)row.mini=Math.max(0,row.mini-0.5);
       log(`${m}: 身份${row.identity} 流式${st.ok?'✓':'✗'}${st.fake?'(假)':''} 工具${row.tools?'✓':'✗'} JSON${row.json?'✓':'✗'} 视觉${row.vision?'✓':'✗'} 缓存${row.cache?'✓':'✗'} 并发${row.conc} → ${row.mini}`,'inf');
@@ -1031,7 +1028,7 @@ async function runBatch(models){
     setProgress(`批量 ${i}/${models.length}`);
   }
   MODEL_OVERRIDE=null;
-  detail('批量快评',`${models.length} 个模型，均分 ${(S.batch.reduce((a,r)=>a+r.mini,0)/(S.batch.length||1)).toFixed(1)}`,'ok','✅');
+  log(`批量快评已完成 ${S.batch.length} 个模型；请查看逐模型检查与证据。`,'inf');
 }
 
 /* ================= 打分 ================= */
@@ -1040,7 +1037,7 @@ function scoreLatency(ttfb,avg){
   if(v<=2)return 10;if(v<=5)return 8.5;if(v<=10)return 7;if(v<=20)return 5.5;if(v<=40)return 3.5;return 2;
 }
 function verdict(score){
-  if(score>=80)return['🌟 优质通道，放心接入','协议、参数、内容、性能全面在线，可作为主力渠道。'];
+  if(score>=80)return['🌟 优质通道，放心接入','本轮已覆盖样本表现良好，接入前仍需按目标能力核对逐项证据。'];
   if(score>=70)return['✅ 中上水准，可用有短板','核心能力可靠，注意标黄短板项，按报告建议规避。'];
   if(score>=55)return['⚠️ 两极分化，谨慎选型','部分能力突出但有明显硬伤，只适合特定场景。'];
   return['❌ 不推荐接入','多项关键测试未通过，存在稳定性或真实性风险。'];
@@ -1069,81 +1066,36 @@ function saveHistory(){
   if(prev&&prev.total!=null){
     const d=S.total-prev.total;
     const when=new Date(prev.time).toLocaleString('zh-CN');
-    intel(`<b>历史对比：</b>同通道上次测试（${esc(when)}，${esc(prev.mode)} 模式）综合 <code>${esc(prev.total)}</code> 分，本次 <code>${S.total}</code> 分，变化 <code>${d>=0?'+':''}${d}</code>${d<=-10?' —— ⚠️ 显著下滑，警惕上游偷换模型/通道劣化':d>=10?' —— 明显改善':''}`);
+    intel(`<b>历史对比：</b>同通道上次测试（${esc(when)}，${esc(prev.mode)} 模式）综合 <code>${esc(prev.total)}</code> 分，本次 <code>${S.total}</code> 分，变化 <code>${d>=0?'+':''}${d}</code>${d<=-10?' —— 分数下滑，请先核对模式、协议与样本差异再复测':d>=10?' —— 明显改善':''}`);
     log(`历史对比: 上次 ${prev.total} → 本次 ${S.total} (${d>=0?'+':''}${d})`,d<=-10?'bad':d>=10?'ok':'inf');
   }
 }
 
 /* ================= 报告下载 ================= */
-function downloadReport(){
-  const c=resultCfg();
-  const total=S.total??'—';
-  const color=total>=70?'#16a34a':total>=55?'#d97706':'#dc2626';
-  const[vt,vp]=verdict(total);
-  const dur=S.tEnd?((S.tEnd-S.t0)/1000).toFixed(0)+'s':'—';
-  const dimRows=DIMS.filter(d=>S.scores[d.id]!=null).map(d=>{
-    const s=S.scores[d.id];const sc=s>=7?'#16a34a':s>=5?'#d97706':'#dc2626';
-    return`<tr><td>${d.name}</td><td style="font-weight:700;color:${sc}">${s.toFixed(1)}</td>
-      <td><div style="height:8px;background:#edf0f7;border-radius:99px;overflow:hidden"><div style="height:100%;width:${s*10}%;background:${sc};border-radius:99px"></div></div></td></tr>`;
-  }).join('');
-  const batchRows=S.batch.map(r=>{
-    const cc=v=>v?'#16a34a':'#dc2626';
-    return`<tr><td><code>${esc(r.model)}</code></td><td>${esc(r.identity)}</td>
-      <td>${r.ttfb!=null?r.ttfb.toFixed(1)+'s':'—'}</td>
-      <td style="color:${cc(r.stream&&!r.fake)}">${r.stream?(r.fake?'⚠️假流式':'✓'):'✗'}</td>
-      <td style="color:${cc(r.tools)}">${r.tools?'✓':'✗'}</td>
-      <td style="color:${cc(r.json)}">${r.json?'✓':'✗'}</td>
-      <td style="color:${cc(r.vision)}">${r.vision?'✓':'✗'}</td>
-      <td style="color:${cc(r.cache)}">${r.cache?'✓':'✗'}</td>
-      <td>${r.conc}</td><td style="font-weight:700">${r.mini}</td></tr>`;
-  }).join('');
-  const detRows=S.details.map(d=>{
-    const cc=d.cls==='ok'?'#16a34a':d.cls==='mid'?'#d97706':'#dc2626';
-    return`<tr><td>${esc(d.name)}</td><td>${esc(d.result)}</td><td style="color:${cc};font-weight:600">${esc(d.judge)}</td></tr>`;
-  }).join('');
-  const intelRows=S.intel.map(h=>`<div style="background:#f8fafc;border-left:3px solid #7c3aed;border-radius:0 10px 10px 0;padding:12px 16px;margin:10px 0;font-size:13px;color:#39415a">${h}</div>`).join('');
-  const logRows=S.logs.map(l=>{
-    const cc={ok:'#4ade80',bad:'#f87171',mid:'#fbbf24',inf:'#93c5fd',dim:'#7c88a5',phase:'#c4b5fd'}[l.cls]||'#93c5fd';
-    return`<div style="color:${cc}">[${l.t}] ${esc(l.msg)}</div>`;
-  }).join('');
-  const html=`<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>测试报告 - ${esc(c.model)} @ ${esc(c.base)}</title>
-<style>
-body{background:#f4f6fb;color:#1a2233;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;line-height:1.65;padding:40px 20px;margin:0}
-.w{max-width:1000px;margin:0 auto}
-.panel{background:#fff;border:1px solid #e6e9f2;border-radius:16px;padding:26px;margin-bottom:20px;box-shadow:0 1px 2px rgba(26,34,51,.04),0 8px 24px rgba(26,34,51,.06)}
-h1{font-size:24px;margin-bottom:4px}h2{font-size:16px;margin-bottom:14px}
-.meta{color:#68738a;font-size:13px}
-table{width:100%;border-collapse:collapse;font-size:13px}
-th,td{padding:9px 12px;border-bottom:1px solid #e6e9f2;text-align:left;vertical-align:top}
-th{background:#f8fafc;color:#68738a;font-size:12px}
-.score{font-size:52px;font-weight:800;color:${color}}
-code{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;background:#eef0f7;padding:1px 6px;border-radius:5px;color:#4338ca}
-.logbox{background:#11182b;border-radius:12px;padding:16px;font-family:ui-monospace,Menlo,monospace;font-size:12px;line-height:1.9;max-height:420px;overflow-y:auto}
-.hdr{background:linear-gradient(135deg,#4f46e5,#7c3aed);color:#fff;border-radius:16px;padding:30px;margin-bottom:20px}
-.hdr h1{color:#fff}.hdr .meta{color:rgba(255,255,255,.8)}
-</style></head><body><div class="w">
-<div class="hdr"><h1>🧪 中转站模型通道测试报告</h1>
-<div class="meta">站点：${esc(c.base)} ｜ 模型：${esc(c.model)} ｜ 模式：${esc(S.mode||'')} ｜ 生成时间：${new Date().toLocaleString('zh-CN')} ｜ 耗时：${dur}</div></div>
-<div class="panel" style="text-align:center"><div class="score">${total}</div>
-<div class="meta" style="margin-bottom:10px">综合评分 / 100</div>
-<h2 style="margin-bottom:6px">${vt}</h2><p class="meta">${vp}</p></div>
-${dimRows?`<div class="panel"><h2>📊 各维度评分</h2><table><thead><tr><th style="width:200px">维度</th><th style="width:80px">得分 /10</th><th>分布</th></tr></thead><tbody>${dimRows}</tbody></table></div>`:''}
-${batchRows?`<div class="panel"><h2>📊 批量模型横向对比</h2><table><thead><tr><th>模型</th><th>身份</th><th>TTFB</th><th>流式</th><th>工具</th><th>JSON</th><th>视觉</th><th>缓存</th><th>并发</th><th>快评/10</th></tr></thead><tbody>${batchRows}</tbody></table></div>`:''}
-${intelRows?`<div class="panel"><h2>🕵️ 技术栈指纹 & 情报</h2>${intelRows}</div>`:''}
-<div class="panel"><h2>📋 测试明细（${S.details.length} 项）</h2><table><thead><tr><th style="width:200px">测试项</th><th>结果</th><th style="width:130px">判定</th></tr></thead><tbody>${detRows}</tbody></table></div>
-<div class="panel"><h2>🖥️ 完整运行日志</h2><div class="logbox">${logRows}</div></div>
-<p class="meta" style="text-align:center">由「中转站模型通道深度测试工具 v4」生成 · 评分仅供渠道质量评估参考</p>
-</div></body></html>`;
-  const blob=new Blob([html],{type:'text/html;charset=utf-8'});
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
+function reportFilename(model){
   const now=new Date(),pad=v=>String(v).padStart(2,'0');
   const stamp=`${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-  const modelPart=String(c.model||'batch').trim().replace(/[\\/:*?"<>|\u0000-\u001f]+/g,'-').replace(/\s+/g,' ').slice(0,80)||'未命名模型';
-  a.download=`测试报告-${modelPart}-${stamp}.html`;
-  a.click();URL.revokeObjectURL(a.href);
-  log('报告已下载: '+a.download,'ok');
+  const part=String(model||'未命名模型').trim().replace(/[\\/:*?"<>|\u0000-\u001f]+/g,'-').replace(/\s+/g,' ').slice(0,80)||'未命名模型';
+  return `测试报告-${part}-${stamp}.html`;
 }
+function generalReportRecord(outcome=S.outcome,error=S.error||''){
+  const c=resultCfg();
+  const checks=S.details.map(item=>({...item,name:item.name,result:item.result,status:item.status||(item.cls==='bad'?'failed':item.cls==='ok'?'passed':'inconclusive'),judge:item.judge,model:item.model||c.model||''}));
+  const state=outcome==='cancelled'?'cancelled':outcome==='failed'||checks.some(x=>x.status==='failed')?'failed':!checks.some(x=>x.status==='passed'||x.status==='failed')||checks.some(x=>x.status==='inconclusive')?'inconclusive':'passed';
+  return historySafe({client_id:S.historyId||('general-'+Date.now()),kind:'general',source:'general',title:'通用深度检测 · '+(c.models?.length?c.models.join('、'):c.model),model:c.models?.length?c.models.join(', '):c.model,base:c.base,prompt:'内置通用检测用例 · '+S.mode,status:state,created_at:S.createdAt?S.createdAt/1000:Date.now()/1000,duration_ms:S.tEnd&&S.t0?S.tEnd-S.t0:0,media:[],result:{config:{...c,request_format:c.requestFormat||c.format||'openai-chat'},mode:S.mode,total:S.total,scores:S.scores,checks,logs:S.logs,intelligence:S.intel.map(item=>{const template=document.createElement('template');template.innerHTML=String(item);return template.content.textContent||'';}),batch:S.batch,requests:S.requests,error:error||undefined ,gpt_evaluation:S.gptEvaluation||undefined}});
+}
+async function downloadReport(){
+  if(S.total==null&&!S.details.length&&!S.requests.length){alert('请先完成一次通用检测');return;}
+  const button=$('btnDl');button.disabled=true;button.textContent='正在生成报告…';
+  try{
+    const record=S.reportRecord||generalReportRecord(),name=reportFilename(record.model);
+    if(!window.WorkbenchReport?.renderExport)throw new Error('统一报告模块未加载，请刷新页面后重试。');
+    const html=await window.WorkbenchReport.renderExport([record],record.result.logs||[]);
+    const url=URL.createObjectURL(new Blob([html],{type:'text/html;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);log('统一报告已下载: '+name,'ok');
+  }catch(e){log('报告下载失败：'+e.message,'bad');alert('报告下载失败：'+e.message);}
+  finally{button.disabled=false;button.textContent='下载 HTML 报告';}
+}
+
 function copySummary(){
   if(S.total==null){alert('请先跑完测试');return;}
   const c=resultCfg();
@@ -1165,7 +1117,7 @@ function stopRun(){
 /* ================= 主流程 ================= */
 const MODE_STEPS={quick:8,std:20,full:45,gpt:3};
 const MODE_PLAN={
-  quick:{title:'快速检测 · 核心连通性',items:['模型列表与鉴权','身份自述','流式输出','协议与 JSON','延迟与吞吐'],note:'本模式不执行工具调用、多模态、缓存或 max_tokens 专项。'},
+  quick:{title:'快速检测 · 核心连通性',items:['模型列表与鉴权','身份自述','流式输出','基础工具调用','协议与 JSON','延迟与吞吐'],note:'本模式执行模型发现、基础工具调用、JSON 与流式；多模态、缓存及 max_tokens 请选标准或完整检测。'},
   std:{title:'标准检测 · 关键能力验收',items:['工具调用（标准）','多模态：图片与视频输入','缓存：cached_tokens ×3','max_tokens / 参数边界','协议与错误兼容','长上下文与并发'],note:'会执行截图顶部列出的多模态、工具调用、max_tokens、缓存与兼容性检查。'},
   full:{title:'完整检测 · 全量能力验收',items:['标准检测全部项目','参数边界与 JSON Schema','图片与视频输入','缓存命中与 usage','内容质量与安全探针','健壮性与并发压测'],note:'覆盖标准检测全部项目，并增加内容质量、健壮性和深度检索；耗时会明显增加。'},
   gpt:{title:'GPT 生成专项 · HTML / SVG 动画与 Token 账本',items:['只返回完整 HTML','SVG 绘制主体','动画机制','降智观察','usage 三项字段','total 加总一致性'],note:'请求会要求模型生成鹈鹕骑自行车的 SVG 2D 动画；仅分析源码与 usage，不执行生成的 HTML。'}
@@ -1180,7 +1132,7 @@ function updateModePlan(){
 async function runAll(){
   if(RUNNING)return;
   const c=readCfg();
-  if(!c.base||!c.key){alert('请填齐 Base URL 和 API Key');return;}
+  if(!c.base||(c.auth!=='none'&&!c.key)){alert('请填齐 Base URL 和 API Key，或选择不使用鉴权');return;}
   try{const target=new URL(c.base);if(!/^https?:$/.test(target.protocol)||target.username||target.password)throw new Error();}catch{alert('Base URL 请填写有效的 HTTP / HTTPS 通道地址');return;}
   const batchList=$('inBatch').value.split(/[,，\s]+/).map(s=>s.trim()).filter(Boolean);
   if(!batchList.length&&!c.model){alert('请填写模型名（或批量模型列表）');return;}
@@ -1188,8 +1140,10 @@ async function runAll(){
   if(mode==='gpt'&&batchList.length){alert('GPT 生成专项一次只测试一个模型，请取消批量选择后再开始。');return;}
   S.mode=batchList.length?'batch(quick)':mode;
   const has=d=>d.modes.includes(mode);
+  let endpoint;try{endpoint=window.GeneralFormat.endpoint(c.base,c.path,c.model,false,c.requestFormat);}catch(error){alert(error.message);return;}
   STOP=false;RUNNING=true;RUN_CONFIG=Object.freeze({...c});
-  S.config=Object.freeze({base:c.base,model:c.model,timeout:c.timeout,conc:c.conc,models:batchList});
+  S.config=Object.freeze({base:c.base,model:c.model,timeout:c.timeout,conc:c.conc,models:batchList,requestFormat:c.requestFormat,request_format:c.requestFormat,auth:c.auth,path:c.path,endpoint});
+  document.querySelectorAll('.general-config input,.general-config select,#generalPreview').forEach(el=>el.disabled=true);
   stepsDone=0;stepsTotal=batchList.length?batchList.length:MODE_STEPS[mode];
   $('btnRun').disabled=true;$('btnStop').disabled=false;$('btnDl').disabled=true;$('btnCopy').disabled=true;
   $('log').innerHTML='';$('detailBody').innerHTML='';
@@ -1198,7 +1152,7 @@ async function runAll(){
   $('batchSection').style.display='none';$('batchBody').innerHTML='';
   $('progressWrap').style.display='block';
   $('progressBar').firstElementChild.style.width='0%';
-  S.logs=[];S.details=[];S.intel=[];S.scores={};S.fp=new Set();S.batch=[];S.requests=[];S.total=null;S.gptEvaluation=null;S.historyId='general-'+(crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random());S.createdAt=Date.now();
+  S.logs=[];S.details=[];S.intel=[];S.scores={};S.fp=new Set();S.batch=[];S.requests=[];S.total=null;S.gptEvaluation=null;S.outcome=null;S.reportRecord=null;S.historyId='general-'+(crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random());S.createdAt=Date.now();
   S.t0=performance.now();S.tEnd=null;
 initCards();
   for(const d of DIMS)if(!has(d)||batchList.length)skipCard(d.id,batchList.length?'批量快评':(mode==='quick'?'快速模式':mode==='gpt'?'GPT 专项未含':'标准模式未含'));
@@ -1222,76 +1176,76 @@ initCards();
     let idn=null,st=null,ca=null,vi=null,videoIn=null,imgout=false,tools=false,dynTools=null,json=false,needles=[],re=null,er=null,cc=null,pa=null,ct=null,rb=null,ptools=null,jschema=null,gpt=null;
     if(mode==='gpt'){
       phase('GPT 专项 · HTML/SVG 生成与 Token 账本');
-      gpt=await tGptGeneration();setProgress('HTML/SVG + Token 一致性');
-      setCard('gpt',gpt.generationPass&&gpt.usageConsistent?10:gpt.generationPass||gpt.usageConsistent?6:2,
-        `源码结构 ${gpt.codeScore}/6，长度 ${gpt.sourceLength} 字符；token ${gpt.usageConsistent?'加总一致':gpt.usagePresent?'字段有但不一致':'字段缺失'}`,
-        gpt.generationPass&&gpt.usageConsistent?'<span class="tag pass">通过</span>':gpt.generationPass||gpt.usageConsistent?'<span class="tag warn">部分</span>':'<span class="tag fail">未通过</span>');
+      gpt=await runProbe('GPT 生成',()=>tGptGeneration());setProgress('HTML/SVG + Token 一致性');
+      setCard('gpt',gpt.generationPass&&(gpt.usageConsistent||gpt.usageDerived)?10:gpt.generationPass||gpt.usageConsistent?6:2,
+        `源码结构 ${gpt.codeScore}/6，长度 ${gpt.sourceLength} 字符；token ${gpt.usageDerived?'原生无独立total，加总核验不适用':gpt.usageConsistent?'加总一致':gpt.usagePresent?'字段有但不一致':'字段缺失'}`,
+        gpt.generationPass&&(gpt.usageConsistent||gpt.usageDerived)?'<span class="tag pass">已覆盖项通过</span>':gpt.generationPass||gpt.usageConsistent?'<span class="tag warn">部分</span>':'<span class="tag fail">未通过</span>');
       S.tEnd=performance.now();renderOverall();saveHistory();$('progressBar').firstElementChild.style.width='100%';$('progressPct').textContent='100%';$('progressText').textContent='完成';log(`✅ GPT 专项完成，总耗时 ${((S.tEnd-S.t0)/1000).toFixed(0)}s，综合评分 ${S.total}/100`,'ok');return;
     }
     phase('阶段 1 · 生态与身份');
-    await tModels();setProgress('模型列表');
-    idn=await tIdentity();setProgress('身份自述');
+    await runProbe('模型列表',()=>tModels());setProgress('模型列表');
+    idn=await runProbe('身份自述',()=>tIdentity());setProgress('身份自述');
     phase('阶段 2 · 协议与流式');
-    st=await tStream();setProgress('流式+假流式检测');
-    tools=await tTools();setProgress('Function Calling');
-    if(has(DIMS[12])&&/kimi|k3/i.test(c.model)){dynTools=await tDynamicTools();setProgress('动态工具加载');}
-    json=await tJson();setProgress('JSON Mode');
+    st=await runProbe('流式输出',()=>tStream());setProgress('流式+假流式检测');
+    tools=await runProbe('工具调用',()=>tTools());setProgress('Function Calling');
+    if(has(DIMS[12])&&/kimi|k3/i.test(c.model)){dynTools=await runProbe('动态工具加载',()=>tDynamicTools());setProgress('动态工具加载');}
+    json=await runProbe('JSON Mode',()=>tJson());setProgress('JSON Mode');
     if(has(DIMS[1])){
-      ptools=await tParallelTools();
-      jschema=await tJsonSchema();setProgress('并行工具+JSON Schema');
+      ptools=await runProbe('并行工具',()=>tParallelTools());
+      jschema=await runProbe('JSON Schema',()=>tJsonSchema());setProgress('并行工具+JSON Schema');
     }
     if(has(DIMS[2])){
       phase('阶段 3 · 多模态');
-      vi=await tVision();setProgress('视觉（3色+内容图）');
-      videoIn=await tVideoInput();setProgress('视频输入（video_url）');
-      imgout=await tImgOut();setProgress('图片输出');
+      vi=await runProbe('图像输入',()=>tVision());setProgress('视觉（3色+内容图）');
+      videoIn=await runProbe('视频输入',()=>tVideoInput());setProgress('视频输入（video_url）');
+      imgout=await runProbe('图片输出',()=>tImgOut());setProgress('图片输出');
     }
     if(has(DIMS[3])){
       phase('阶段 4 · 上下文缓存');
-      ca=await tCache();setProgress('缓存 ×3');
+      ca=await runProbe('缓存',()=>tCache());setProgress('缓存 ×3');
     }
     if(has(DIMS[5])){
       phase('阶段 5 · 长上下文');
-      needles.push(await tNeedle(600,'~9.6k'));setProgress('捞针 9.6k');
-      if(has(DIMS[1])){needles.push(await tNeedle(1600,'~30k'));setProgress('捞针 30k');}
+      needles.push(await runProbe('长上下文 9.6k',()=>tNeedle(600,'~9.6k')));setProgress('捞针 9.6k');
+      if(has(DIMS[1])){needles.push(await runProbe('长上下文 30k',()=>tNeedle(1600,'~30k')));setProgress('捞针 30k');}
     }
-    if(has(DIMS[6])){phase('阶段 6 · 推理与数学');re=await tReason();setProgress('推理 ×3');}
-    if(has(DIMS[1])){phase('阶段 7 · 参数支持度');pa=await tParams();setProgress('参数 ×7');}
-    if(has(DIMS[7])){phase('阶段 8 · 内容与语言');ct=await tContent();setProgress('内容 ×7');}
-    if(has(DIMS[10])){phase('阶段 9 · 错误处理');er=await tErrors();setProgress('错误处理');}
-    if(has(DIMS[11])){phase('阶段 10 · 健壮性与降智检测');rb=await tRobust(idn);setProgress('健壮性 ×6');}
-    if(has(DIMS[9])){phase('阶段 11 · 并发压测');cc=await tConcurrency();setProgress(`并发 ×${c.conc}`);}
+    if(has(DIMS[6])){phase('阶段 6 · 推理与数学');re=await runProbe('推理',()=>tReason());setProgress('推理 ×3');}
+    if(has(DIMS[1])){phase('阶段 7 · 参数支持度');pa=await runProbe('参数',()=>tParams());setProgress('参数 ×7');}
+    if(has(DIMS[7])){phase('阶段 8 · 内容与语言');ct=await runProbe('内容',()=>tContent());setProgress('内容 ×7');}
+    if(has(DIMS[10])){phase('阶段 9 · 错误处理');er=await runProbe('错误处理',()=>tErrors());setProgress('错误处理');}
+    if(has(DIMS[11])){phase('阶段 10 · 健壮性与降智检测');rb=await runProbe('健壮性',()=>tRobust(idn));setProgress('健壮性 ×6');}
+    if(has(DIMS[9])){phase('阶段 11 · 并发压测');cc=await runProbe('并发',()=>tConcurrency());setProgress(`并发 ×${c.conc}`);}
 
     /* ===== 打分 ===== */
     phase('打分汇总');
     flushFp();
-    setCard('proto',(st.ok?2.5:0)+(st.fake?-0.5:0)+(tools?3:0)+(json?2.2:0)+(ptools==null?0:ptools?0.8:0)+(jschema==null?0:jschema?0.7:0),
-      `流式 ${st.ok?(st.fake?'⚠️假流式':'✅'):'❌'} / Function Calling ${tools?'✅':'❌'} / JSON ${json?'✅':'❌'}${ptools!=null?` / 并行工具 ${ptools?'✅':'⚠️'}`:''}${jschema!=null?` / JSON Schema ${jschema?'✅':'⚠️'}`:''}`,
-      (st.ok&&!st.fake&&tools&&json)?'<span class="tag pass">通过</span>':'<span class="tag warn">部分</span>');
+    setCard('proto',10*(((st?.ok?2.5:0)+(st?.fake?-0.5:0)+(tools?3:0)+(json?2.2:0)+(ptools?0.8:0)+(jschema?0.7:0))/((st==null?0:2.5)+(tools==null?0:3)+(json==null?0:2.2)+(ptools==null?0:.8)+(jschema==null?0:.7)||1)),
+      `流式 ${st?.ok?(st?.fake?'⚠️假流式':'✅'):'❌'} / Function Calling ${tools===null?'— 不适用':tools?'✅':'❌'} / JSON ${json===null?'— 不适用':json?'✅':'❌'}${ptools!=null?` / 并行工具 ${ptools?'✅':'⚠️'}`:''}${jschema!=null?` / JSON Schema ${jschema?'✅':'⚠️'}`:''}`,
+      (st?.ok&&!st?.fake&&tools&&json)?'<span class="tag pass">通过</span>':'<span class="tag warn">部分</span>');
     if(dynTools){
       const dscore=dynTools.supported===dynTools.total?10:dynTools.supported>0?6:dynTools.unknown?4:2;
       setCard('tools',dscore,`动态工具 ${dynTools.supported}/${dynTools.total}；${dynTools.unknown?dynTools.unknown+' 项返回未声明支持。':'全部探针有 tool_calls。'}<br>标准工具调用与动态 system tools 分开记录，失败时保留 HTTP 与响应证据。`,dynTools.supported===dynTools.total?'<span class="tag pass">完整</span>':'<span class="tag warn">部分</span>');
     }else setCard('tools',tools?8:2,`标准 Function Calling ${tools?'✅ 已触发':'❌ 未触发'}；动态 system tools 仅对 Kimi K3 兼容模型执行专项探针。`,tools?'<span class="tag pass">通过</span>':'<span class="tag warn">待确认</span>');
     if(pa){
       const items=[pa.temp0,pa.stop,pa.maxtok,pa.maxOne,pa.n2,pa.pen,pa.seed,pa.logprobs];
-      const n=items.filter(Boolean).length;
-      setCard('params',Math.min(9,n*1.4),
-        `temp=0复现 ${pa.temp0?'✅':'⚠️'} / stop ${pa.stop?'✅':'⚠️'} / max_tokens截断 ${pa.maxtok?'✅':'⚠️'} / max_tokens=1 ${pa.maxOne?'✅':'⚠️'} / n=2 ${pa.n2?'✅':'⚠️'} / penalty ${pa.pen?'✅':'⚠️'} / seed ${pa.seed?'✅':'⚠️'} / logprobs ${pa.logprobs?'✅':'⚠️'}<br>被 400 拒绝 = 网关未透传；temp=0 不一致 = 站方可能改写参数`,
-        n>=5?'<span class="tag pass">透传好</span>':'<span class="tag warn">有阉割</span>');
+      const n=items.filter(Boolean).length,covered=items.filter(x=>x!==null&&x!==undefined).length;
+      setCard('params',covered?10*n/covered:0,
+        `temp=0复现 ${pa.temp0?'✅':'⚠️'} / stop ${pa.stop===null?'—':pa.stop?'✅':'⚠️'} / max_tokens截断 ${pa.maxtok?'✅':'⚠️'} / max_tokens=1 ${pa.maxOne?'✅':'⚠️'} / n=2 ${pa.n2===null?'—':pa.n2?'✅':'⚠️'} / penalty ${pa.pen===null?'—':pa.pen?'✅':'⚠️'} / seed ${pa.seed===null?'—':pa.seed?'✅':'⚠️'} / logprobs ${pa.logprobs===null?'—':pa.logprobs?'✅':'⚠️'}<br>400 需结合原始错误区分模型/参数限制；temp=0 也不保证输出逐字一致`,
+        n>=5?'<span class="tag pass">透传好</span>':'<span class="tag warn">需复核</span>');
     }
     if(vi){
       const vScore=(vi.hits===3?(vi.cHit?9.5:8):vi.hits>0?3+vi.hits*1.5:2.5)+(videoIn?.accepted?0.5:0);
       setCard('vision',Math.min(10,vScore+(imgout?0.5:0)),
-        `三色 ${vi.hits}/3 + 内容图 ${vi.cHit?'✅ 真看懂':'❌'}：${esc(vi.notes)}。视频输入 ${videoIn?.accepted?'✅':videoIn?.unsupported?'⚠️ 未声明支持':'❌'}。图片输出 ${imgout?'✅':'❌'}。<br>注：视频未声明支持按兼容性提示记录，不把文本模型误判为故障。`,
+        `三色 ${vi.hits}/3 + 内容图 ${vi.cHit?'✅ 真看懂':'❌'}：${esc(vi.notes)}。视频输入 ${videoIn===null?'— 格式不适用':videoIn?.accepted?'✅':videoIn?.unsupported?'⚠️ 未声明支持':'❌'}。图片输出 ${imgout?'✅':'❌'}。<br>注：视频未声明支持按兼容性提示记录，不把文本模型误判为故障。`,
         (vi.hits===3&&vi.cHit)?'<span class="tag pass">真视觉</span>':vi.hits>0?'<span class="tag warn">部分</span>':'<span class="tag fail">不支持</span>');
     }
-    if(ca)setCard('cache',ca.hit?8.5:ca.reported?4:2,
+    if(ca)setCard('cache',ca.hit?8.5:ca.fails?2:4,
       ca.hit?`缓存读取 ${ca.cached.map(v=>v??'—').join(' → ')}；创建 ${ca.created?.map(v=>v??'—').join(' / ')||'—'}，缓存生效`:`缓存读取 ${ca.cached.map(v=>v??'—').join(' → ')}${ca.reported?'（已上报字段但未命中）':''}${ca.fails?`（另 ${ca.fails} 次请求失败）`:''}。若官方支持缓存则需核对站方是否透传/配置`,
-      ca.hit?'<span class="tag pass">通过</span>':ca.reported?'<span class="tag warn">已上报未命中</span>':'<span class="tag fail">无缓存</span>');
-    const authScore=idn.match===false?4:idn.match===null?6:8.5;
+      ca.hit?'<span class="tag pass">通过</span>':ca.reported?'<span class="tag warn">已上报未命中</span>':'<span class="tag warn">未观测</span>');
+    const authScore=idn?.match===false?4:idn?.match===null?6:8.5;
     setCard('auth',authScore,
-      `${idn.match===false?'<b>自述与模型名品牌不符，警惕套壳</b>':idn.match===null?'品牌未识别，人工核对':'自述与模型品牌一致'}；思维链 ${idn.hasReasoning?'存在':'缺失'}${idn.retModel&&idn.retModel!==c.model?`；上游命名 <code>${esc(idn.retModel)}</code>`:''}`,
-      idn.match===false?'<span class="tag fail">存疑</span>':'<span class="tag pass">可信</span>');
+      `${idn?.match===false?'<b>自述与模型名品牌不符，警惕套壳</b>':idn?.match===null?'品牌未识别，人工核对':'自述与模型品牌一致'}；思维链 ${idn?.hasReasoning?'存在':'缺失'}${idn?.retModel&&idn?.retModel!==c.model?`；上游命名 <code>${esc(idn?.retModel)}</code>`:''}`,
+      idn?.match===false?'<span class="tag fail">存疑</span>':'<span class="tag warn">仅自述</span>');
     if(needles.length){
       const allHit=needles.every(Boolean),firstHit=needles[0];
       setCard('longctx',allHit?(needles.length>1?9.5:9):firstHit?6:2,
@@ -1308,9 +1262,9 @@ initCards();
         `严格指令 ${ct.instruct?'✅':'⚠️'} / 代码 ${ct.code?'✅':'❌'} / 幻觉抵抗 ${ct.halluc?'✅':'❌'} / 安全拒答 ${ct.safety?'✅':'❌'} / 中文 ${ct.chinese?'✅':'⚠️'} / 翻译 ${ct.trans?'✅':'⚠️'} / 摘要 ${ct.summary?'✅':'⚠️'}<br>幻觉/指令两项失守是"降智"典型信号`,
         n>=6?'<span class="tag pass">质量好</span>':n>=4?'<span class="tag warn">中等</span>':'<span class="tag fail">疑似降智</span>');
     }
-    setCard('latency',scoreLatency(st.ttfb,rb?.latAvg),
-      `TTFB ≈ ${st.ttfb?st.ttfb.toFixed(1)+'s':'N/A'}${idn.tps?`；生成速度 ${idn.tps.toFixed(1)} tok/s`:''}${cc?.aggTps?`；并发聚合 ${cc.aggTps.toFixed(1)} tok/s`:''}${rb?.latAvg?`；串行 avg ${rb.latAvg.toFixed(1)}s`:''}。TTFB ≤2s 优秀 / ≤10s 可用 / >20s 实时不可用`,
-      (st.ttfb??99)<=10?'<span class="tag pass">良好</span>':(st.ttfb??99)<=20?'<span class="tag warn">偏高</span>':'<span class="tag fail">极慢</span>');
+    setCard('latency',scoreLatency(st?.ttfb,rb?.latAvg),
+      `TTFB ≈ ${st?.ttfb?st?.ttfb.toFixed(1)+'s':'N/A'}${idn?.tps?`；生成速度 ${idn?.tps.toFixed(1)} tok/s`:''}${cc?.aggTps?`；并发聚合 ${cc.aggTps.toFixed(1)} tok/s`:''}${rb?.latAvg?`；串行 avg ${rb.latAvg.toFixed(1)}s`:''}。TTFB ≤2s 优秀 / ≤10s 可用 / >20s 实时不可用`,
+      (st?.ttfb??99)<=10?'<span class="tag pass">良好</span>':(st?.ttfb??99)<=20?'<span class="tag warn">偏高</span>':'<span class="tag fail">极慢</span>');
     if(cc)setCard('conc',cc.okN*(10/cc.n),`${cc.n} 路并发有效响应 ${cc.okN}/${cc.n}${cc.has429?'，出现 429':''}，聚合吞吐 ${cc.aggTps.toFixed(1)} tok/s`,
       cc.okN===cc.n?'<span class="tag pass">通过</span>':cc.okN>=Math.ceil(cc.n*0.6)?'<span class="tag warn">吃紧</span>':'<span class="tag fail">并发即崩</span>');
     if(er)setCard('err',(er.keyOk?5:2)+(er.modelOk?5:2),
@@ -1340,14 +1294,14 @@ initCards();
         renderOverall();log('已按已完成部分出分，可下载部分报告','mid');
       }
     }else{
-      log('流程中断: '+e.message+'（Failed to fetch = 目标站未开 CORS）','bad');
+      log('流程中断: '+e.message+'；请查看请求证据中的实际接口与错误。','bad');
       if(Object.keys(S.scores).length)renderOverall();
     }
   }finally{
     for(const ctrl of ACTIVE_CONTROLLERS)ctrl.abort();
     ACTIVE_CONTROLLERS.clear();
-    try{publishGeneralHistory(historyOutcome,historyError);}catch{log('历史记录暂未保存，请保留当前报告。','mid');}
-    $('btnRun').disabled=false;$('btnStop').disabled=true;MODEL_OVERRIDE=null;RUN_CONFIG=null;RUNNING=false;
+    S.outcome=historyOutcome;S.error=historyError;if(S.details.length||S.requests.length)$('btnDl').disabled=false;try{S.reportRecord=generalReportRecord(historyOutcome,historyError);publishGeneralHistory(historyOutcome,historyError);}catch{log('历史记录暂未保存，请保留当前报告。','mid');}
+    $('btnRun').disabled=false;$('btnStop').disabled=true;document.querySelectorAll('.general-config input,.general-config select,#generalPreview').forEach(el=>el.disabled=false);MODEL_OVERRIDE=null;RUN_CONFIG=null;RUNNING=false;
   }
 }
 
@@ -1361,17 +1315,29 @@ document.querySelectorAll('.mode-card').forEach(el=>{
   el.querySelector('input')?.addEventListener('change',updateModePlan);
 });
 /* 记住输入（Key 除外，安全考虑不持久化） */
-['inBase','inModel','inTimeout','inConc','inBatch'].forEach(id=>{
+['inBase','inModel','inTimeout','inConc','inBatch','inFormat','inPath','inAuth'].forEach(id=>{
   const v=storage.get('mct_'+id);if(v)$(id).value=v;
   $(id).addEventListener('input',()=>storage.set('mct_'+id,$(id).value));
 });
 $('loadGeneralModels').addEventListener('click',loadGeneralModels);
-for(const id of ['inBase','inKey'])$(id).addEventListener('input',()=>{
+function updateGeneralFormat(){
+  const c=readCfg();$('generalRequestPreview').hidden=true;
+  const names={'openai-chat':'OpenAI Chat Completions','openai-responses':'OpenAI Responses',anthropic:'Anthropic Messages',gemini:'Gemini GenerateContent'};
+  $('generalFormatHint').textContent=names[c.requestFormat]+' · 工具、图像、流式与 Token 字段按所选格式发送；不适用项目单独标注。';
+}
+$('inFormat').addEventListener('change',()=>{$('inPath').value='';storage.set('mct_inPath','');updateGeneralFormat();});
+$('inAuth').addEventListener('change',updateGeneralFormat);
+$('generalPreview').addEventListener('click',()=>{
+  const box=$('generalRequestPreview');box.hidden=false;
+  try{const c=readCfg(),spec=window.GeneralFormat.build({model:c.model||'your-model',messages:Q('hi'),max_tokens:300,stream:false},c);box.textContent=JSON.stringify(historySafe({url:spec.url,headers:spec.headers,body:spec.preview||spec.body}),null,2);}catch(e){box.textContent=e.message;}
+});
+for(const id of ['inBase','inKey','inFormat','inAuth'])$(id).addEventListener('input',()=>{
   generalModelFetchEpoch++; window.ModelDiscovery.showDetails($('generalModelHint'),null); if(generalModelController)generalModelController.abort(); generalModelCatalog=[]; generalSelection?.clear({emit:false}); generalSelection?.setOptions([],{reconcile:false}); $('generalModelHint').textContent='渠道配置已变化，请重新获取模型列表。'; $('loadGeneralModels').disabled=false; $('loadGeneralModels').textContent='获取模型';
 });
 generalSelection=window.ModelMultiselect?.attach($('inModel'),{batchInput:$('inBatch'),label:'渠道模型',ids:{wrapper:'generalModelPicker',menu:'generalModelMenu',search:'generalModelSearch',list:'generalModelList',status:'generalModelStatus',toggle:'generalModelToggle',clear:'generalModelClear',all:'generalModelShowAll'},onChange:(ids)=>{ $('inBatch').value=ids.length>1?ids.join(','):''; $('generalModelHint').textContent=ids.length>1?`已选 ${ids.length} 个模型，将逐个运行快速检测。`:'已选择模型，可开始测试。'; }});
 initCards();
 updateModePlan();
+updateGeneralFormat();
 /* The host page exposes GPT as a peer suite beside CCMax and KVV.  Keep the
    reusable GPT implementation here, but select it automatically when that
    top-level suite is opened. */

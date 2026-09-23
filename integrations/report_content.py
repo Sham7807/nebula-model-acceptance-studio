@@ -700,11 +700,9 @@ def _report_modules(checks, result):
 def _report_score(checks, result):
     """Return a transparent, dimensioned score for the HTML report.
 
-    Scores are weighted equally between dimensions and are intentionally
-    conservative: skipped/not-covered checks contribute no points, while an
-    inconclusive check contributes 0.4 of a pass to distinguish missing
-    evidence from a confirmed failure.  The raw counts remain alongside the
-    score so a reviewer can audit every number.
+    Scores use observed checks only: passed=1, inconclusive=0.4, failed=0.
+    Skipped/not-covered/cancelled/inapplicable checks stay in coverage counts
+    and do not participate in the score denominator.
     """
     dimensions = []
     enabled = result.get("enabled_modules")
@@ -722,13 +720,11 @@ def _report_score(checks, result):
         # Avoid double counting local-only helper checks in a capability score.
         matched = [check for check in matched if not check.get("local_only") and check.get('applicable') is not False]
         counts = _counts(matched)
-        # Evidence gaps (skipped, not-covered, cancelled, or unknown) remain
-        # visible in counts but do not make a dimension look covered or pass.
-        # When mixed with observed checks they stay in the denominator as zero
-        # points, preventing an incomplete run from inflating its score.
+        # Missing and inapplicable checks remain separate from observed
+        # performance. Coverage and status expose incomplete test scopes.
         observed = [c for c in matched if c.get("status") in ("passed", "failed", "inconclusive")]
-        covered = len(matched) if observed else 0
-        points = sum(1.0 if c.get("status") == "passed" else 0.4 if c.get("status") == "inconclusive" else 0.0 for c in matched)
+        covered = len(observed)
+        points = sum(1.0 if c.get("status") == "passed" else 0.4 if c.get("status") == "inconclusive" else 0.0 for c in observed)
         score = round(points / covered * 100) if covered else 0
         if not covered:
             status = "not_covered"
@@ -759,7 +755,7 @@ def _report_score(checks, result):
             "recommendations": recommendations,
             "modules": modules["modules"], "weighted_total": modules["weighted_total"],
             "weight_covered": modules["weight_covered"], "weight_total": modules["weight_total"],
-            "method": "模块按权重计分；通过=100%，无法判定=40%，失败/跳过/未覆盖=0%。模块未覆盖时不计入加权总分；技术维度仍保留供审计。"}
+            "method": "模块按权重计分；已观察项目通过=100%，无法判定=40%，失败=0%。跳过、未覆盖、取消和不适用项不计入分母，覆盖范围单独统计；无覆盖模块不参与加权总分。"}
 
 
 def build_report_data(result):

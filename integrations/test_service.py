@@ -1,6 +1,8 @@
 """Offline integration checks. All API traffic stays on an ephemeral loopback server."""
 import json
 import io
+import select
+import socket
 import zipfile
 import tempfile
 import threading
@@ -39,6 +41,7 @@ class ServiceTests(unittest.TestCase):
                     with httpx.Client(trust_env=False) as client:
                         payload={'base':'https://relay.test/v1','key':'fixture-secret','auth':'bearer'}
                         self.assertEqual(client.post(url+'/api/models',json=payload).status_code,401)
+                        self.assertEqual(client.post(url+'/api/proxy',json={'url':'https://relay.test/v1/chat/completions','stream':True}).status_code,401)
                         self.assertEqual(client.post(url+'/api/auth/login',json={'username':'fixture','password':'fixture-password'}).status_code,200)
                         token=client.get(url+'/api/session').json()['token']
                         headers={'X-Workbench-Token':token}
@@ -124,6 +127,120 @@ class ServiceTests(unittest.TestCase):
                 self.assertIn(b'https://image.test/a.png',Provider.requests[1][1])
                 self.assertIn(b'https://image.test/b.png',Provider.requests[1][1])
         finally: provider.shutdown(); provider.server_close(); service.shutdown(); service.server_close()
+
+    def test_proxy_stream_forwards_first_event_and_status_without_envelope(self):
+        class Provider(BaseHTTPRequestHandler):
+            requests=[]
+            release=threading.Event()
+            def log_message(self,*args):pass
+            def do_POST(self):
+                body=self.rfile.read(int(self.headers.get('Content-Length','0')))
+                type(self).requests.append((self.path,body))
+                if self.path=='/reject':
+                    payload=b'{"error":{"message":"quota exhausted"}}'
+                    self.send_response(429);self.send_header('Content-Type','application/json');self.send_header('Retry-After','7');self.send_header('Content-Length',str(len(payload)));self.end_headers();self.wfile.write(payload);return
+                self.send_response(200);self.send_header('Content-Type','text/event-stream; charset=utf-8');self.send_header('X-Request-ID','stream-fixture');self.send_header('Set-Cookie','upstream-secret=never-forward');self.end_headers()
+                self.wfile.write(b'data: {"delta":"first"}\n\n');self.wfile.flush()
+                if self.release.wait(4):self.wfile.write(b'data: [DONE]\n\n');self.wfile.flush()
+        provider=ThreadingHTTPServer(('127.0.0.1',0),Provider);threading.Thread(target=provider.serve_forever,daemon=True).start()
+        service=ThreadingHTTPServer(('127.0.0.1',0),server.Handler);threading.Thread(target=service.serve_forever,daemon=True).start()
+        try:
+            with patch.dict('os.environ',{'WORKBENCH_OUTBOUND_PROXY':''}),httpx.Client(trust_env=False,timeout=2) as client:
+                base=f'http://127.0.0.1:{service.server_port}';target=f'http://127.0.0.1:{provider.server_port}'
+                headers={'X-Workbench-Token':client.get(base+'/api/session').json()['token']}
+                payload={'url':target+'/stream','stream':True,'body':'{"stream":true}','headers':{'Content-Type':'application/json'}}
+                self.assertEqual(client.post(base+'/api/proxy',json=payload).status_code,403)
+                self.assertEqual(client.post(base+'/api/proxy',headers={**headers,'Origin':'https://untrusted.test'},json=payload).status_code,403)
+                for invalid in [{**payload,'url':'file:///etc/hosts'},{**payload,'stream':'true'}]:
+                    self.assertEqual(client.post(base+'/api/proxy',headers=headers,json=invalid).status_code,400)
+                self.assertEqual(Provider.requests,[],'guard and validation must run before upstream submission')
+                with client.stream('POST',base+'/api/proxy',headers=headers,json=payload) as response:
+                    self.assertEqual(response.status_code,200)
+                    self.assertIn('text/event-stream',response.headers['content-type'])
+                    self.assertEqual(response.headers['x-request-id'],'stream-fixture')
+                    self.assertEqual(response.headers['x-accel-buffering'],'no')
+                    self.assertNotIn('set-cookie',response.headers)
+                    self.assertNotIn('content-length',response.headers)
+                    chunks=response.iter_bytes();first=next(chunks)
+                    self.assertEqual(first,b'data: {"delta":"first"}\n\n')
+                    self.assertFalse(Provider.release.is_set(),'first event arrives before the upstream finishes')
+                    Provider.release.set()
+                    self.assertEqual(b''.join(chunks),b'data: [DONE]\n\n')
+                self.assertEqual(Provider.requests,[('/stream',b'{"stream":true}')],'exactly one upstream POST')
+                response=client.post(base+'/api/proxy',headers=headers,json={**payload,'url':target+'/reject'})
+                self.assertEqual(response.status_code,429)
+                self.assertEqual(response.headers['retry-after'],'7')
+                self.assertEqual(response.json(),{'error':{'message':'quota exhausted'}})
+                self.assertEqual(len(Provider.requests),2)
+                with patch.dict('os.environ',{'WORKBENCH_OUTBOUND_PROXY':'invalid://credential@bad'}):
+                    response=client.post(base+'/api/proxy',headers=headers,json=payload)
+                self.assertEqual(response.status_code,400)
+                self.assertIn('出站代理配置无效',response.json()['error'])
+                self.assertNotIn('credential',response.text)
+                self.assertEqual(len(Provider.requests),2)
+                for exc,label in [(httpx.ReadTimeout('fixture-secret'),'超时'),(httpx.ConnectError('fixture-secret'),'无法连接')]:
+                    with patch('httpx.Client',side_effect=exc):
+                        response=client.post(base+'/api/proxy',headers=headers,json=payload)
+                    self.assertEqual(response.status_code,400)
+                    self.assertIn(label,response.json()['error'])
+                    self.assertNotIn('fixture-secret',response.text)
+                self.assertEqual(len(Provider.requests),2,'connection errors must not trigger retries')
+                with patch.dict('os.environ',{'WORKBENCH_OUTBOUND_PROXY':target}):
+                    response=client.post(base+'/api/proxy',headers=headers,json={**payload,'url':'http://upstream.invalid/v1/chat/completions'})
+                self.assertEqual(response.status_code,200)
+                self.assertIn('data: [DONE]',response.text)
+                self.assertEqual(Provider.requests[-1][0],'http://upstream.invalid/v1/chat/completions','explicit outbound proxy is used')
+                self.assertEqual(len(Provider.requests),3)
+        finally:
+            Provider.release.set();provider.shutdown();provider.server_close();service.shutdown();service.server_close()
+
+    def test_proxy_stream_cancel_closes_idle_upstream_without_retry(self):
+        class Provider(BaseHTTPRequestHandler):
+            count=0
+            disconnected=threading.Event()
+            def log_message(self,*args):pass
+            def do_POST(self):
+                type(self).count+=1;self.rfile.read(int(self.headers.get('Content-Length','0')))
+                self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
+                self.wfile.write(b'data: first\n\n');self.wfile.flush()
+                deadline=time.monotonic()+4
+                while time.monotonic()<deadline:
+                    ready,_,_=select.select([self.connection],[],[],.1)
+                    if ready and self.connection.recv(1,socket.MSG_PEEK)==b'':
+                        self.disconnected.set();return
+        provider=ThreadingHTTPServer(('127.0.0.1',0),Provider);threading.Thread(target=provider.serve_forever,daemon=True).start()
+        service=ThreadingHTTPServer(('127.0.0.1',0),server.Handler);threading.Thread(target=service.serve_forever,daemon=True).start()
+        try:
+            with patch.dict('os.environ',{'WORKBENCH_OUTBOUND_PROXY':''}),httpx.Client(trust_env=False,timeout=2) as client:
+                base=f'http://127.0.0.1:{service.server_port}';headers={'X-Workbench-Token':client.get(base+'/api/session').json()['token']}
+                with client.stream('POST',base+'/api/proxy',headers=headers,json={'url':f'http://127.0.0.1:{provider.server_port}/stream','stream':True,'timeout':5}) as response:
+                    self.assertEqual(next(response.iter_bytes()),b'data: first\n\n')
+                self.assertTrue(Provider.disconnected.wait(2),'aborted browser fetch closes the idle upstream')
+                self.assertEqual(Provider.count,1)
+        finally:provider.shutdown();provider.server_close();service.shutdown();service.server_close()
+
+    def test_proxy_stream_interruption_is_not_reported_as_successful_eof(self):
+        class Provider(BaseHTTPRequestHandler):
+            count=0
+            def log_message(self,*args):pass
+            def do_POST(self):
+                type(self).count+=1;self.rfile.read(int(self.headers.get('Content-Length','0')))
+                self.send_response(200);self.send_header('Content-Type','text/event-stream');self.send_header('Transfer-Encoding','chunked');self.end_headers()
+                chunk=b'data: partial\n\n';self.wfile.write(('%X\r\n'%len(chunk)).encode()+chunk+b'\r\n');self.wfile.flush()
+                # Deliberately omit the terminating chunk, as a provider crash would.
+                self.close_connection=True
+        provider=ThreadingHTTPServer(('127.0.0.1',0),Provider);threading.Thread(target=provider.serve_forever,daemon=True).start()
+        service=ThreadingHTTPServer(('127.0.0.1',0),server.Handler);threading.Thread(target=service.serve_forever,daemon=True).start()
+        try:
+            with patch.dict('os.environ',{'WORKBENCH_OUTBOUND_PROXY':''}),httpx.Client(trust_env=False,timeout=2) as client:
+                base=f'http://127.0.0.1:{service.server_port}';headers={'X-Workbench-Token':client.get(base+'/api/session').json()['token']}
+                received=[]
+                with self.assertRaises(httpx.RemoteProtocolError):
+                    with client.stream('POST',base+'/api/proxy',headers=headers,json={'url':f'http://127.0.0.1:{provider.server_port}/stream','stream':True}) as response:
+                        for chunk in response.iter_bytes():received.append(chunk)
+                self.assertEqual(b''.join(received),b'data: partial\n\n','no appended JSON or replacement response')
+                self.assertEqual(Provider.count,1)
+        finally:provider.shutdown();provider.server_close();service.shutdown();service.server_close()
 
     def test_normalization_validation(self):
         self.assertEqual(server.normalized_base('https://relay.test/prefix/'),'https://relay.test/prefix/v1')
