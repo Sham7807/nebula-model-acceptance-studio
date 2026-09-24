@@ -249,6 +249,35 @@ test('zero observed cache reuse is an amber observation and remains distinct fro
   assert.doesNotMatch(html,/>复用证据待补齐<\/span>/);
   assert.match(html,/<strong>100<\/strong>/); // measured reuse is not the assertion score
 });
+test('positive tiny cache reuse is shown instead of being rounded to zero',async()=>{
+  const r=summaryRecord([check('warm',['cache'],'passed',{parameters:{round:'warm_1'},request_ids:['warm']})],[{id:'warm',status:200,response:{usage:{input_tokens:0,cache_read_input_tokens:22,cache_creation_input_tokens:17475}}}]);
+  const html=overview(await harness().WorkbenchReport.render([r]));
+  assert.match(html,/缓存 Token 命中率 0\.125736%（读取 22 \/ 完整输入 17,497 Token）/);
+  assert.doesNotMatch(html,/本轮未观察到复用/);
+  assert.doesNotMatch(html,/缓存 Token 命中率 0%/);
+  const tiny=summaryRecord([check('warm',['cache'],'passed',{parameters:{round:'warm'},request_ids:['warm']})],[{id:'warm',status:200,response:{usage:{prompt_tokens:1000000000,prompt_tokens_details:{cached_tokens:1}}}}]);
+  assert.match(overview(await harness().WorkbenchReport.render([tiny])),/缓存 Token 命中率 &lt;0\.01%/);
+});
+test('usage aliases preserve zero and positive cache reads across providers',async()=>{
+  const make=usage=>summaryRecord([check('warm',['cache'],'passed',{parameters:{round:'warm'},request_ids:['warm']})],[{id:'warm',status:200,response:usage}]);
+  assert.match(overview(await harness().WorkbenchReport.render([make({usageMetadata:{promptTokenCount:100,cachedContentTokenCount:80}})])),/缓存 Token 命中率 80%/);
+  assert.match(overview(await harness().WorkbenchReport.render([make({usage:{prompt_tokens:100,input_tokens_details:{cached_tokens:0}}})])),/缓存 Token 命中率 0%/);
+  assert.match(overview(await harness().WorkbenchReport.render([summaryRecord([check('warm',['cache'],'passed',{parameters:{round:'warm'},request_ids:['warm']})],[{id:'warm',status:200,response:{body:JSON.stringify({usage:{prompt_tokens:100,prompt_tokens_details:{cached_tokens:80}}})}}])])),/缓存 Token 命中率 80%/);
+});
+test('native Claude cache observations are read when no request rows are linked',async()=>{
+  const r=summaryRecord([
+    {id:'claude-cache',name:'大 Token 缓存',status:'inconclusive',dimensions:['cache'],cache_observations:[
+      {sample_id:'cache-1',input_tokens:12010,cache_read_input_tokens:0,cache_creation_input_tokens:12000},
+      {sample_id:'cache-2',input_tokens:12010,cache_read_input_tokens:12000,cache_creation_input_tokens:0},
+      {sample_id:'cache-3',input_tokens:12010,cache_read_input_tokens:12000,cache_creation_input_tokens:0},
+      {sample_id:'cache-4',prefix_control:true,input_tokens:12030,cache_read_input_tokens:0,cache_creation_input_tokens:12020},
+    ]}
+  ]);
+  const html=overview(await harness().WorkbenchReport.render([r]));
+  assert.match(html,/暖请求缓存 Token 命中率 99\.916736%/);
+  assert.match(html,/读取 24,000 \/ 完整输入 24,020 Token/);
+  assert.doesNotMatch(html,/缓存命中率未知/);
+});
 function gradeFixture(percent,{unknown=0,requestCount=10,moduleKeys=['protocol','multimodal','tools','max_tokens','cache','reliability','security']}={}){
   const requests=Array.from({length:requestCount},(_,i)=>({id:'sample-'+i,status:200}));
   const checks=moduleKeys.flatMap(module=>Array.from({length:100+unknown},(_,i)=>check(`${module}-${i}`,[module],i>=100?'inconclusive':i<percent?'passed':'failed',{request_ids:requestCount?['sample-'+(i%requestCount)]:[]})));

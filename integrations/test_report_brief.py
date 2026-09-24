@@ -72,6 +72,8 @@ class BriefTests(unittest.TestCase):
         c=check('cache','cache',cache_observations=[{'sample_id':'cache-2','input_tokens':10000,'cache_read_input_tokens':8000,'cache_creation_input_tokens':1000}])
         self.assertEqual(cache_summary({},[c])['cache']['percent'],80)
         self.assertEqual(usage_pair({'input_tokens':1000,'cache_read_input_tokens':8000,'cache_creation_input_tokens':1000}),(8000,10000))
+        zero_fresh={'cache_observations':[{'sample_id':'cache-2','input_tokens':0,'cache_read_input_tokens':8000,'cache_creation_input_tokens':0}]}
+        self.assertEqual(cache_summary(zero_fresh,[check('cache','cache',cache_observations=zero_fresh['cache_observations'])])['cache']['percent'],100)
         self.assertEqual(usage_pair({'input_tokens':10000,'input_tokens_details':{'cached_tokens':8000}}),(8000,10000))
 
     def test_matrix_failure_cannot_supply_a_successful_warm_ratio(self):
@@ -200,6 +202,33 @@ class BriefTests(unittest.TestCase):
         self.assertEqual((value['status'],value['tone'],value['status_label']),('failed','attention','未观察到复用'))
         self.assertIn('1 项缓存检查异常',value['detail'])
         self.assertIn('不代表模型不支持缓存',value['detail'])
+
+    def test_positive_small_cache_read_is_never_rounded_to_zero(self):
+        result={'matrix_validation':{'metrics':{'cache':{'rounds':[
+            {'variant':'warm','status':'passed','cache_read_tokens':22,'total_input_tokens':104854},
+        ]}}}}
+        value=cache_summary(result,[check('cache','cache')])
+        self.assertGreater(value['cache']['read_tokens'],0)
+        self.assertGreater(value['cache']['percent'],0)
+        self.assertIn('0.020982%',value['conclusion'])
+        self.assertNotIn('复用率 0%',value['text'])
+        tiny={'matrix_validation':{'metrics':{'cache':{'rounds':[
+            {'variant':'warm','status':'passed','cache_read_tokens':1,'total_input_tokens':1000000000},
+        ]}}}}
+        tiny_value=cache_summary(tiny,[check('cache','cache')])
+        self.assertGreater(tiny_value['cache']['percent'],0)
+        self.assertIn('<0.01%',tiny_value['conclusion'])
+
+    def test_usage_aliases_and_stronger_positive_evidence_are_retained(self):
+        self.assertEqual(usage_pair({'promptTokenCount':100,'cachedContentTokenCount':80}),(80,100))
+        self.assertEqual(usage_pair({'prompt_tokens':100,'prompt_tokens_details':{'cached_tokens':80}}),(80,100))
+        result={'matrix_validation':{'metrics':{'cache':{'rounds':[
+            {'request_id':'warm','variant':'warm','status':'passed','cache_read_tokens':80,'total_input_tokens':100},
+        ]}}},'samples':[{'id':'warm','status':200}]}
+        value=cache_summary(result,[check('cache','cache',cache_observations=[
+            {'sample_id':'cache-2','status':'passed','cache_read_input_tokens':0,'input_tokens':100},
+        ])])
+        self.assertEqual(value['cache']['read_tokens'],80)
 
 
 if __name__=='__main__': unittest.main()

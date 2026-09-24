@@ -31,6 +31,16 @@
     return walk(value);
   };
   const kindName = {text:'文本',image:'图像',video:'视频',audio:'音频',general:'通用深度检测',gpt:'GPT 生成专项'};
+  const tokenValue=v=>{if(v==null||v==='')return null;const n=Number(v);return Number.isInteger(n)&&Number.isFinite(n)&&n>=0?n:null;};
+  const firstToken=(value,...keys)=>{const source=value&&typeof value==='object'?value:{};for(const key of keys){const n=tokenValue(source[key]);if(n!==null)return n;}return null;};
+  const usageParts=val=>{
+    const usage=val&&typeof val==='object'?val:{},promptDetails=object(usage.prompt_tokens_details),inputDetails=object(usage.input_tokens_details);
+    const native=Object.hasOwn(usage,'cache_read_input_tokens')||Object.hasOwn(usage,'cache_creation_input_tokens')||Object.hasOwn(usage,'cache_read_tokens')||Object.hasOwn(usage,'cache_creation_tokens');
+    const input=firstToken(usage,'prompt_tokens','promptTokenCount','prompt_tokens_count','input_tokens','inputTokens');
+    const cached=native?firstToken(usage,'cache_read_input_tokens','cache_read_tokens','prompt_cache_read_tokens','prompt_cache_hit_tokens'):firstToken(promptDetails,'cached_tokens','cachedTokens','cache_read_tokens')??firstToken(inputDetails,'cached_tokens','cachedTokens','cache_read_tokens')??firstToken(usage,'cached_tokens','cachedTokens','cachedContentTokenCount','cache_read_tokens','prompt_cache_read_tokens','prompt_cache_hit_tokens');
+    const created=native?firstToken(usage,'cache_creation_input_tokens','cache_creation_tokens','prompt_cache_creation_tokens'):0;
+    return {input,cached,created,native};
+  };
   const extractUsage = raw => {
     const seen=new WeakSet(); let found=null;
     const num=v=>{if(v==null||v==='')return null;const n=Number(v);return Number.isFinite(n)&&n>=0?n:null;};
@@ -39,10 +49,11 @@
       if(Array.isArray(v)){v.forEach(walk);return;}
       for(const [k,val] of Object.entries(v)){
         if((k==='usage'||k==='token_usage'||k==='tokenUsage')&&val&&typeof val==='object'){
-          const input=num(val.prompt_tokens??val.promptTokens??val.input_tokens??val.inputTokens??val.input);
+          const parts=usageParts(val);
+          const input=parts.input===null?num(val.input):parts.input;
           const output=num(val.completion_tokens??val.completionTokens??val.output_tokens??val.outputTokens??val.output);
           const total=num(val.total_tokens??val.totalTokens??val.total);
-          const cached=num(val.prompt_tokens_details?.cached_tokens??val.input_tokens_details?.cached_tokens??val.cached_tokens??val.cachedTokens);
+          const cached=parts.cached;
           const derived=val.total_derived===true||val.total_tokens_derived===true||v.total_derived===true||v.total_tokens_derived===true;
           const applicable=val.accounting_applicable!==false&&v.accounting_applicable!==false;
           if(input!==null||output!==null||total!==null)found={input,output,total,cached,derived,applicable};
@@ -100,7 +111,12 @@
     return x.dims.find(key=>MODULES.some(m=>m[0]===key))||'protocol';
   }
   function scoreGroup(matched){
-    const scored=matched.filter(eligible),sampled=matched.filter(observed),passed=scored.filter(x=>x.status==='passed').length,failed=scored.length-passed;
+    const units=matched.flatMap(x=>{
+      const rows=list(x.raw?.evidence_rows);
+      if(!x.raw?.metadata?.score_by_sample||rows.length<2)return [x];
+      return rows.map(row=>({...x,status:row.status||'inconclusive',linked:row.request_ids?x.linked.filter(req=>row.request_ids.includes(req.id)):x.linked}));
+    });
+    const scored=units.filter(eligible),sampled=units.filter(observed),passed=scored.filter(x=>x.status==='passed').length,failed=scored.length-passed;
     const value=scored.length?roundScore(passed/scored.length*100):null;
     const status=failed?'failed':!sampled.length?'not_covered':sampled.some(x=>x.status==='inconclusive')||!scored.length?'inconclusive':'passed';
     return {matched,scored,sampled,passed,failed,value,status};
@@ -134,13 +150,33 @@
     let value=raw.response_body??raw.response??raw.raw_response;
     if(typeof value==='string'){try{value=JSON.parse(value);}catch(_){return null;}}
     if(!value||typeof value!=='object')return null;
-    for(const candidate of [value.usage,value.body?.usage,value.response?.usage,value.normalized_usage,value.usageMetadata,value.body?.usageMetadata])if(candidate&&typeof candidate==='object')return candidate;
+    const body=typeof value.body==='string'?(()=>{try{return JSON.parse(value.body);}catch(_){return null;}})():value.body;
+    for(const candidate of [value.usage,body?.usage,value.response?.usage,value.normalized_usage,value.usageMetadata,body?.usageMetadata,value])if(candidate&&typeof candidate==='object'&&(candidate.input_tokens!=null||candidate.prompt_tokens!=null||candidate.promptTokenCount!=null||candidate.cache_read_input_tokens!=null||candidate.cachedContentTokenCount!=null))return candidate;
     return null;
   }
+  const percentLabel=value=>{
+    if(value===null||value===undefined)return '未记录';
+    if(value>0&&value<0.01)return '<0.01';
+    if(value>0&&value<1)return Number(value.toFixed(6)).toString();
+    return Number(value.toFixed(6)).toString();
+  };
   function cacheBrief(cases){
     const matched=cases.filter(x=>x.dims.includes('cache')),warm=new Map();
     for(const x of matched){
       const params=x.raw.parameters||x.raw.metadata?.parameters||{},round=String(params.variant||params.round||x.raw.scenario_id||x.sourceId||'');
+      // Claude's native acceptance result keeps the per-round usage under
+      // cache_observations.  It may have no separate browser request row, so
+      // associate those observations directly instead of guessing a missing
+      // usage field as zero.
+      for(const observation of list(x.raw.cache_observations)){
+        const sampleId=String(observation.sample_id||observation.id||'');
+        if(!sampleId||observation.prefix_control||!/cache-(?:2|3)|warm|suffix/i.test(sampleId))continue;
+        const read=tokenValue(observation.cache_read_input_tokens??observation.cache_read_tokens);
+        const total=tokenValue(observation.input_tokens??observation.prompt_tokens??observation.promptTokenCount);
+        if(read===null&&total===null)continue;
+        const usage={prompt_tokens:total,prompt_tokens_details:{cached_tokens:read}};
+        warm.set(sampleId,{req:{id:sampleId,raw:{response_body:{usage}},status:observation.status==='failed'||observation.status==='cancelled'?'failed':'passed'},x});
+      }
       if(/cold|prefix_changed|changed_prefix/i.test(round)||!/(?:^|[-_ ])warm(?:[-_ \d]|$)|suffix_changed/i.test(round))continue;
       for(const req of x.linked)warm.set(req.id,{req,x});
     }
@@ -148,21 +184,17 @@
     const used=[];
     for(const {req,x}of warm.values()){
       const usage=responseUsage(req.raw);if(!usage||req.status!=='passed')continue;
-      const details=usage.prompt_tokens_details||usage.input_tokens_details||{};
-      const anthropic=Object.hasOwn(usage,'cache_read_input_tokens')||Object.hasOwn(usage,'cache_creation_input_tokens');
-      const cached=tokenNumber(anthropic?usage.cache_read_input_tokens:(details.cached_tokens??usage.cached_tokens??usage.cachedContentTokenCount));
-      const base=tokenNumber(anthropic?usage.input_tokens:(usage.prompt_tokens??usage.input_tokens??usage.promptTokenCount));
-      const created=anthropic?tokenNumber(usage.cache_creation_input_tokens):0;
+      const parts=usageParts(usage),cached=parts.cached,base=parts.input,created=parts.created;
       // Anthropic input_tokens excludes cache reads and creation; both fields
       // must exist before a complete input denominator can be claimed.
       if(cached===null||base===null||created===null)continue;
-      const denominator=anthropic?base+cached+created:base;
+      const denominator=parts.native?base+cached+created:base;
       if(!denominator||cached>denominator)continue;
       complete++;read+=cached;input+=denominator;if(cached>0)hits++;used.push(x.id);
     }
-    const percent=complete?Math.round(read/input*1000)/10:null;
-    const text=percent===null?`缓存命中率未知：${warm.size?`已关联 ${warm.size} 个暖请求，缺少完整缓存读取 / 输入计量。`:'没有明确关联暖请求及完整 usage。'}缓存模块分数不等于缓存命中率。`:`${percent===0?'本轮未观察到复用。':''}${complete<warm.size?'已计量暖请求':'暖请求'}缓存 Token 命中率 ${compactNumber(percent)}%（读取 ${read.toLocaleString('en-US')} / 完整输入 ${input.toLocaleString('en-US')} Token）；命中请求 ${hits}/${complete}，字段完整 ${complete}/${warm.size} 个暖请求。${percent===0?'需核对前缀、缓存条件及上游计量。':''}`;
-    return {id:'cache',label:'缓存复用',status:percent===null||complete<warm.size||percent===0?'inconclusive':'passed',display_label:percent===null?'复用证据待补齐':percent===0?'本轮未观察到复用':complete<warm.size?'部分计量已验证':'已观察到复用',display_tone:percent===null?'neutral':percent===0||complete<warm.size?'attention':'passed',text,check_ids:[...new Set(used.length?used:matched.map(x=>x.id))],percent};
+    const rawPercent=complete?read/input*100:null,percent=complete?(rawPercent>0&&rawPercent<0.01?rawPercent:Number(rawPercent.toFixed(6))):null,zeroObserved=complete>0&&read===0;
+    const text=percent===null?`缓存命中率未知：${warm.size?`已关联 ${warm.size} 个暖请求，缺少完整缓存读取 / 输入计量。`:'没有明确关联暖请求及完整 usage。'}缓存模块分数不等于缓存命中率。`:`${zeroObserved?'本轮未观察到复用。':''}${complete<warm.size?'已计量暖请求':'暖请求'}缓存 Token 命中率 ${percentLabel(percent)}%（读取 ${read.toLocaleString('en-US')} / 完整输入 ${input.toLocaleString('en-US')} Token）；命中请求 ${hits}/${complete}，字段完整 ${complete}/${warm.size} 个暖请求。${zeroObserved?'需核对前缀、缓存条件及上游计量。':''}`;
+    return {id:'cache',label:'缓存复用',status:percent===null||complete<warm.size||zeroObserved?'inconclusive':'passed',display_label:percent===null?'复用证据待补齐':zeroObserved?'本轮未观察到复用':complete<warm.size?'部分计量已验证':'已观察到复用',display_tone:percent===null?'neutral':zeroObserved||complete<warm.size?'attention':'passed',text,check_ids:[...new Set(used.length?used:matched.map(x=>x.id))],percent};
   }
   const timestamp=value=>{
     if(value==null||value==='')return null;

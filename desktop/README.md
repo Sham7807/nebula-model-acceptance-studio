@@ -6,7 +6,7 @@
 
 ## 安装与首次使用
 
-1. 打开 `Channel-Test-System-1.2.0-Apple-Silicon.dmg`，将「渠道测试系统.app」拖入 Applications。
+1. 打开 `Channel-Test-System-1.2.1-Apple-Silicon.dmg`，将「渠道测试系统.app」拖入 Applications。
 2. 双击打开应用，等待左下角显示「本地引擎就绪」。Python 和验收依赖已内置，无需打开终端。
 3. 点击右上角「连接渠道」或按 `⌘K`，填写 Base URL、API Key 和可选的默认模型。
 4. 从侧边栏选择工作区，获取模型列表、检查请求配置，再开始测试。

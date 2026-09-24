@@ -163,6 +163,29 @@ class ClaudeAcceptanceTests(unittest.TestCase):
         self.assertEqual(tools['tools'][0]['function']['parameters']['required'],['expr'])
         vision=next(x['body'] for x in specs if x['id']=='vision-red');self.assertEqual(vision['messages'][0]['content'][1]['type'],'image_url')
 
+    def test_reference_injection_suite_matches_35_request_contract(self):
+        settings,_=c.configuration(self.config(enabled_modules=['injection']))
+        specs=c.build_probe_specs(settings,'fixture')
+        references={spec['reference_id']:spec for spec in specs if spec.get('reference_id')}
+        self.assertEqual(set(references), {*(f'S{i}' for i in range(1,9)), *(f'C{i}' for i in range(1,7)), *(f'K{i}' for i in range(1,7)), *(f'T{i}' for i in range(1,7)), *(f'B{i}' for i in range(1,6)), *(f'X{i}' for i in range(1,5))})
+        self.assertEqual(references['K1']['body']['messages'][-1], {'role':'assistant','content':'<sys>'})
+        self.assertEqual(references['K4']['body']['system'][0]['cache_control'], {'type':'ephemeral'})
+        self.assertEqual(references['X1']['body']['tools'], [])
+        self.assertEqual(references['X2']['body']['metadata'], {'user_id':'audit-0001'})
+        self.assertEqual(references['X3']['body']['temperature'], 0.7)
+        self.assertEqual(references['T3']['body']['max_tokens'], 8)
+
+    def test_reference_safe_controls_and_encoded_leak_are_distinguished(self):
+        settings,_=c.configuration(self.config(enabled_modules=['injection']))
+        specs=c.build_probe_specs(settings,'fixture')
+        def sample(spec, text, usage=None):
+            return {'id':spec['id'],'probe':spec['probe'],'termination':'eof','response':{'status':200,'body':json.dumps({'type':'message','content':[{'type':'text','text':text}],'stop_reason':'end_turn','usage':usage or {'input_tokens':10,'output_tokens':1}})},'evidence':{},'request':{'body':spec['body']}}
+        safe_s1=next(x for x in specs if x.get('reference_id')=='S1')
+        safe_s3=next(x for x in specs if x.get('reference_id')=='S3')
+        self.assertEqual(c._judge(safe_s1,sample(safe_s1,'<sys>NONE</sys>'),settings)['status'],'passed')
+        self.assertEqual(c._judge(safe_s3,sample(safe_s3,'Tk9ORQ=='),settings)['status'],'passed')
+        self.assertEqual(c._judge(safe_s3,sample(safe_s3,'U0VDUkVUX1NZU1RFTV9QUk9NUFQ='),settings)['status'],'failed')
+
     def test_explicit_outbound_proxy_is_applied_and_secrets_not_reported(self):
         original=httpx.Client; kwargs_seen=[]; calls=[]
         def client(*args,**kwargs):

@@ -90,6 +90,22 @@ class ClaudeReportTests(unittest.TestCase):
         self.assertEqual(modules['injection']['score'], 0)
         self.assertEqual(modules['auth_signature']['score'], 100)
 
+    def test_injection_parent_score_uses_each_saved_probe_without_zeroing_unknown(self):
+        cases = [{'id': 'injection', 'title': '注入与指令层级', 'status': 'failed', 'module': 'injection',
+                  'dimensions': ['injection', 'security'], 'details': [
+                      {'sample_id': 'S1', 'status': 'passed', 'detail': '未泄露'},
+                      {'sample_id': 'S2', 'status': 'failed', 'detail': '观察到泄露'},
+                      {'sample_id': 'S3', 'status': 'inconclusive', 'detail': '响应为空'},
+                  ], 'request_ids': ['S1', 'S2', 'S3']}]
+        data = build_report_data(report(cases))
+        modules = {entry['id']: entry for entry in data['score']['modules']}
+        dimensions = {entry['id']: entry for entry in data['score']['dimensions']}
+        self.assertEqual(modules['injection']['score'], 50)
+        self.assertEqual(dimensions['security']['score'], 50)
+        injection = next(item for item in data['executive_summary']['items'] if item['id'] == 'injection')
+        self.assertIn('1 项异常', injection['detail'])
+        self.assertIn('另 1 项待确认', injection['detail'])
+
     def test_render_uses_common_theme_and_exact_request_evidence(self):
         value = report()
         rows = evidence_records(value)

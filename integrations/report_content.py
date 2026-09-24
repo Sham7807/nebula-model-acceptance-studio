@@ -570,6 +570,12 @@ def _claude_checks(result):
         metadata["module"] = original.get("module") or metadata.get("module") or {
             "security": "injection", "signature": "auth_signature", "passthrough": "protocol", "reliability": "stress", "multimodal": "tools"
         }.get(inferred_module, inferred_module)
+        # Claude's reference injection suite stores many independent S/C/K/B/X
+        # assertions under one parent check. Count those rows individually in
+        # score cards so one failed probe cannot collapse the entire module to
+        # 0/100; the parent card and raw evidence remain grouped.
+        if metadata.get("module") == "injection" and len(rows) > 1:
+            metadata["score_by_sample"] = True
         observed_summary = _text(original.get("observed_summary") or (
             "涉及 %s 个样本；%s。" % (len(sample_ids), _count_text(counts)) if rows else observed))
         if observation_summaries:
@@ -902,6 +908,28 @@ def _observation_only(check):
             or ("identity" in dimensions and not any(d != "identity" for d in dimensions)))
 
 
+def _score_units(checks):
+    """Expand explicitly marked aggregate Claude probes for scoring."""
+    units = []
+    for check in checks:
+        metadata = _dict(check.get('metadata'))
+        evidence_rows = _list(check.get('evidence_rows'))
+        if not metadata.get('score_by_sample') or len(evidence_rows) < 2:
+            units.append(check)
+            continue
+        for index, row in enumerate(evidence_rows, 1):
+            row = _dict(row)
+            unit = dict(check)
+            unit['status'] = _status(row.get('status'))
+            unit['id'] = check.get('id')
+            unit['request_ids'] = _list(row.get('request_ids')) or ([row.get('sample_id')] if row.get('sample_id') else [])
+            unit['sample_ids'] = [row.get('sample_id')] if row.get('sample_id') else unit['request_ids']
+            unit['evidence_rows'] = []
+            unit['_score_unit_index'] = index
+            units.append(unit)
+    return units
+
+
 def _sample_identifiers(result):
     if result.get('suite') == 'batch_acceptance':
         return {'model-%s-%s' % (i, identity) for i,item in enumerate(_list(result.get('results')),1)
@@ -917,6 +945,7 @@ def _score_stats(checks, known_samples=None):
     Assertions can share requests. Neither check counts nor upstream headers
     are a substitute for the number of independently observed HTTP samples.
     """
+    checks = _score_units(checks)
     counts = _counts(checks)
     present = [c for c in checks if c.get("status") in ("passed", "failed", "inconclusive")]
     ancillary = [c for c in present if _observation_only(c) or c.get('evidence_category') in ('control','aggregate')]

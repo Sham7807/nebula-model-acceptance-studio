@@ -9,6 +9,50 @@ def rows(value): return value if isinstance(value, list) else []
 def number(value):
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0 else None
 def token(value): return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _token_from(value, *keys):
+    """Read the first explicitly reported non-negative integer token field.
+
+    Providers use both snake_case and camelCase names.  Keep ``None`` distinct
+    from a reported zero: a missing cache field is evidence-unavailable, while
+    a zero cache field is a valid observation.
+    """
+    source = obj(value)
+    for key in keys:
+        candidate = source.get(key)
+        if token(candidate) is not None:
+            return candidate
+    return None
+
+
+def _first_token(*values):
+    """Return the first present token value, retaining a legitimate zero."""
+    for value in values:
+        if token(value) is not None:
+            return value
+    return None
+
+
+def _cache_percent(read, total):
+    if token(read) is None or token(total) is None or total <= 0:
+        return None
+    # Preserve a positive, very small hit rate instead of rounding it to the
+    # misleading value 0.  The raw token counts remain the authoritative data.
+    value = read / total * 100
+    # Keep sub-micro percentages positive as a numeric value; the display
+    # formatter renders them as ``<0.01%`` instead of fabricating zero.
+    return value if value < 0.01 else round(value, 6)
+
+
+def _percent_label(value):
+    if value is None:
+        return '未记录'
+    if value > 0 and value < 0.01:
+        return '<0.01'
+    if value > 0 and value < 1:
+        return ('%.6f' % value).rstrip('0').rstrip('.')
+    return ('%.6f' % value).rstrip('0').rstrip('.')
 def epoch(value):
     if number(value) is not None: return value
     if isinstance(value, str):
@@ -104,7 +148,32 @@ def dimensions(c):
 def eligible(c):
     return (not c.get('local_only') and c.get('applicable') is not False and c.get('score_applicable') is not False
             and obj(c.get('metadata')).get('score_applicable') is not False and c.get('evidence_category') not in ('control', 'aggregate', 'observation'))
+
+
+def _score_units(checks):
+    """Expand Claude aggregate injection rows for executive counts."""
+    units = []
+    for check in checks:
+        if not obj(check.get('metadata')).get('score_by_sample'):
+            units.append(check)
+            continue
+        evidence = rows(check.get('evidence_rows'))
+        if len(evidence) < 2:
+            units.append(check)
+            continue
+        for row in evidence:
+            row = obj(row)
+            unit = dict(check)
+            unit['status'] = row.get('status', 'inconclusive')
+            unit['request_ids'] = rows(row.get('request_ids')) or ([row.get('sample_id')] if row.get('sample_id') else [])
+            unit['evidence_rows'] = []
+            units.append(unit)
+    return units
+
+
 def item(key, label, checks, conclusion=None, detail=''):
+    source_checks = list(checks)
+    checks = _score_units(source_checks)
     active = [c for c in checks if eligible(c)]
     passed = sum(c.get('status') == 'passed' for c in active)
     failed = sum(c.get('status') == 'failed' for c in active)
@@ -123,7 +192,7 @@ def item(key, label, checks, conclusion=None, detail=''):
         observation = '证据待补充' if pending else '本轮未覆盖'
     conclusion = conclusion or label + '：' + observation
     detail = detail or '已判定 %s 项：%s 项通过、%s 项异常%s%s。' % (passed+failed, passed, failed, '；另 %s 项待确认' % pending if pending else '', '；%s 项未执行' % missing if missing else '')
-    evidence = sorted(checks, key=lambda c: {'failed':0, 'inconclusive':1, 'passed':2}.get(c.get('status'),3))
+    evidence = sorted(source_checks, key=lambda c: {'failed':0, 'inconclusive':1, 'passed':2}.get(c.get('status'),3))
     return {'id': key, 'label': label, 'status': status, 'status_label': status_label, 'tone': tone, 'display_tone': tone,
             'counts': {'passed': passed, 'failed': failed, 'pending': pending, 'missing': missing},
             'conclusion': conclusion, 'detail': detail, 'text': conclusion+'。'+detail,
@@ -163,17 +232,54 @@ def resource_grade(score):
 def usage_pair(usage):
     """Return (read, total) with protocol-specific accounting, never missing=0."""
     u = obj(usage)
-    if 'promptTokenCount' in u: return u.get('cachedContentTokenCount'), u.get('promptTokenCount')
-    if 'prompt_tokens' in u: return obj(u.get('prompt_tokens_details')).get('cached_tokens', u.get('cached_tokens')), u.get('prompt_tokens')
-    if 'input_tokens_details' in u: return obj(u.get('input_tokens_details')).get('cached_tokens'), u.get('input_tokens')
-    if 'cache_read_input_tokens' in u or 'cache_creation_input_tokens' in u:
-        parts = [u.get('input_tokens'), u.get('cache_read_input_tokens'), u.get('cache_creation_input_tokens')]
-        return parts[1], sum(parts) if all(token(v) is not None for v in parts) else None
-    return u.get('cached_tokens'), u.get('input_tokens')
+    details = obj(u.get('prompt_tokens_details'))
+    input_details = obj(u.get('input_tokens_details'))
+    # Anthropic Messages reports input_tokens separately from cache reads and
+    # writes.  Its complete denominator is the sum of all three fields; do not
+    # silently treat an omitted creation field as zero.
+    read = _token_from(u, 'cache_read_input_tokens', 'cache_read_tokens',
+                       'prompt_cache_read_tokens', 'prompt_cache_hit_tokens')
+    creation = _token_from(u, 'cache_creation_input_tokens', 'cache_creation_tokens',
+                           'prompt_cache_creation_tokens')
+    base = _token_from(u, 'input_tokens', 'inputTokens')
+    if read is not None or creation is not None:
+        return read, (base + read + creation if base is not None and read is not None and creation is not None else None)
+
+    # OpenAI Chat/Responses, Gemini and compatible gateways expose cached
+    # tokens inside a details object or under camelCase names.  Their reported
+    # prompt/input token count already includes the cached portion.
+    read = _first_token(
+        _token_from(details, 'cached_tokens', 'cache_read_tokens', 'cachedTokens'),
+        _token_from(input_details, 'cached_tokens', 'cache_read_tokens', 'cachedTokens'),
+        _token_from(u, 'cached_tokens', 'cachedTokens', 'cachedContentTokenCount',
+                    'cache_read_tokens', 'prompt_cache_read_tokens', 'prompt_cache_hit_tokens'))
+    base = _first_token(
+        _token_from(u, 'prompt_tokens', 'promptTokenCount', 'prompt_tokens_count',
+                    'input_tokens', 'inputTokens'),
+        _token_from(details, 'prompt_tokens', 'input_tokens'))
+    return read, base
 
 
 def cache_summary(result, checks):
     pairs = {}; request_map = {r.get('id') or r.get('request_id'): r for r in requests(result)}
+    def put_pair(identity, pair):
+        """Keep the strongest evidence for a request identity.
+
+        A normalized check may repeat a request with a sparse fallback record.
+        Such a fallback must never overwrite a positive cache read with zero or
+        an unknown value.
+        """
+        if not identity:
+            return
+        pair = tuple(pair or (None, None))
+        old = pairs.get(identity)
+        def rank(value):
+            read, total = value
+            if token(read) is not None and token(total) is not None and total > 0:
+                return 3 if read > 0 else 2
+            return 1 if token(read) is not None or token(total) is not None else 0
+        if old is None or rank(pair) > rank(old):
+            pairs[identity] = pair
     def successful(identity, fallback_status):
         r = obj(request_map.get(identity))
         code = r.get('http_status', obj(r.get('response')).get('status'))
@@ -184,13 +290,44 @@ def cache_summary(result, checks):
     for i, r in enumerate(cache_rounds):
         if warm(r.get('variant') or r.get('round')):
             identity = r.get('request_id') or 'matrix-%s' % i
-            pairs[identity] = (r.get('cache_read_tokens'), r.get('total_input_tokens')) if successful(identity, r.get('status')) else (None, None)
+            put_pair(identity, (r.get('cache_read_tokens'), r.get('total_input_tokens')) if successful(identity, r.get('status')) else (None, None))
     for c in checks:
         for r in rows(c.get('cache_observations')):
             identity = r.get('sample_id', '')
             if identity in ('cache-2', 'cache-3', 'cache-2warm', 'cache-3suffix') and not r.get('prefix_control'):
-                state = r.get('status', obj(request_map.get(identity)).get('status', c.get('status')))
-                pairs[identity] = (r.get('cache_read_input_tokens'), r.get('input_tokens')) if successful(identity, state) else (None, None)
+                # A Claude aggregate can be inconclusive because the changed
+                # prefix control is unresolved while cache-2/3 still carry
+                # valid per-round usage. Preserve that row-level evidence.
+                mapped = obj(request_map.get(identity))
+                state = r.get('status') if 'status' in r else mapped.get('status')
+                if state is None:
+                    state = 'passed' if any(key in r for key in ('cache_read_input_tokens', 'cache_read_tokens', 'input_tokens', 'prompt_tokens', 'usage', 'reported_usage', 'usageMetadata')) else c.get('status')
+                direct_read = _first_token(r.get('cache_read_input_tokens'), r.get('cache_read_tokens'), r.get('prompt_cache_read_tokens'))
+                direct_base = _first_token(r.get('input_tokens'), r.get('inputTokens'), r.get('prompt_tokens'), r.get('promptTokenCount'))
+                direct_create = _first_token(r.get('cache_creation_input_tokens'), r.get('cache_creation_tokens'), r.get('prompt_cache_creation_tokens'))
+                # Claude observations may expose input_tokens=0 while the
+                # reusable prefix is reported in cache_read/create fields.
+                # Rebuild the complete native denominator from all three
+                # counters; do not discard a valid positive read as zero.
+                native_direct = any(key in r for key in ('cache_read_input_tokens', 'cache_creation_input_tokens', 'cache_read_tokens', 'cache_creation_tokens'))
+                reported_total = _first_token(r.get('total_input_tokens'))
+                if reported_total is not None:
+                    # Claude acceptance aggregation already stores the complete
+                    # denominator here; prefer it over the fresh input field.
+                    direct_total = reported_total
+                elif native_direct and direct_base == 0 and direct_read is not None and direct_create is not None:
+                    # Some Anthropic relays report no fresh input on a warm
+                    # request. Reconstruct the denominator from cache fields
+                    # so a positive read is never discarded as zero.
+                    direct_total = direct_base + direct_read + direct_create
+                else:
+                    # Legacy observation fixtures may expose input_tokens as
+                    # an already-normalized denominator.
+                    direct_total = direct_base
+                direct = (direct_read, direct_total)
+                nested = r.get('usage') or r.get('reported_usage') or r.get('usageMetadata')
+                pair = usage_pair(nested) if nested else direct
+                put_pair(identity, pair if successful(identity, state) else (None, None))
         params = obj(c.get('parameters')) or obj(raw_check(c).get('parameters'))
         if not warm(params.get('variant') or params.get('round')): continue
         for identity in rows(c.get('request_ids')):
@@ -201,15 +338,15 @@ def cache_summary(result, checks):
                 try: body = json.loads(body)
                 except ValueError: body = {}
             usage = observed.get('usage') or observed.get('usageMetadata') or obj(body).get('usage') or obj(body).get('usageMetadata')
-            pairs[identity] = usage_pair(usage or observed) if successful(identity, r.get('status')) else (None, None)
+            put_pair(identity, usage_pair(usage or observed) if successful(identity, r.get('status')) else (None, None))
     valid = [(read, total) for read, total in pairs.values() if token(read) is not None and token(total) is not None and total > 0 and read <= total]
     if not valid:
         summary = item('cache', '缓存复用', checks, '缓存复用未证实', '有效暖请求计数 %s/%s；usage 字段检查不等于缓存复用。字段缺失不按零命中计算。' % (len(valid), len(pairs)))
         if summary['status'] == 'passed': summary['status'] = 'inconclusive'
         return presentation(summary, '计量待核查' if summary['counts']['failed'] else '待补充计量', 'attention' if summary['counts']['failed'] else 'neutral')
     read, total = sum(x[0] for x in valid), sum(x[1] for x in valid)
-    percent = round(read / total * 100, 1)
-    conclusion = '暖请求缓存 Token 复用率 %g%%' % percent
+    percent = _cache_percent(read, total)
+    conclusion = '暖请求缓存 Token 复用率 %s%%' % _percent_label(percent)
     detail = '缓存读取 %s / 总输入 %s Token；%s/%s 个暖请求计量有效。排除冷请求与改前缀对照，比例依据渠道上报。' % (read, total, len(valid), len(pairs))
     result_item = item('cache', '缓存复用', checks, conclusion, detail)
     if result_item['status'] == 'not_covered' or (result_item['status'] == 'passed' and (read == 0 or len(valid) < len(pairs))): result_item['status'] = 'inconclusive'
