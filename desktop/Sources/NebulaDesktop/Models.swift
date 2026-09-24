@@ -2,6 +2,10 @@ import Foundation
 import SwiftUI
 import Security
 
+enum AppVersion {
+    static var current: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "开发版" }
+}
+
 enum Destination: String, CaseIterable, Identifiable {
     case overview, text, image, video, audio, general, ccmax, claude, kimi, gpt, history
     var id: String { rawValue }

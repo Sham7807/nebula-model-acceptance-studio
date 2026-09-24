@@ -58,7 +58,7 @@ struct OverviewView:View {
                         }
                     }.background(.background,in:RoundedRectangle(cornerRadius:14)).overlay(RoundedRectangle(cornerRadius:14).stroke(.primary.opacity(0.06)))
                 }
-                HStack { Image(systemName:"internaldrive"); Text("本机独立存储"); Text("·"); Text("API 密钥可选存入 macOS 钥匙串"); Spacer(); Text("NEBULA / 1.0") }.font(.system(size:10)).foregroundStyle(.tertiary).padding(.bottom,8)
+                HStack { Image(systemName:"internaldrive"); Text("本机独立存储"); Text("·"); Text("API 密钥可选存入 macOS 钥匙串"); Spacer(); Text("NEBULA / \(AppVersion.current)") }.font(.system(size:10)).foregroundStyle(.tertiary).padding(.bottom,8)
             }.padding(.horizontal,32).padding(.vertical,24).frame(maxWidth:1200).frame(maxWidth:.infinity)
         }.background(Color(nsColor:.windowBackgroundColor))
     }

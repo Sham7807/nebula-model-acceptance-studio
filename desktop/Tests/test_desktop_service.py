@@ -83,7 +83,23 @@ class DesktopEngineTests(unittest.TestCase):
         if not resources.exists():self.skipTest('App not built yet')
         with tempfile.TemporaryDirectory() as folder:
             other=Engine(folder,workspace=resources/'Workbench',python=resources/'Python/bin/python3.12')
-            try:self.assertEqual(other.request('/api/history')[0],200)
+            try:
+                self.assertEqual(other.request('/api/history')[0],200)
+                payload={'records':[{'kind':'general','model':'desktop-report-fixture',
+                    'created_at':1700000000,'duration_ms':2000,'result':{
+                        'checks':[{'id':'protocol','name':'协议响应','status':'passed','dimensions':['protocol'],'request_ids':['r1']}],
+                        'requests':[{'id':'r1','status':200,'duration_ms':1200,
+                            'response_body':{'choices':[{'message':{'content':'OK'}}]}}]}}]}
+                status,body=other.request('/api/reports','POST',payload)
+                self.assertEqual(status,200,body[:200])
+                html=body.decode()
+                for phrase in ('desktop-report-fixture','验收模块总览','测试总耗时','请求耗时 P50','2 秒'):
+                    self.assertIn(phrase,html)
+                self.assertLess(html.index('id="overview"'),html.index('id="modules"'))
+                self.assertLess(html.index('id="modules"'),html.index('id="all-results"'))
+                status,css=other.request('/report-theme.css')
+                self.assertEqual(status,200)
+                self.assertEqual(css,(ROOT/'multimodal-workbench/report-theme.css').read_bytes())
             finally:other.close()
 
 if __name__=='__main__':unittest.main()

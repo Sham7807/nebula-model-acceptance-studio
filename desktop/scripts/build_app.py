@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build a self-contained macOS app, preserving the web source tree unchanged."""
 import argparse
+import json
 import os
 from pathlib import Path
 import plistlib
@@ -12,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DESKTOP = ROOT / 'desktop'
 DIST = DESKTOP / 'dist'
 APP = DIST / '小小宇宙无敌.app'
+VERSION = json.loads((DESKTOP / 'version.json').read_text())
 
 
 def run(*args, **kwargs):
@@ -75,7 +77,7 @@ def build(dmg=True):
         if (ROOT / name).exists(): shutil.copy2(ROOT / name, resources / name)
     info = {'CFBundleName':'小小宇宙无敌', 'CFBundleDisplayName':'小小宇宙无敌',
             'CFBundleIdentifier':'com.nebula.workbench', 'CFBundleExecutable':'NebulaDesktop',
-            'CFBundlePackageType':'APPL', 'CFBundleShortVersionString':'1.0.0', 'CFBundleVersion':'1',
+            'CFBundlePackageType':'APPL', 'CFBundleShortVersionString':VERSION['version'], 'CFBundleVersion':VERSION['build'],
             'LSMinimumSystemVersion':'14.0', 'LSApplicationCategoryType':'public.app-category.developer-tools',
             'CFBundleDevelopmentRegion':'zh_CN', 'CFBundleLocalizations':['zh-Hans','en'],
             'NSHighResolutionCapable':True, 'CFBundleIconFile':'AppIcon',
@@ -108,7 +110,7 @@ def build(dmg=True):
         staging.mkdir(); shutil.copytree(APP, staging / APP.name, symlinks=True)
         (staging / 'Applications').symlink_to('/Applications')
         shutil.copy2(DESKTOP / '安装说明.txt', staging)
-        image = DIST / 'Nebula-Studio-1.0.0-Apple-Silicon.dmg'
+        image = DIST / f"Nebula-Studio-{VERSION['version']}-Apple-Silicon.dmg"
         image.unlink(missing_ok=True)
         run('hdiutil', 'create', '-volname', '小小宇宙无敌', '-srcfolder', staging, '-ov', '-format', 'UDZO', image)
         shutil.rmtree(staging)

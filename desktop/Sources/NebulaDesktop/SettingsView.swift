@@ -36,7 +36,7 @@ struct SettingsView:View {
                 LabeledContent("运行状态",value:model.engine.isReady ? "已连接 · 仅本机访问" : "正在连接 / 已停止")
                 HStack { Button("重新启动引擎") { model.restart() }.disabled(model.workspace.busy); Text("不会清除已保存记录").foregroundStyle(.secondary).font(.caption) }
             }
-            Section { Text("小小宇宙无敌 · Nebula Studio 1.0\nmacOS 原生窗口 · 本地检测引擎").foregroundStyle(.secondary).font(.caption) }
+            Section { Text("小小宇宙无敌 · Nebula Studio \(AppVersion.current)\nmacOS 原生窗口 · 本地检测引擎").foregroundStyle(.secondary).font(.caption) }
         }.formStyle(.grouped).padding(10).frame(width:520,height:410)
     }
 }
