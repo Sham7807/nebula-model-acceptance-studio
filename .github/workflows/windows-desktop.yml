@@ -1,0 +1,64 @@
+name: Windows desktop package
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, codex/macos-desktop]
+    tags: ['v*']
+    paths:
+      - 'desktop/windows/**'
+      - 'desktop/requirements.lock'
+      - 'integrations/**'
+      - 'multimodal-workbench/**'
+      - 'scripts/prepare_kvv.py'
+      - '.github/workflows/windows-desktop.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check -r desktop/requirements.lock pyinstaller pywebview
+
+      - name: Prepare pinned KVV source
+        run: python scripts/prepare_kvv.py
+
+      - name: Install KVV runtime dependencies
+        run: python -m pip install --disable-pip-version-check -e integrations/Kimi-Vendor-Verifier
+
+      - name: Build portable Windows package
+        run: python desktop/windows/build_windows.py
+
+      - name: Create zip
+        shell: pwsh
+        run: Compress-Archive -Path desktop/windows/dist/Channel-Test-System-Windows -DestinationPath desktop/windows/dist/Channel-Test-System-Windows.zip
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Channel-Test-System-Windows
+          path: desktop/windows/dist/Channel-Test-System-Windows.zip
+          if-no-files-found: error
+
+      - name: Attach Windows package to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: desktop/windows/dist/Channel-Test-System-Windows.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
