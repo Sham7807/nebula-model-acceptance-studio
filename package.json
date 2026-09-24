@@ -1,6 +1,6 @@
 {
   "name": "xiaoxiaoyuzhou-model-workbench",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "private": true,
   "description": "小小宇宙无敌：多模态模型渠道测试与验收工作台",
   "engines": {
@@ -12,6 +12,7 @@
     "test:models": "node multimodal-workbench/model-picker.test.cjs && node multimodal-workbench/general-model-picker.test.cjs && node multimodal-workbench/model-discovery-ui.test.cjs && node multimodal-workbench/gpt-suite-discovery.test.cjs",
     "test:choices": "node multimodal-workbench/choice-picker.test.cjs",
     "test:acceptance": "node multimodal-workbench/acceptance-ui.test.cjs",
+    "test:production": "node multimodal-workbench/production-ui.test.cjs",
     "test:workflows": "node multimodal-workbench/workflows-ui.test.cjs",
     "test:history": "node multimodal-workbench/history-capture.test.cjs && node multimodal-workbench/login-history-ui.test.cjs",
     "test:general": "node multimodal-workbench/general-formats-ui.test.cjs"

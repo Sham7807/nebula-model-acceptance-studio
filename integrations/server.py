@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Loopback workbench service. Runs only fixed, reviewed test suites."""
 import argparse
+import copy
 import io
 import json
 import mimetypes
@@ -29,6 +30,7 @@ JOBS = {}
 LOCK = threading.RLock()
 SUITES = {'kvv11', 'kvvfull', 'ccmax', 'claude'}
 MAX_BATCH_MODELS = 30
+MAX_ACCEPTANCE_CONFIG = 8 * 1024 * 1024
 
 # Capability modules are a presentation and coverage contract shared by the
 # KVV, CCMax and future suites.  The runners may still execute their fixed,
@@ -313,6 +315,11 @@ def validate(data, *, require_key=True):
         if not selected_modules:
             raise ValueError('至少启用一个检测模块')
         c['enabled_modules'] = selected_modules
+    from channel_production import configuration as production_config
+    from channel_admission import configuration as admission_config, pricing_configuration
+    c['production'] = production_config(production_config_for({**c, 'production':data.get('production', {})}))
+    c['admission'] = admission_config({'admission':data.get('admission', data.get('admission_policy', {}))})
+    c['pricing'] = pricing_configuration(data.get('pricing'))
     return c
 
 def _persist_jobs():
@@ -337,6 +344,9 @@ def acceptance_plan(config, *, include_native=False):
     from acceptance_matrix import build_plan
     matrix_config={**config,'base':config['base'].rstrip('/')+'/chat/completions'} if config['suite'] in ('kvv11','kvvfull') else config
     matrix=build_plan(matrix_config) if config.get('matrix_profile','off')!='off' else {'request_count':0,'requests':[],'limitations':[]}
+    from channel_production import build_plan as production_plan
+    production = production_plan(production_config_for(config))
+    production_count = production.get('request_count',0) if production.get('enabled') else 0
     if include_native and config['suite']=='claude':
         from claude_acceptance import build_plan as claude_plan
         native=claude_plan(config)
@@ -347,11 +357,132 @@ def acceptance_plan(config, *, include_native=False):
         native.setdefault('limitations',[]).extend(matrix.get('limitations',[]))
         native['limitations'].append('包含原生专项与参数矩阵；矩阵单独的 Token 规模：'+str(matrix.get('token_estimate','未启用')))
         native['conditional_requests']=native.get('conditional_requests',0)+matrix.get('conditional_requests',0)
+        native['production']=production
+        native['production_request_count']=production_count
+        native['request_count']+=production_count
+        native['limitations'].append('生产验证的请求数为包含工具多轮和重试的预算上限；持续时间及估算 Token 仅适用于附加生产阶段。')
         return native
     matrix['suite']=config['suite']
     matrix['matrix_only']=True
     matrix.setdefault('limitations',[]).insert(0,'此处展示附加参数矩阵；执行时会先运行所选原验收套件，实际总请求数还包含原套件。KVV官方检查与工作台矩阵分开列证据。')
+    matrix['production']=production
+    matrix['production_request_count']=production_count
+    matrix['request_count']+=production_count
     return matrix
+
+def production_config_for(config):
+    """KVV uses a Chat-compatible production phase, separate from official cases."""
+    if config['suite'] in ('kvv11','kvvfull'):
+        return {**config,'base':config['base'].rstrip('/')+'/chat/completions','request_format':'openai','auth':'bearer'}
+    return config
+
+def attach_production(result, config, job, emit):
+    from channel_production import run
+    settings = config.get('production') or {}
+    if not settings.get('enabled'): return
+    samples=result.get('samples') or []
+    baseline=[s for s in samples if s.get('id')=='baseline' or s.get('probe')=='baseline']
+    auth_failed=any(x.get('id')=='authentication' and x.get('status')=='failed' for x in result.get('checks') or [])
+    prerequisite_failed = auth_failed or any(s.get('status')=='failed' for s in baseline)
+    old_count=int((result.get('transport') or {}).get('request_count') or job.get('request_count') or len(samples))
+    old_completed=int(job.get('completed') or 0)
+    def progress(event):
+        event={**event,'phase':'production_validation'}
+        for field,offset in (('request_count',old_count),('completed',old_completed),('total',old_completed)):
+            if event.get(field) is not None: event[field]+=offset
+        emit(event)
+    if prerequisite_failed or job['cancel'].is_set():
+        production={'status':'blocked' if prerequisite_failed else 'cancelled','configuration':settings,'samples':[], 'cases':[], 'metrics':{},
+                    'reason':'有效凭据基线或鉴权对照异常，未启动额外生产负载。' if prerequisite_failed else '用户已取消，未启动生产负载。'}
+        emit({'type':'phase','phase':'production_validation','message':production['reason']})
+    else:
+        try: production=run(production_config_for(config),progress,job['cancel'].is_set)
+        except Exception as exc:
+            production={'status':'error','configuration':settings,'samples':[], 'cases':[], 'metrics':{},'reason':clean(str(exc),config.get('key',''))}
+            emit({'type':'phase','phase':'production_validation','message':'生产验证未完整执行；原生与矩阵证据已保留。'})
+    result['production_validation']=clean(production,config.get('key',''))
+    count=len(production.get('samples') or [])
+    result.setdefault('transport',{})['request_count']=old_count+count
+    result.setdefault('summary',{})['request_count']=old_count+count
+    if job['cancel'].is_set(): result['status']='cancelled'
+
+def annotate_admission(result):
+    from channel_admission import evaluate
+    if result.get('suite')=='batch_acceptance':
+        result['model_admissions']=[{'model':x.get('model'),'run_id':x.get('run_id'),'admission':evaluate(x['result'])}
+                                   for x in result.get('results',[]) if isinstance(x.get('result'),dict)]
+    else: result['admission']=evaluate(result)
+    return result
+
+def hydrate_saved_usage(result, directory):
+    """Join existing KVV wire records by local ID; no provider request or guess."""
+    from channel_admission import extract_usage
+    requests=(result.get('transport') or {}).get('requests') or []
+    rows={r.get('request_id') or r.get('id'):r for r in requests if isinstance(r,dict)}
+    path=Path(directory)/'requests.jsonl'
+    if not rows or not path.is_file(): return result
+    with path.open(encoding='utf-8',errors='replace') as stream:
+        for line in stream:
+            try: event=json.loads(line)
+            except ValueError: continue
+            if not isinstance(event,dict) or event.get('type')!='request_finish': continue
+            row=rows.get(event.get('request_id'))
+            if row is not None:
+                usage=extract_usage(event)
+                if usage: row['usage']=usage
+    return result
+
+def billing_result(kind, identity):
+    """Resolve only finished, owned acceptance records; never start requests."""
+    if kind=='history':
+        record=AUTH_STORE.detail(identity)
+        if not record or not record.get('run_id'): raise ValueError('未找到可对账的验收历史记录')
+        result=record.get('result') or {}
+    else:
+        job=JOBS.get(identity)
+        if not job or not job.get('result') or job.get('status')=='running': raise ValueError('任务尚未完成或报告不存在')
+        result=job['result']
+    if result.get('suite')=='batch_acceptance': raise ValueError('请进入对应模型的独立报告分别对账，不能跨模型合并账单')
+    if not re.fullmatch(r'[a-f0-9]+',str(result.get('run_id',''))): raise ValueError('报告运行编号无效')
+    return hydrate_saved_usage(result,REPORTS/result['run_id'])
+
+def save_billing(kind, identity, billing):
+    from channel_admission import reconcile
+    with LOCK:
+        original=billing_result(kind,identity)
+        result=copy.deepcopy(original)
+        result['billing']=clean(reconcile(result,billing))
+        result['billing']['updated_at']=time.time()
+        annotate_admission(result)
+        directory=REPORTS/result['run_id'];directory.mkdir(parents=True,exist_ok=True)
+        html=report_html(result,directory)
+        previous={name:(directory/name).read_bytes() if (directory/name).exists() else None for name in ('report.json','report.html')}
+        saved=AUTH_STORE.save_acceptance(result)
+        try:
+            for filename,content in (('report.json',json.dumps(result,ensure_ascii=False,indent=2).encode()),('report.html',html)):
+                temporary=directory/(filename+'.billing-tmp');temporary.write_bytes(content);temporary.replace(directory/filename)
+        except Exception:
+            AUTH_STORE.save_acceptance(original)
+            for name,content in previous.items():
+                if content is None: (directory/name).unlink(missing_ok=True)
+                else: (directory/name).write_bytes(content)
+            raise
+        if result['run_id'] in JOBS:
+            JOBS[result['run_id']].update(result=result,history_id=saved['id'],history_saved=True)
+        # Keep the batch's saved child copy in step with its standalone report.
+        for parent in JOBS.values():
+            if not parent.get('batch') or not parent.get('result'): continue
+            changed=False
+            for child in parent['result'].get('results',[]):
+                if child.get('run_id')==result['run_id']: child['result']=result;changed=True
+            if changed:
+                annotate_admission(parent['result'])
+                AUTH_STORE.save_acceptance(parent['result'])
+                parent_dir=REPORTS/parent['id']
+                (parent_dir/'report.json').write_text(json.dumps(parent['result'],ensure_ascii=False,indent=2),encoding='utf-8')
+                (parent_dir/'report.html').write_bytes(report_html(parent['result'],parent_dir))
+        return {'result':result,'admission':result['admission'],'cost':result['admission']['cost'],
+                'history_id':saved['id'],'history_saved':True}
 
 def run_job(job,c):
     directory = REPORTS / job['id']; directory.mkdir(parents=True, exist_ok=True)
@@ -405,6 +536,7 @@ def run_job(job,c):
             all_cases=primary+(matrix.get('cases') or [])
             result['summary']={'total':len(all_cases),'completed':len(all_cases),'request_count':result['transport']['request_count'],**{status:sum(x.get('status')==status for x in all_cases) for status in ('passed','failed','inconclusive','skipped','not_covered','cancelled')}}
             if job['cancel'].is_set():result['status']='cancelled'
+        attach_production(result,c,job,emit)
         result['configuration'] = clean({**result.get('configuration',{}), **{k:v for k,v in c.items() if k!='key'}})
     except Exception as exc:
         result = {'suite':c['suite'],'status':'error','error':clean(str(exc),key),'summary':{}}
@@ -414,6 +546,8 @@ def run_job(job,c):
             if path.is_file(): path.write_text(clean(path.read_text(errors='replace'),key),encoding='utf-8')
     result['started_at']=job['started_at'];result['finished_at']=time.time();result['run_id']=job['id']
     decorate(result)
+    hydrate_saved_usage(result,directory)
+    annotate_admission(result)
     (directory/'report.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
     try:
         (directory/'report.html').write_bytes(report_html(result,directory))
@@ -494,6 +628,11 @@ def run_batch(parent, config):
                     'enabled_modules': list(config.get('enabled_modules') or []),
                     'module_definitions': _module_defs(config.get('suite')),
                     'verdict':verdict,'run_id':parent['id'],'started_at':parent['started_at'],'finished_at':time.time(),'log':'批量模型按顺序独立执行；未自动重试。'}
+            annotate_admission(result)
+            if any(item.get('admission',{}).get('status')=='rejected' for item in result['model_admissions']):
+                result['verdict']={'status':'failed','label':'部分模型有关键接入风险','detail':'原验收统计与生产准入分别保留；请按模型查看具体条件和证据。'}
+            elif any(item.get('admission',{}).get('status')!='approved' for item in result['model_admissions']) and result['verdict']['status']=='passed':
+                result['verdict']={'status':'inconclusive','label':'已测能力符合预期，准入证据待补','detail':'所选模型的原验收项符合预期；生产观察、样本或其他准入条件请按模型单独核对。'}
             parent['result']=result;parent['status']=status;parent['summary']=summary;parent['completed']=completed;parent['total']=len(models);parent['finished_at']=result['finished_at']
         directory=REPORTS/parent['id'];directory.mkdir(parents=True,exist_ok=True)
         (directory/'report.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
@@ -542,6 +681,18 @@ def report_download_name(result, kind='html'):
 
 def report_html(result, directory=None):
     from report_renderer import render_report
+    if directory: result=hydrate_saved_usage(copy.deepcopy(result),directory)
+    if result.get('suite')=='batch_acceptance':
+        result=copy.deepcopy(result)
+        for child in result.get('results',[]):
+            identity=str(child.get('run_id',''))
+            if not re.fullmatch(r'[a-f0-9]+',identity): continue
+            path=REPORTS/identity/'report.json'
+            if path.is_file():
+                try:
+                    latest=json.loads(path.read_text(encoding='utf-8'))
+                    if latest.get('run_id')==identity: child['result']=hydrate_saved_usage(latest,path.parent)
+                except (ValueError,OSError): pass
     return render_report(result, directory)
 
 
@@ -693,6 +844,10 @@ class Handler(BaseHTTPRequestHandler):
                 record = AUTH_STORE.detail(identity)
                 if not record: return self.send_json(404, {'error':'历史记录不存在'})
                 return self.send_bytes(200,json.dumps(record,ensure_ascii=False,indent=2).encode(),'application/json',report_download_name(record, 'json'))
+            if len(parts)==5 and parts[4]=='cost-template':
+                from channel_admission import ledger_template
+                try: return self.send_json(200,{'billing':{'rows':ledger_template(billing_result('history',identity))}})
+                except ValueError as exc: return self.send_json(400,{'error':str(exc)})
             if len(parts) == 5 and parts[4] == 'report.html':
                 record = AUTH_STORE.detail(identity)
                 if not record: return self.send_json(404, {'error':'历史记录不存在'})
@@ -718,6 +873,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(200,data)
             result=job.get('result')
             if not result:return self.send_json(409,{'error':'任务尚未完成'})
+            if parts[4]=='cost-template':
+                from channel_admission import ledger_template
+                try: return self.send_json(200,{'billing':{'rows':ledger_template(billing_result('runs',job['id']))}})
+                except ValueError as exc: return self.send_json(400,{'error':str(exc)})
             if parts[4]=='report.html':return self.send_bytes(200,report_html(result,REPORTS/job['id']),'text/html; charset=utf-8',report_download_name(result, 'html'))
             if parts[4]=='report.json':return self.send_bytes(200,json.dumps(result,ensure_ascii=False,indent=2).encode(),'application/json',report_download_name(result, 'json'))
             if parts[4]=='evidence.zip':
@@ -754,12 +913,22 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(200); self.send_header('Content-Type','application/json; charset=utf-8'); self.set_session_cookie(token); self.send_header('Content-Length','0'); self.end_headers(); return
             except Exception as exc: return self.send_json(400, {'error':str(exc)})
         if not self.guard(auth=True):return
+        billing_match=re.fullmatch(r'/api/(runs|history)/([a-f0-9]+)/billing',path)
+        if billing_match:
+            try:
+                length=int(self.headers.get('Content-Length','0'))
+                if self.headers.get_content_type()!='application/json' or not 0<length<=2*1024*1024: raise ValueError('账单必须为不超过 2 MB 的 JSON')
+                payload=json.loads(self.rfile.read(length))
+                if not isinstance(payload,dict) or not isinstance(payload.get('billing'),dict): raise ValueError('请提交 billing 对象及逐请求 rows')
+                return self.send_json(200,save_billing(*billing_match.groups(),payload['billing']))
+            except (ValueError,TypeError,KeyError) as exc: return self.send_json(400,{'error':str(exc)})
+            except Exception: return self.send_json(500,{'error':'账单保存失败，请重试；不会触发模型请求'})
         if path in ('/api/claude/plan','/api/acceptance/plan'):
             # This is the runner's own request builder. Previewing never
             # contacts the upstream, stores credentials, or creates a job.
             try:
                 length=int(self.headers.get('Content-Length','0'))
-                if self.headers.get_content_type()!='application/json' or not 0<length<=65536:raise ValueError('请求预览内容无效或过大')
+                if self.headers.get_content_type()!='application/json' or not 0<length<=MAX_ACCEPTANCE_CONFIG:raise ValueError('请求预览须为不超过 8 MB 的 JSON 配置')
                 data=json.loads(self.rfile.read(length))
                 if not isinstance(data,dict) or (path=='/api/claude/plan' and data.get('suite')!='claude'):raise ValueError('请选择正确的验收专项')
                 config=validate({**data,'key':''},require_key=False)
@@ -900,7 +1069,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.headers.get_content_type()!='application/json': raise ValueError('请求必须为 JSON')
             length=int(self.headers.get('Content-Length','0'))
-            if not 0<length<65536:raise ValueError('请求长度无效')
+            if not 0<length<=MAX_ACCEPTANCE_CONFIG:raise ValueError('验收配置不能超过 8 MB')
             payload=json.loads(self.rfile.read(length)); c=validate(payload)
             request_id=str(payload.get('client_request_id','')).strip()
             with LOCK:

@@ -157,6 +157,9 @@ def evidence_records(result, directory=None):
     samples = matrix.get("samples") or matrix.get("evidence_samples") or []
     if samples and result.get("suite") != "batch_acceptance":
         records.extend(_native_evidence_records({"suite": "claude_acceptance", "samples": samples}))
+    production_samples=(result.get('production_validation') or {}).get('samples') or []
+    if production_samples and result.get('suite')!='batch_acceptance':
+        records.extend(_native_evidence_records({'suite':'claude_acceptance','samples':production_samples}))
     # Only a locally assigned sample ID identifies a logical HTTP request.
     # Upstream headers may be shared by unrelated requests and are not keys.
     seen = set(); unique = []
@@ -307,7 +310,9 @@ def render_report(result, directory=None):
         evidence=('<span class="result-stat">'+str(len(matched))+' 次 / '+str(failed)+' 次</span>' if matched else '<span class="result-unlinked">未记录关联</span>')
         result_rows.append('<tr><td><span class="result-number">'+f'{index:02d}'+'</span><a class="result-name" href="#check-'+str(index)+'">'+esc(check.get('title') or check.get('id'))+'</a></td><td>'+excerpt(check.get('method'))+'</td><td><div class="result-observation"><b>预期</b><br>'+excerpt(check.get('expected'))+'</div><div class="result-observation"><b>实际</b><br>'+excerpt(check.get('observed_summary') or check.get('observed'))+'</div></td><td>'+evidence+'<small>请求 / 异常记录</small></td><td class="result-status">'+badge(check.get('status'))+('</td></tr>'))
     all_results_html='<section id="all-results" class="all-results"><div class="section-head"><div><span class="index">RESULTS / COMPLETE MATRIX</span><h2>全项测试结果（'+str(len(checks))+' 项）</h2></div></div><p class="all-results-note">请求数来自已保存且与该项明确关联的证据；同一请求可支撑多项检查，不能逐行相加当作总请求数。“异常记录”对应请求原始 failed/error 状态，参数拒绝等负向用例请结合预期判读。</p><div class="results-scroll"><table class="results-table"><thead><tr><th>测试项</th><th>测试方法</th><th>预期 / 实际结果</th><th>证据次数</th><th>检查状态</th></tr></thead><tbody>'+''.join(result_rows)+'</tbody></table></div></section>'
-    toc_items=[('overview','01 · 结论总览'),('modules','02 · 验收模块'),('score','03 · 能力评分'),('setup','04 · 范围与配置'),('findings','05 · 问题、影响与建议'),('checks','06 · 逐项验收说明'),('requests','07 · 请求明细与证据')]
+    toc_items=[('overview','01 · 结论总览'),('modules','02 · 验收模块'),('score','03 · 能力评分'),('admission','生产接入建议')]
+    if result.get('suite')!='batch_acceptance':toc_items.extend([('production','业务稳定性与准入条件'),('cost','费用与账单核算')])
+    toc_items.extend([('setup','04 · 范围与配置'),('findings','05 · 问题、影响与建议'),('checks','06 · 逐项验收说明'),('requests','07 · 请求明细与证据')])
     if result.get('original_results'): toc_items.append(('original-results','08 · 原始评分、批量与日志'))
     toc_items.append(('limits','判读说明与原始数据'))
     toc_items.append(('all-results','附录 · 全项测试结果'))
@@ -435,7 +440,7 @@ def render_report(result, directory=None):
         generated_block = raw_block('HTML / SVG 生成结果（转义展示）', generated) if generated else '<p class="muted">没有保存生成的 HTML/SVG 正文；请展开请求证据查看响应原文。</p>'
         gpt_cards.append('<article class="gpt-card"><div class="gpt-card-head"><div><span class="index">GPT / QUALITY CHECK</span><h3>'+esc(item.get('model') or '未记录模型')+'</h3><p class="muted">提示词：'+esc(item.get('prompt') or '生成 HTML，内容是 SVG 绘制鹈鹕骑自行车 2D 动画')+'</p></div>'+badge('passed' if item.get('verdict') in (True,'passed','通过') else 'failed' if item.get('verdict') in (False,'failed','失败') else 'inconclusive')+'</div><table class="compact-table"><tr><th>HTML 输出</th><td>'+gpt_badge(item.get('html_detected'))+'</td><th>SVG 输出</th><td>'+gpt_badge(item.get('svg_detected'))+'</td></tr><tr><th>动画特征</th><td>'+gpt_badge(item.get('animation_detected'))+'</td><th>HTML 可解析</th><td>'+gpt_badge(item.get('html_valid'))+'</td></tr><tr><th>输入 tokens</th><td>'+esc(gpt_value(inp))+'</td><th>输出 tokens</th><td>'+esc(gpt_value(out))+'</td></tr><tr><th>总 tokens</th><td>'+esc(gpt_value(total_tokens))+('（派生）' if total_derived else '')+'</td><th>输入 + 输出 = 总数</th><td>'+accounting_badge+'</td></tr></table><p class="gpt-note">'+esc(accounting_note)+'</p><details class="raw"><summary>检测信号与生成效果证据</summary><pre>'+esc(signal_text)+'</pre></details>'+generated_block+'</article>')
     gpt_html='<section class="gpt-panel" id="gpt-quality"><div class="section-head"><div><span class="index">GPT / HTML · SVG · TOKEN</span><h2>GPT 生成质量与 Token 一致性</h2><p>针对“SVG 绘制鹈鹕骑自行车 2D 动画”提示词的可观察验收；不把一次生成等同于长期模型质量。</p></div></div><div class="gpt-grid">'+''.join(gpt_cards)+'</div></section>' if gpt_cards else ''
-    request_count=len(requests) if result.get('matrix_validation') else (result.get('transport') or {}).get('request_count',len(requests))
+    request_count=len(requests) if result.get('matrix_validation') or result.get('production_validation') else (result.get('transport') or {}).get('request_count',len(requests))
     elapsed=(result.get('finished_at') or 0)-(result.get('started_at') or 0)
     elapsed_text=seconds(elapsed*1000) if elapsed>0 else '未记录'
     metric_items=[('请求样本' if cc else '实际 API 请求',request_count,'请求数与验收项数分别统计'),
@@ -583,11 +588,13 @@ def render_report(result, directory=None):
     original_html=_browser_originals(result) if browser else ''
     result_json=raw_block('查看报告原始 JSON（已脱敏）',result)
     title=data.get('title') or '渠道验收报告';model=config.get('model') or '未记录模型'
+    from report_production import render as render_production
+    admission_html,production_html=render_production(result,data,links)
     return ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>'+esc(model+' · '+title)+'</title><style>'+STYLE+'</style></head><body><main>'
         +'<div class="masthead"><span class="brand">小小宇宙无敌</span><span class="eyebrow">CHANNEL ACCEPTANCE REPORT</span><button class="button no-print" id="print-report">打印 / 保存 PDF</button></div>'
         +'<header class="cover"><div class="cover-top"><span class="eyebrow">'+esc(title)+'</span>'+badge(result.get('status'))+'</div><h1>'+esc(model)+'</h1><p>'+esc(config.get('base') or '渠道地址未记录')+'</p><p class="run-id">RUN / '+esc(result.get('run_id') or '未记录')+'</p><div class="cover-meta"><span>'+esc(data.get('engine') or '渠道验收')+'</span><span>'+str(len(checks))+' 项检查</span><span>'+str(request_count)+' 次已记录请求</span><span>依据本轮实测 · 脱敏证据</span></div></header>'
         +'<nav class="nav"><a href="#overview">结论总览</a><a href="#modules">验收模块</a><a href="#score">能力评分</a>'+('<a href="#gpt-quality">GPT 质量</a>' if gpt_html else '')+'<a href="#setup">范围与配置</a><a href="#findings">发现的问题</a><a href="#checks">逐项检查</a><a href="#requests">请求证据</a>'+('<a href="#original-results">原始评分与日志</a>' if original_html else '')+'<a href="#limits">判读说明</a><a href="#all-results">全项结果</a></nav>'
-        +'<section id="overview" class="overview">'+executive_html+'<div class="metrics">'+metrics+'</div><div class="distribution" aria-hidden="true">'+distribution+'</div><p class="legend">本报告列出 '+str(len(checks))+' 个验收项 / 用例；'+('请求样本：通过 '+str(summary.get('passed',0))+'，异常 '+str(summary.get('failed',0))+'，无法判定 '+str(summary.get('inconclusive',0))+'。' if cc else 'Claude 专项检查与真实请求数分别统计；上游来源仅为渠道声明。' if claude else '浏览器检查结果与实际 HTTP 请求数分别统计。' if browser else '官方用例、附加传输检查与真实请求数分别统计。')+'</p></section>'+score_html+toc_html+gpt_html+matrix_html
+        +'<section id="overview" class="overview">'+executive_html+'<div class="metrics">'+metrics+'</div><div class="distribution" aria-hidden="true">'+distribution+'</div><p class="legend">本报告列出 '+str(len(checks))+' 个验收项 / 用例；'+('请求样本：通过 '+str(summary.get('passed',0))+'，异常 '+str(summary.get('failed',0))+'，无法判定 '+str(summary.get('inconclusive',0))+'。' if cc else 'Claude 专项检查与真实请求数分别统计；上游来源仅为渠道声明。' if claude else '浏览器检查结果与实际 HTTP 请求数分别统计。' if browser else '官方用例、附加传输检查与真实请求数分别统计。')+'</p></section>'+admission_html+score_html+toc_html+production_html+gpt_html+matrix_html
         +'<section id="setup" class="section"><div class="section-head"><div><span class="index">01 / SCOPE</span><h2>这次测了什么</h2></div></div><div class="grid-two"><div class="panel">'+info+'</div><div class="panel">'+scopes+'</div></div></section>'
         +'<section id="findings" class="section"><div class="section-head"><div><span class="index">02 / FINDINGS</span><h2>问题与影响</h2><p>依据本轮已保存的响应和断言整理；建议用于核对链路，不代替上游日志。</p></div></div>'+reason_html+finding_html+'</section>'
         +'<section id="checks" class="section"><div class="section-head"><div><span class="index">03 / CHECKS</span><h2>逐项验收说明</h2></div><small id="visible-count"></small></div><div class="filters no-print">'
