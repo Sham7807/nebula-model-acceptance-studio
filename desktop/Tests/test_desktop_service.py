@@ -95,6 +95,10 @@ class DesktopEngineTests(unittest.TestCase):
                 html=body.decode()
                 for phrase in ('desktop-report-fixture','验收模块总览','测试总耗时','请求耗时 P50','2 秒'):
                     self.assertIn(phrase,html)
+                # A single successful sample must keep the new grade provisional.
+                overview=html.split('id="overview"',1)[1].split('id="modules"',1)[0]
+                for phrase in ('本轮资源评级','优质资源','暂定 · 证据待完善'):
+                    self.assertIn(phrase,overview)
                 self.assertLess(html.index('id="overview"'),html.index('id="modules"'))
                 self.assertLess(html.index('id="modules"'),html.index('id="all-results"'))
                 status,css=other.request('/report-theme.css')
