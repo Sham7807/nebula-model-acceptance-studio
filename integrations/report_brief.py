@@ -71,13 +71,25 @@ def build_timing(result, checks=()):
             duration = round((end-start)*1000, 2); kind = 'request_window'
             source = '请求观测窗口（非完整测试耗时）：%s/%s 条请求有起止依据；并发耗时不累加。' % (len(intervals), len(request_rows))
     durations = [r.get('duration_ms') for r in request_rows if number(r.get('duration_ms')) is not None]
-    stages = []
-    for s in rows(obj(obj(obj(result.get('matrix_validation')).get('metrics')).get('stress')).get('stages')):
-        stages.append({**s, 'label': '参数矩阵 · 并发 %s' % s.get('concurrency'), 'duration_label': duration_label(s.get('duration_ms'))})
+    stages = []; seen_stage_requests = set()
+    matrix_stages = rows(obj(obj(obj(result.get('matrix_validation')).get('metrics')).get('stress')).get('stages'))
+    def add_stage(metrics, family, fallback_ids=()):
+        identities = frozenset(rows(metrics.get('request_ids')) or fallback_ids)
+        if identities and identities in seen_stage_requests: return
+        if identities: seen_stage_requests.add(identities)
+        stages.append({**metrics, 'source': family,
+                       'label': ('参数矩阵' if family == 'matrix_validation' else '原生压测') + ' · 并发 %s' % metrics.get('concurrency', '未记录'),
+                       'duration_label': duration_label(metrics.get('duration_ms'))})
+    for s in matrix_stages:
+        add_stage(s, 'matrix_validation')
     for c in checks:
         metrics = obj(c.get('metrics'))
         if metrics and ('stress' in dimensions(c) or c.get('id') == 'stress'):
-            stages.append({**metrics, 'label': '原生压测 · 并发 %s' % metrics.get('concurrency', '未记录'), 'duration_label': duration_label(metrics.get('duration_ms'))})
+            source = 'matrix_validation' if obj(c.get('metadata')).get('source') == 'matrix_validation' else 'native'
+            # Matrix aggregate checks repeat the canonical stage metrics.
+            # Keep independent native stages even at the same concurrency.
+            if source == 'matrix_validation' and any(metrics == s for s in matrix_stages): continue
+            add_stage(metrics, source, rows(c.get('request_ids')))
     return {'duration_ms': duration, 'total_ms': duration if kind == 'total' else None, 'kind': kind, 'duration_label': duration_label(duration), 'label': duration_label(duration),
             'started_label': time_label(start), 'finished_label': time_label(end), 'started_at': time_label(start), 'finished_at': time_label(end),
             'source': source, 'request_p50_ms': percentile(durations, .5), 'request_p95_ms': percentile(durations, .95),
@@ -100,11 +112,52 @@ def item(key, label, checks, conclusion=None, detail=''):
     pending = sum(c.get('status') in ('inconclusive', 'cancelled') or (c.get('status') in ('passed', 'failed') and not eligible(c)) for c in capability)
     missing = sum(c.get('status') in ('skipped', 'not_covered') for c in capability)
     status = 'failed' if failed else 'inconclusive' if pending or (passed and missing) else 'passed' if passed else 'not_covered'
-    conclusion = conclusion or (label+'存在失败' if failed else label+'部分待确认' if status == 'inconclusive' else label+'本轮通过' if passed else label+'未覆盖')
-    detail = detail or '通过 %s / 已判定 %s 项；待确认 %s 项%s。' % (passed, passed+failed, pending, '；未执行 %s 项' % missing if missing else '')
+    if failed:
+        status_label, tone = ('部分异常', 'attention') if passed else ('需重点核查', 'risk')
+        observation = ('多数检查通过' if passed > failed else '部分检查通过') + ' · %s 项异常' % failed if passed else '%s 项检查与预期不符' % failed
+    elif passed:
+        status_label, tone = ('部分已验证', 'attention') if pending or missing else ('已验证', 'passed')
+        observation = '%s 项检查已验证' % passed
+    else:
+        status_label, tone = ('待补充证据', 'neutral') if pending else ('本轮未测', 'neutral')
+        observation = '证据待补充' if pending else '本轮未覆盖'
+    conclusion = conclusion or label + '：' + observation
+    detail = detail or '已判定 %s 项：%s 项通过、%s 项异常%s%s。' % (passed+failed, passed, failed, '；另 %s 项待确认' % pending if pending else '', '；%s 项未执行' % missing if missing else '')
     evidence = sorted(checks, key=lambda c: {'failed':0, 'inconclusive':1, 'passed':2}.get(c.get('status'),3))
-    return {'id': key, 'label': label, 'status': status, 'conclusion': conclusion, 'detail': detail, 'text': conclusion+'。'+detail,
+    return {'id': key, 'label': label, 'status': status, 'status_label': status_label, 'tone': tone, 'display_tone': tone,
+            'counts': {'passed': passed, 'failed': failed, 'pending': pending, 'missing': missing},
+            'conclusion': conclusion, 'detail': detail, 'text': conclusion+'。'+detail,
             'check_ids': [c['id'] for c in evidence if c.get('id')], 'request_ids': list(dict.fromkeys(x for c in evidence for x in rows(c.get('request_ids'))))}
+
+
+def presentation(value, label, tone):
+    value.update(status_label=label, tone=tone, display_tone=tone)
+    value['text'] = value['conclusion'] + '。' + value['detail']
+    return value
+
+
+def resource_grade(score):
+    """Report a score band, without changing scoring or certifying provenance."""
+    total = score.get('weighted_total', score.get('total'))
+    valid = number(total) is not None and total <= 100
+    level = 'high' if valid and total >= 90 else 'medium' if valid and total >= 70 else 'low' if valid else 'unknown'
+    label = {'high': '优质资源', 'medium': '中等资源', 'low': '低等级资源', 'unknown': '待评估'}[level]
+    evidence = obj(score.get('evidence'))
+    resolution = number(evidence.get('resolution_percent'))
+    sample_count = number(evidence.get('sample_count')) or 0
+    weight_total = number(score.get('weight_total')) or 100
+    coverage = (number(score.get('weight_covered')) or 0) / weight_total * 100
+    reasons = []
+    if resolution is None or resolution < 80: reasons.append('证据可判定率不足 80%')
+    if coverage < 70: reasons.append('可评分模块权重不足 70%')
+    if sample_count < 10: reasons.append('明确关联的能力请求不足 10 条')
+    provisional = bool(valid and reasons)
+    anomalies = evidence.get('scored_failed', 0)
+    note = ('本轮综合分 %g/100，仅评价已测范围。' % total if valid else '本轮没有可计算的综合分，补齐证据后再评级。')
+    if provisional: note += '暂定原因：' + '；'.join(reasons) + '。'
+    if anomalies: note += '仍有 %s 项异常，请结合具体条件与证据判断。' % anomalies
+    return {'label': label, 'level': level, 'provisional': provisional, 'note': note,
+            'criteria': '优质资源：90–100 分；中等资源：70–89 分；低等级资源：低于 70 分。缺少综合分时待评估。可判定率至少 80%、可评分模块权重至少 70%、至少 10 条明确关联能力请求时才取消“暂定”标记；评级仍只适用于本轮已测范围，不代表来源认证或长期保证。'}
 
 
 def usage_pair(usage):
@@ -153,15 +206,21 @@ def cache_summary(result, checks):
     if not valid:
         summary = item('cache', '缓存复用', checks, '缓存复用未证实', '有效暖请求计数 %s/%s；usage 字段检查不等于缓存复用。字段缺失不按零命中计算。' % (len(valid), len(pairs)))
         if summary['status'] == 'passed': summary['status'] = 'inconclusive'
-        return summary
+        return presentation(summary, '计量待核查' if summary['counts']['failed'] else '待补充计量', 'attention' if summary['counts']['failed'] else 'neutral')
     read, total = sum(x[0] for x in valid), sum(x[1] for x in valid)
     percent = round(read / total * 100, 1)
     conclusion = '暖请求缓存 Token 复用率 %g%%' % percent
-    detail = '%s / %s 输入 Token；%s/%s 个暖请求有有效计数。排除冷请求与改前缀对照；这是渠道返回的用量证据，不代表已核实账单。' % (read, total, len(valid), len(pairs))
+    detail = '缓存读取 %s / 总输入 %s Token；%s/%s 个暖请求计量有效。排除冷请求与改前缀对照，比例依据渠道上报。' % (read, total, len(valid), len(pairs))
     result_item = item('cache', '缓存复用', checks, conclusion, detail)
     if result_item['status'] == 'not_covered' or (result_item['status'] == 'passed' and (read == 0 or len(valid) < len(pairs))): result_item['status'] = 'inconclusive'
     result_item['cache'] = {'read_tokens': read, 'total_input_tokens': total, 'percent': percent, 'valid_warm_requests': len(valid), 'warm_requests': len(pairs)}
-    return result_item
+    failures = result_item['counts']['failed']
+    if failures: result_item['detail'] += ' 另有 %s 项缓存检查异常待核查。' % failures
+    if not read:
+        result_item['conclusion'] = '本轮未观察到缓存复用（Token 复用率 0%）'
+        result_item['detail'] += ' 本轮零复用不代表模型不支持缓存。'
+        return presentation(result_item, '未观察到复用', 'attention')
+    return presentation(result_item, '有复用 · 部分异常' if failures else '部分样本已复用' if len(valid) < len(pairs) else '已观察到复用', 'attention' if failures or len(valid) < len(pairs) else 'passed')
 
 
 def build_summary(result, checks, score):
@@ -178,23 +237,44 @@ def build_summary(result, checks, score):
     limit = item('max_tokens', '输出限长', caps)
     if exceeded:
         limit = item('max_tokens', '输出限长', caps, '观察到输出超限（%s 项）' % len(exceeded), '；'.join('上限 %s → 返回 %s Token' % (cap, out) if cap is not None and out is not None else '请求上限被超过，详见关联原始判定' for _, cap, out in exceeded[:3]))
+        presentation(limit, '部分参数超限' if limit['counts']['passed'] else '观察到超限', 'attention' if limit['counts']['passed'] else 'risk')
     elif limit['status'] == 'failed':
-        limit = item('max_tokens', '输出限长', caps, '限长验收存在异常', '失败项需按参数核对；非法 0/-1 上限被接受不等于所有正常截断失效。')
+        limit = item('max_tokens', '输出限长', caps, '限长检查有 %s 项需核查' % limit['counts']['failed'], '请按异常参数核对；非法 0/-1 上限被接受不等于所有正常截断失效。')
+        presentation(limit, '参数待核查', 'attention')
     security = [c for c in selected('security', 'injection') if any(x in ' '.join(str(v or '') for v in (c.get('id'), c.get('source_id'), raw_check(c).get('id'), c.get('title'))).lower() for x in ('injection', 'hierarchy', 'canary', '注入', '指令层级', '金丝雀')) or 'injection' in dimensions(c)]
     injection = item('injection', '指令隔离', security)
     if injection['status'] == 'failed': injection['conclusion'] = '指令隔离存在风险'
     injection['detail'] += ' 合成注入用例不能证明上游暗加提示词；本轮未验证上游是否添加提示词。'
-    injection['text'] = injection['conclusion']+'。'+injection['detail']
+    presentation(injection, '隔离风险待核查' if injection['counts']['failed'] else injection['status_label'], injection['tone'])
     cache = cache_summary(result, selected('cache'))
     pressure = item('pressure', '压测与稳定性', selected('stress', 'reliability'))
     timing = build_timing(result, checks)
     if timing['stages']:
-        detail = []
-        for s in timing['stages']:
-            success = number(s.get('success_rate'))
-            detail.append('%s：%s/%s 请求，成功率%s，耗时%s' % (s['label'], s.get('completed', '—'), s.get('planned', s.get('requested', '—')), '%g%%' % (success*100) if success is not None else '未记录', s['duration_label']))
-        pressure['detail'] = '；'.join(detail) + '。短时负载不代表长期 SLA。'
-        pressure['text'] = pressure['conclusion']+'。'+pressure['detail']
+        stages = timing['stages']
+        counted = [s for s in stages if token(s.get('completed')) is not None and token(s.get('planned', s.get('requested'))) is not None]
+        completed = sum(s['completed'] for s in counted); planned = sum(s.get('planned', s.get('requested')) for s in counted)
+        rates = [(s, s['success_rate']) for s in stages if number(s.get('success_rate')) is not None and s['success_rate'] <= 1 and (number(s.get('completed')) or 0) > 0]
+        text = '%s 个独立负载阶段' % len(stages)
+        if counted: text += '，已记录完成 %s/%s 次请求' % (completed, planned)
+        if rates:
+            low, high = min(v for _, v in rates), max(v for _, v in rates)
+            text += '；已完成请求成功率 %s' % ('%g%%' % (low*100) if low == high else '%g%%–%g%%' % (low*100, high*100))
+            if low < 1:
+                weakest = next(s for s, value in rates if value == low)
+                text += '，%s 最低' % weakest['label']
+                pressure['conclusion'] = '部分负载阶段有异常' if high > 0 else '已记录负载请求需重点核查'
+                pressure['status_label'] = '负载有波动' if high > 0 else '负载异常'
+                pressure['tone'] = 'attention' if high > 0 else 'risk'
+            elif planned > completed:
+                pressure['conclusion'] = '已完成负载请求表现正常，计划尚未完成'
+                pressure['status_label'], pressure['tone'] = '负载未测完', 'attention'
+            elif pressure['counts']['failed']:
+                pressure['conclusion'] = '已记录负载请求表现正常，另有稳定性检查异常'
+                pressure['status_label'], pressure['tone'] = '部分检查异常', 'attention'
+            elif len(rates) == len(stages):
+                pressure['conclusion'] = '已测负载阶段表现正常'
+        pressure['detail'] = text + '。各阶段耗时见上方，详细指标见下方证据；短时样本不代表长期 SLA。'
+        presentation(pressure, pressure['status_label'], pressure['tone'])
     items = [basic, tools, limit, injection, cache, pressure]
     # Batch conclusions must not pretend pooled requests describe one model.
     models = rows(obj(result.get('configuration')).get('models'))
@@ -205,6 +285,10 @@ def build_summary(result, checks, score):
     headline = '；'.join(x['conclusion'] for x in headline_items if x['status'] != 'not_covered')
     headline = '；'.join(headline.split('；')[:4]) or '本轮缺少可判定证据'
     overall = score.get('weighted_total', score.get('total'))
+    grade = resource_grade(score)
+    if batch:
+        grade['provisional'] = grade['level'] != 'unknown'
+        grade['note'] = '多模型汇总参考，不能代表每个模型的资源等级；请按模型单独判读。' + grade['note']
     return {'headline': headline, 'status': 'failed' if any(c.get('status') == 'failed' and eligible(c) for c in checks) else obj(score.get('evidence')).get('status', 'inconclusive'),
             'detail': '先看本轮结论、模块得分和证据可判定率，再对照失败请求。完整测试清单位于报告末尾。',
-            'items': items, 'score': overall, 'overall_score': overall, 'resolution_percent': obj(score.get('evidence')).get('resolution_percent'), 'timing': timing, 'duration': timing}
+            'items': items, 'score': overall, 'overall_score': overall, 'resource_grade': grade, 'resolution_percent': obj(score.get('evidence')).get('resolution_percent'), 'timing': timing, 'duration': timing}

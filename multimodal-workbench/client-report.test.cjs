@@ -138,12 +138,12 @@ test('single headline score uses browser module weights instead of a second dime
   const html=await harness().WorkbenchReport.render([r]);
   assert.match(overview(html),/<strong>43<\/strong>/);
   assert.match(html,/可评分权重 35% \/ 100%/);
-  assert.match(overview(html),/基础能力存在失败/);
+  assert.match(overview(html),/基础能力需重点核查/);
 });
 test('illegal max_tokens control failure cannot imply a legal cap was ignored',async()=>{
   const r=summaryRecord([check('max_tokens=0',['max_tokens'],'failed',{parameters:{max_tokens:0}}),check('max_tokens=10',['max_tokens'],'passed',{parameters:{max_tokens:10}}),check('isolation',['security'],'failed')]);
   const html=overview(await harness().WorkbenchReport.render([r]));
-  assert.match(html,/非法限长参数校验存在失败，不能据此判定合法限长失效/);
+  assert.match(html,/非法限长参数校验存在异常，不能据此判定合法限长失效/);
   assert.match(html,/指令隔离存在异常/);
   assert.match(html,/不能据此认定上游私自添加提示词/);
   assert.doesNotMatch(html,/限长出现超限|长度控制未遵守|疑似偷偷/);
@@ -151,7 +151,7 @@ test('illegal max_tokens control failure cannot imply a legal cap was ignored',a
 test('verified output cap excess produces a direct conclusion and links to evidence',async()=>{
   const r=summaryRecord([check('base',['protocol']),check('cap',['max_tokens'],'failed',{parameters:{max_tokens:10},reason_code:'output_cap_exceeded'})]);
   const html=overview(await harness().WorkbenchReport.render([r]));
-  assert.match(html,/基础接口可用；限长出现超限/);
+  assert.match(html,/基础接口可用；部分限长样本出现超限/);
   assert.match(html,/长度控制未遵守请求/);
   assert.match(html,/href="#record-1-check-2"/);
 });
@@ -201,7 +201,7 @@ test('Gemini cache uses original usageMetadata denominator',async()=>{
 test('a zero-cap assertion never becomes a legal-cap excess claim even if a legacy reason code says excess',async()=>{
   const r=summaryRecord([check('zero',['max_tokens'],'failed',{parameters:{max_tokens:0},reason_code:'output_cap_exceeded'})]);
   const html=overview(await harness().WorkbenchReport.render([r]));
-  assert.match(html,/非法限长参数校验存在失败/);assert.doesNotMatch(html,/合法上限样本输出超限|限长出现超限/);
+  assert.match(html,/非法限长参数校验存在异常/);assert.doesNotMatch(html,/合法上限样本输出超限|限长出现超限/);
 });
 test('portable score uses the same even rounding as the server at 62.5',async()=>{
   const checks=Array.from({length:8},(_,i)=>check('tool-'+i,['tools'],i<5?'passed':'failed'));
@@ -220,4 +220,72 @@ test('multiple model summaries never pool cache hits into one model capability c
   const html=overview(await harness().WorkbenchReport.render([make('first',800),make('second',0)]));
   assert.match(html,/多模型报告：各模型独立判读/);assert.match(html,/跨模型汇总不能证明单个模型能力/);
   assert.doesNotMatch(html,/暖请求缓存 Token 命中率 40%/);
+});
+
+test('mixed capability result uses amber and exact counts without rewriting failed assertions',async()=>{
+  const checks=Array.from({length:9},(_,i)=>check('base-'+i,['protocol'],i<8?'passed':'failed'));
+  const html=await harness().WorkbenchReport.render([summaryRecord(checks)]),brief=overview(html);
+  assert.match(brief,/class="brief-item attention" data-status="failed"/);
+  assert.match(brief,/class="badge attention" data-status="failed">部分异常/);
+  assert.match(brief,/多数检查通过 · 1 项异常。通过 8\/9/);
+  assert.doesNotMatch(brief,/>未通过</);
+  assert.match(html,/data-status="failed">本项异常/);
+  assert.match(html,/本项计分 0 \/ 100/);
+  assert.match(brief,/<strong>89<\/strong>/);
+});
+test('all anomalous samples remain a prominent scoped risk rather than a pass',async()=>{
+  const html=overview(await harness().WorkbenchReport.render([summaryRecord([check('tool',['tools'],'failed')])]));
+  assert.match(html,/class="brief-item risk" data-status="failed"/);
+  assert.match(html,/需重点核查/);
+  assert.match(html,/1\/1 项已判定检查出现异常/);
+  assert.match(html,/<strong>0<\/strong>/);
+});
+test('zero observed cache reuse is an amber observation and remains distinct from missing measurement',async()=>{
+  const r=summaryRecord([check('warm',['cache'],'passed',{parameters:{round:'warm_1'},request_ids:['warm']})],[{id:'warm',status:200,response:{usage:{prompt_tokens:1000,prompt_tokens_details:{cached_tokens:0}}}}]);
+  const html=overview(await harness().WorkbenchReport.render([r]));
+  assert.match(html,/class="brief-item attention" data-status="inconclusive"/);
+  assert.match(html,/>本轮未观察到复用<\/span>/);
+  assert.match(html,/缓存 Token 命中率 0%（读取 0 \/ 完整输入 1,000 Token）/);
+  assert.doesNotMatch(html,/>复用证据待补齐<\/span>/);
+  assert.match(html,/<strong>100<\/strong>/); // measured reuse is not the assertion score
+});
+function gradeFixture(percent,{unknown=0,requestCount=10,moduleKeys=['protocol','multimodal','tools','max_tokens','cache','reliability','security']}={}){
+  const requests=Array.from({length:requestCount},(_,i)=>({id:'sample-'+i,status:200}));
+  const checks=moduleKeys.flatMap(module=>Array.from({length:100+unknown},(_,i)=>check(`${module}-${i}`,[module],i>=100?'inconclusive':i<percent?'passed':'failed',{request_ids:requestCount?['sample-'+(i%requestCount)]:[]})));
+  return summaryRecord(checks,requests);
+}
+test('resource grade thresholds follow the unchanged weighted score at 69, 70, 89 and 90',async()=>{
+  for(const [score,level,label] of [[69,'low','低等级资源'],[70,'medium','中等资源'],[89,'medium','中等资源'],[90,'high','优质资源']]){
+    const html=overview(await harness().WorkbenchReport.render([gradeFixture(score)]));
+    assert.match(html,new RegExp(`<strong>${score}</strong>`));
+    assert.match(html,new RegExp(`class="resource-grade grade-${level}"><span class="grade-label">本轮资源评级</span><b class="grade-status">${label}</b>`));
+    assert.match(html,/>本轮资源评级<\/span>/);
+    assert.doesNotMatch(html,/>暂定 · 证据待完善<\/small>/);
+    assert.match(html,/评级仅反映本轮已测渠道表现/);
+  }
+});
+test('small sample, low coverage and unresolved evidence qualify the grade without changing it',async()=>{
+  for(const [options,reason] of [[{requestCount:9},/关联能力请求 9 个/],[{moduleKeys:['protocol']},/可评分权重 20%/],[{unknown:30},/证据可判定率 77%/]]){
+    const html=overview(await harness().WorkbenchReport.render([gradeFixture(90,options)]));
+    assert.match(html,/<strong>90<\/strong>/);
+    assert.match(html,/class="resource-grade grade-high"/);
+    assert.match(html,/>暂定 · 证据待完善<\/small>/);
+    assert.match(html,reason);
+  }
+});
+test('unscorable evidence is pending assessment, never a fabricated zero grade',async()=>{
+  const html=overview(await harness().WorkbenchReport.render([summaryRecord([check('unknown',['protocol'],'inconclusive')])]));
+  assert.match(html,/<strong>—<\/strong>/);
+  assert.match(html,/class="resource-grade grade-unknown"><span class="grade-label">本轮资源评级<\/span><b class="grade-status">待评估<\/b>/);
+  assert.match(html,/尚无可评分证据，暂不评级/);
+});
+test('resource grade sits before the headline and multimodel ratings remain provisional even with sufficient evidence',async()=>{
+  const first={...gradeFixture(90),model:'first'},second={...gradeFixture(90),model:'second'};
+  const html=overview(await harness().WorkbenchReport.render([first,second]));
+  assert.match(html,/<div class="executive-verdict"><span class="index">VERDICT \/ 本轮结论<\/span><div class="resource-grade grade-high">/);
+  assert.ok(html.indexOf('class="resource-grade')<html.indexOf('<h2>'));
+  assert.doesNotMatch(html.split('<div class="executive-score">')[1],/class="resource-grade/);
+  assert.match(html,/<small>暂定 · 证据待完善<\/small>/);
+  assert.match(html,/多模型汇总评级仅供参考，不能代表单个模型/);
+  assert.match(html,/<details class="grade-criteria"><summary>查看评级标准与适用范围<\/summary>/);
 });
