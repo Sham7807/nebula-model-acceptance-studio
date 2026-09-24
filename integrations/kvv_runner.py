@@ -38,7 +38,12 @@ def _is_k3(config):
     return model in {'kimi-k3', 'kimi_k3', 'kimi/k3'} or model.endswith('/kimi-k3')
 
 def command(config, directory, collect=False):
-    args = [sys.executable, '-m', 'pytest', '-p', 'kvv_progress']
+    # The Windows portable build ships a small PyInstaller worker because a
+    # frozen application cannot execute ``app.exe -m pytest``.  Development,
+    # macOS and server installs keep the normal interpreter subprocess.
+    worker = os.environ.get('WORKBENCH_PYTEST_RUNNER')
+    args = [worker] if worker else [sys.executable, '-m', 'pytest']
+    args += ['-p', 'kvv_progress']
     if config.get('think_mode') == 'openai':
         from kvv_openai_cases import PRECHECK as OPENAI_PRECHECK
         cases = str(ROOT / 'kvv_openai_cases.py')

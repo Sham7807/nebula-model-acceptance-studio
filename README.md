@@ -27,6 +27,8 @@
 
 当前构建适用于 **Apple Silicon / macOS 14+**，为本地签名版本，尚未完成 Apple 公证。安装、源码构建和验证步骤见 [桌面版说明](desktop/README.md)。
 
+同时提供 **Windows 10/11** 版本。Windows 包由 GitHub Actions 在 Windows runner 上构建，复用同一套网页工作台、检测引擎、统一报告和任务中心，使用 WebView2 原生窗口；下载与构建说明见 [Windows 版说明](desktop/windows/README.md)。
+
 ## 快速开始
 
 ### 只做基础测试
