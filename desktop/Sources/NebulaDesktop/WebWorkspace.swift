@@ -27,6 +27,8 @@ final class WebWorkspace: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         config.preferences.javaScriptCanOpenWindowsAutomatically = false
         config.mediaTypesRequiringUserActionForPlayback = []
         webView = WKWebView(frame: .zero, configuration: config)
+        webView.appearance = NSAppearance(named: .aqua)
+        webView.underPageBackgroundColor = .white
         super.init()
         webView.navigationDelegate = self; webView.uiDelegate = self
         webView.setValue(false, forKey: "drawsBackground")
@@ -138,6 +140,8 @@ final class WebWorkspace: NSObject, ObservableObject, WKNavigationDelegate, WKUI
             NSWorkspace.shared.open(url); return nil
         }
         let preview = WKWebView(frame:.zero, configuration:configuration)
+        preview.appearance = NSAppearance(named:.aqua)
+        preview.underPageBackgroundColor = .white
         preview.navigationDelegate = self; preview.uiDelegate = self
         let window = NSWindow(contentRect:NSRect(x:0,y:0,width:1000,height:760), styleMask:[.titled,.closable,.miniaturizable,.resizable], backing:.buffered, defer:false)
         window.title = "内容预览"; window.contentView = preview; window.isReleasedWhenClosed = false

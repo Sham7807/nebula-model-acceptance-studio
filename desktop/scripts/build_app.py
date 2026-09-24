@@ -12,7 +12,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 DESKTOP = ROOT / 'desktop'
 DIST = DESKTOP / 'dist'
-APP = DIST / '小小宇宙无敌.app'
+APP = DIST / '渠道测试系统.app'
 VERSION = json.loads((DESKTOP / 'version.json').read_text())
 
 
@@ -64,6 +64,16 @@ def build(dmg=True):
     for source in (ROOT / 'integrations').iterdir():
         if source.is_file() and (source.suffix in {'.py','.json','.css','.html'} or source.name.startswith('LICENSE')) and not source.name.startswith('test_'):
             shutil.copy2(source, integrations / source.name)
+    # Brand the desktop copy only. Website sources and persistent identifiers stay intact.
+    for folder in (web, integrations):
+        for source in folder.iterdir():
+            if source.is_file() and source.suffix in {'.html', '.js', '.py'}:
+                content = source.read_text(encoding='utf-8')
+                updated = content.replace('小小宇宙无敌', '渠道测试系统')
+                if updated != content:
+                    source.write_text(updated, encoding='utf-8')
+    with (web / 'report-theme.css').open('a', encoding='utf-8') as f:
+        f.write('\n' + (DESKTOP / 'Resources/report-desktop.css').read_text(encoding='utf-8'))
     shutil.copytree(ROOT / 'integrations/Kimi-Vendor-Verifier', integrations / 'Kimi-Vendor-Verifier', ignore=ignored)
     extensions = integrations / 'Kimi-Vendor-Verifier/tests/k3_features'
     extensions.mkdir(exist_ok=True)
@@ -75,7 +85,7 @@ def build(dmg=True):
         if file.is_file(): shutil.copy2(file, resources / file.name)
     for name in ['LICENSE', 'NOTICE', 'THIRD_PARTY.md']:
         if (ROOT / name).exists(): shutil.copy2(ROOT / name, resources / name)
-    info = {'CFBundleName':'小小宇宙无敌', 'CFBundleDisplayName':'小小宇宙无敌',
+    info = {'CFBundleName':'渠道测试系统', 'CFBundleDisplayName':'渠道测试系统',
             'CFBundleIdentifier':'com.nebula.workbench', 'CFBundleExecutable':'NebulaDesktop',
             'CFBundlePackageType':'APPL', 'CFBundleShortVersionString':VERSION['version'], 'CFBundleVersion':VERSION['build'],
             'LSMinimumSystemVersion':'14.0', 'LSApplicationCategoryType':'public.app-category.developer-tools',
@@ -110,9 +120,9 @@ def build(dmg=True):
         staging.mkdir(); shutil.copytree(APP, staging / APP.name, symlinks=True)
         (staging / 'Applications').symlink_to('/Applications')
         shutil.copy2(DESKTOP / '安装说明.txt', staging)
-        image = DIST / f"Nebula-Studio-{VERSION['version']}-Apple-Silicon.dmg"
+        image = DIST / f"Channel-Test-System-{VERSION['version']}-Apple-Silicon.dmg"
         image.unlink(missing_ok=True)
-        run('hdiutil', 'create', '-volname', '小小宇宙无敌', '-srcfolder', staging, '-ov', '-format', 'UDZO', image)
+        run('hdiutil', 'create', '-volname', '渠道测试系统', '-srcfolder', staging, '-ov', '-format', 'UDZO', image)
         shutil.rmtree(staging)
         print('DMG:', image)
     print('APP:', APP)

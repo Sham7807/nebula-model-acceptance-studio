@@ -1,0 +1,15 @@
+/* Shared bright report presentation, appended during desktop packaging only. */
+:root {color-scheme:only light;--ink:#20242b;--muted:#727984;--line:#e7eaf0;--paper:#fff;--green:#0878ef}
+body {background:#fff;color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+.cover {background:#fff;color:var(--ink);border:1px solid var(--line);border-radius:22px;box-shadow:0 4px 18px #17284005}
+.cover h1,.cover p,.cover .eyebrow,.cover .run-id,.cover-meta {color:var(--ink)}
+.cover-meta span {background:#f8f9fc;color:#667080;border-color:var(--line)}
+.cover .badge {background:#eff6ff;color:#0878ef;border-color:#dceaff}
+.cover code {background:#f8f9fc;color:var(--ink)}
+.cover .button {background:#fff;color:#0878ef;border-color:var(--line)}
+.nav {background:#fff;border-color:var(--line)}
+.nav a {color:#667080}
+:is(.overview,.module-panel,.score-panel,.section,.panel,.request-card,.check-card,.admission-panel) {background:#fff;border-color:var(--line);border-radius:18px}
+:is(.executive-score,.brief-item,.executive-duration,.score-dimension,.module-card,.production-envelope) {background:#fafbfe;border-color:var(--line);border-radius:13px}
+pre,code {background:#f8f9fc;color:#465365;border-color:var(--line)}
+@media print {.cover {box-shadow:none}}

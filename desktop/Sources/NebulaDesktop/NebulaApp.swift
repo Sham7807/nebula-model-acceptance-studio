@@ -6,13 +6,14 @@ struct NebulaApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var model = AppModel()
     var body: some Scene {
-        Window("小小宇宙无敌", id:"main") {
+        Window(AppVersion.name, id:"main") {
             MainWindow(model:model)
                 .preferredColorScheme(model.colorScheme)
                 .onAppear { delegate.model = model; model.start() }
         }
         .defaultSize(width:1280,height:850)
         .windowStyle(.titleBar)
+        .windowToolbarStyle(.unified)
         .commands {
             CommandGroup(replacing:.newItem) {}
             CommandGroup(after:.appInfo) {
@@ -36,15 +37,15 @@ struct MainWindow: View {
         NavigationSplitView {
             VStack(spacing:0) {
                 HStack(spacing:11) {
-                    ZStack { RoundedRectangle(cornerRadius:11).fill(.blue.gradient).frame(width:38,height:38); Image(systemName:"sparkles").foregroundStyle(.white).font(.system(size:21,weight:.medium)) }
-                    VStack(alignment:.leading,spacing:3) { Text("小小宇宙无敌").font(.system(size:14,weight:.semibold)); Text("NEBULA STUDIO").font(.system(size:9,weight:.medium,design:.rounded)).tracking(1.8).foregroundStyle(.secondary) }
+                    ZStack { RoundedRectangle(cornerRadius:12,style:.continuous).fill(DesktopTheme.accent.opacity(0.08)).frame(width:38,height:38); Image(systemName:"point.3.connected.trianglepath.dotted").foregroundStyle(DesktopTheme.accent).font(.system(size:21,weight:.medium)) }
+                    VStack(alignment:.leading,spacing:4) { Text(AppVersion.name).font(.system(size:14,weight:.semibold)); Text("CHANNEL TEST SYSTEM").font(.system(size:8,weight:.medium)).tracking(1.1).foregroundStyle(.secondary) }
                     Spacer(minLength:0)
                 }.padding(.horizontal,18).padding(.top,20).padding(.bottom,22)
                 List(selection:$model.destination) {
                     section(nil,[.overview,.history])
                     section("多模态工作区",[.text,.image,.video,.audio])
                     section("专业验收",[.general,.ccmax,.claude,.kimi,.gpt])
-                }.listStyle(.sidebar)
+                }.listStyle(.sidebar).scrollContentBackground(.hidden)
                 Spacer(minLength:0)
                 VStack(alignment:.leading,spacing:10) {
                     HStack(spacing:7) {
@@ -55,7 +56,7 @@ struct MainWindow: View {
                     }.foregroundStyle(.secondary)
                     Text("历史记录保存在这台 Mac").font(.system(size:10)).foregroundStyle(.tertiary)
                 }.padding(18)
-            }.navigationSplitViewColumnWidth(min:215,ideal:225,max:260)
+            }.background(DesktopTheme.sidebar).navigationSplitViewColumnWidth(min:215,ideal:235,max:270)
         } detail: {
             VStack(spacing:0) {
                 if case .failed(let reason) = model.engine.state {
@@ -73,7 +74,7 @@ struct MainWindow: View {
                     if model.selected == .overview { OverviewView(model:model) }
                     else if !model.engine.isReady || !model.workspace.loaded { EnginePlaceholder(model:model) }
                 }
-            }.background(Color(nsColor:.windowBackgroundColor))
+            }.background(DesktopTheme.canvas)
             .navigationTitle(model.selected.title)
             .navigationSubtitle(model.selected.subtitle)
             .toolbar {
@@ -84,7 +85,7 @@ struct MainWindow: View {
                     Button { model.select(.history) } label:{Image(systemName:"clock.arrow.circlepath")}.help("测试档案")
                 }
             }
-        }.frame(minWidth:1020,minHeight:680)
+        }.tint(DesktopTheme.accent).frame(minWidth:1020,minHeight:680)
         .onChange(of:model.destination) { _,_ in model.navigate() }
         .sheet(isPresented:$model.showChannel) { ChannelSheet(model:model) }
     }
@@ -113,6 +114,6 @@ struct EnginePlaceholder: View {
                 Text(error).frame(maxWidth:400)
                 Button("重新打开工作区") { model.workspace.refresh() }
             } else { ProgressView(); Text("正在准备检测工作区…").foregroundStyle(.secondary) }
-        }.frame(maxWidth:.infinity,maxHeight:.infinity).background(Color(nsColor:.windowBackgroundColor))
+        }.frame(maxWidth:.infinity,maxHeight:.infinity).background(DesktopTheme.canvas)
     }
 }

@@ -1,4 +1,4 @@
-# 小小宇宙无敌 · macOS 桌面版
+# 渠道测试系统 · macOS 桌面版
 
 原生 macOS 窗口与本机检测引擎，让模型渠道验收像使用一款 Mac 应用一样直接。网页版的源码、单文件 HTML 和服务器部署方式完整保留；桌面版是 `desktop/` 下的独立入口。
 
@@ -6,7 +6,7 @@
 
 ## 安装与首次使用
 
-1. 打开 `Nebula-Studio-1.0.2-Apple-Silicon.dmg`，将「小小宇宙无敌.app」拖入 Applications。
+1. 打开 `Channel-Test-System-1.1.0-Apple-Silicon.dmg`，将「渠道测试系统.app」拖入 Applications。
 2. 双击打开应用，等待左下角显示「本地引擎就绪」。Python 和验收依赖已内置，无需打开终端。
 3. 点击右上角「连接渠道」或按 `⌘K`，填写 Base URL、API Key 和可选的默认模型。
 4. 从侧边栏选择工作区，获取模型列表、检查请求配置，再开始测试。
@@ -28,7 +28,13 @@
 
 本机引擎不依赖已部署的网站在线。**实际模型请求仍需要网络和有效渠道权限，并可能产生渠道费用。** 模型支持程度、地区限制、媒体 URL 有效期和上游限流仍由渠道决定。桌面版不能保证所有第三方私有接口都兼容。
 
-## 1.0.2 更新
+## 1.1.0 更新
+
+桌面版正式更名为「渠道测试系统」，同步网站版本 `eb343dd` 的生产验收、业务负载、成本估算与逐请求账单核对。原生概览、侧栏、连接窗口、所有检测工作区、历史记录和导出报告统一为亮白 / 浅灰 / 蓝色，圆角与间距保持一致。轻量悬停和按压反馈遵循 macOS 的减少动态效果设置；应用固定使用亮白外观。
+
+更新时退出旧版后替换应用即可。原有 Bundle ID、钥匙串标识和数据路径不变，已保存的历史继续使用。构建时仅对桌面内置资源应用新名称和报告主题，仓库中的原始网页版业务代码保持完整。
+
+### 1.0.2
 
 同步网站版本 `8d3bf2e`：统一报告增加优质 / 中等 / 低等级资源评级，证据不足时标注「暂定」。模块摘要区分多数通过、少量异常与证据待补齐，缓存零命中表述为「本轮未观察到复用」，保留原始异常、分数和请求证据。更新保留本机历史、渠道偏好和钥匙串凭据。
 
@@ -57,7 +63,7 @@ uv pip sync --python desktop/.build-venv/bin/python desktop/requirements.lock
 python3 desktop/scripts/build_app.py
 ```
 
-输出到 `desktop/dist/`。构建器复制现有网页与 Python 引擎、固定版本 KVV、可迁移的 Python 运行时、依赖和许可证；校验 KVV 素材，签名嵌套二进制，验证签名并生成 DMG。它不会修改网页源码或服务器配置。
+输出到 `desktop/dist/渠道测试系统.app` 和版本化的 `Channel-Test-System-*.dmg`。构建器复制现有网页与 Python 引擎、固定版本 KVV、可迁移的 Python 运行时、依赖和许可证；在副本中替换显示名称并追加亮白报告样式，校验 KVV 素材，签名嵌套二进制，验证签名并生成 DMG。它不会修改网页源码或服务器配置。
 
 `--no-dmg` 只生成 `.app`。当前构建器面向本机架构，不是 Universal 2 构建。开发时修改 `Resources/desktop.css` 和 `desktop-bridge.js` 后需要重新打包才能进入应用。
 
@@ -79,7 +85,7 @@ npm test
 desktop/.build-venv/bin/python -m pytest integrations --ignore=integrations/Kimi-Vendor-Verifier -q
 ```
 
-原生检查使用独立测试数据目录，覆盖全部工作区导航、默认渠道同步、模型发现、实际模拟请求和历史保存。也可使用 `open "desktop/dist/小小宇宙无敌.app" --args --isolated-testing` 启动隔离的人工 QA 会话；这不会读写正式渠道配置或钥匙串。
+原生检查使用独立测试数据目录，覆盖全部工作区导航、默认渠道同步、模型发现、实际模拟请求和历史保存。也可使用 `open "desktop/dist/渠道测试系统.app" --args --isolated-testing` 启动隔离的人工 QA 会话；这不会读写正式渠道配置或钥匙串。
 
 ## 结构
 

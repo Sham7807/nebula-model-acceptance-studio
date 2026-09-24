@@ -10,5 +10,5 @@ swiftc -parse-as-library -o "$DESKTOP_TEST_ROOT/qa/native-checks" \
   "$DESKTOP_TEST_ROOT/Sources/NebulaDesktop/EngineService.swift" \
   "$DESKTOP_TEST_ROOT/Sources/NebulaDesktop/WebWorkspace.swift" \
   "$DESKTOP_TEST_ROOT/Tests/NativeChecks.swift"
-NEBULA_TEST_RESOURCES="$DESKTOP_TEST_ROOT/dist/小小宇宙无敌.app/Contents/Resources" \
+NEBULA_TEST_RESOURCES="$DESKTOP_TEST_ROOT/dist/渠道测试系统.app/Contents/Resources" \
   "$DESKTOP_TEST_ROOT/qa/native-checks"

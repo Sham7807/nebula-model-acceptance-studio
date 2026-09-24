@@ -3,6 +3,7 @@ import SwiftUI
 import Security
 
 enum AppVersion {
+    static let name = "渠道测试系统"
     static var current: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "开发版" }
 }
 
@@ -54,16 +55,7 @@ enum Destination: String, CaseIterable, Identifiable {
         case .history: return "留存结果、请求证据与完整报告"
         }
     }
-    var tint: Color {
-        switch self {
-        case .image: return .pink
-        case .video: return .purple
-        case .audio: return .orange
-        case .claude: return .orange
-        case .kimi: return .indigo
-        default: return .blue
-        }
-    }
+    var tint: Color { Color(red:0.04,green:0.44,blue:0.92) }
 }
 
 struct ChannelProfile: Codable, Equatable {
@@ -135,7 +127,7 @@ enum Keychain {
         if update == errSecItemNotFound {
             var q = query; q[kSecValueData as String] = data
             q[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-            q[kSecAttrLabel as String] = "小小宇宙 · 渠道 API Key"
+            q[kSecAttrLabel as String] = "渠道测试系统 · API Key"
             let code = SecItemAdd(q as CFDictionary, nil)
             guard code == errSecSuccess else { throw keychainError(code) }
         } else if update != errSecSuccess { throw keychainError(update) }

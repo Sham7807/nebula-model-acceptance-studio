@@ -1,7 +1,7 @@
-小小宇宙无敌 · Nebula Studio
+渠道测试系统 · Channel Test System
 macOS 14 或更新版本 · Apple Silicon（M1 / M2 / M3 / M4 等）
 
-将「小小宇宙无敌.app」拖入「Applications」，然后双击打开。
+将「渠道测试系统.app」拖入「Applications」，然后双击打开。
 应用内置检测引擎，不需要安装 Python，也不需要手动启动服务。
 
 这是本地签名构建，尚未通过 Apple 公证。如 macOS 提示开发者无法验证，

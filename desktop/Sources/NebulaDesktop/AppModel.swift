@@ -14,7 +14,6 @@ final class AppModel: ObservableObject {
     @Published var showChannel = false
     @Published var notice: String?
     @Published var historyError: String?
-    @AppStorage("desktopAppearance") var appearance = "system"
     private var subscriptions = Set<AnyCancellable>()
     private var refreshTask: Task<Void, Never>?
     private var started = false
@@ -45,7 +44,7 @@ final class AppModel: ObservableObject {
         workspace.onDownload = { [weak self] filename in self?.notice = "已保存：\(filename)" }
     }
     var selected: Destination { destination ?? .overview }
-    var colorScheme: ColorScheme? { appearance == "dark" ? .dark : appearance == "light" ? .light : nil }
+    var colorScheme: ColorScheme { .light }
     func start() {
         guard !started else { return }; started = true; engine.start()
         refreshTask = Task { [weak self] in
@@ -103,6 +102,10 @@ final class AppModel: ObservableObject {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var model: AppModel?
     private var terminating = false
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.appearance = NSAppearance(named: .aqua)
+        NSApp.windows.forEach { $0.backgroundColor = .white }
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminating else { return .terminateLater }

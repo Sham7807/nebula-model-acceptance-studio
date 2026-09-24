@@ -30,7 +30,7 @@ def main():
     try:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        print(json.dumps({'type': 'error', 'message': '另一个小小宇宙窗口正在使用本机数据库。请先退出已有应用，再重新打开。'}), flush=True)
+        print(json.dumps({'type': 'error', 'message': '另一个渠道测试系统窗口正在使用本机数据库。请先退出已有应用，再重新打开。'}), flush=True)
         return
     os.environ.update(WORKBENCH_DB=str(args.data / 'history.sqlite3'),
                       WORKBENCH_REPORTS=str(args.data / 'Reports'),

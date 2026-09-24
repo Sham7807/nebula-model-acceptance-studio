@@ -20,14 +20,14 @@ struct ChannelSheet:View {
             Text("不记住密钥时，退出应用即清除。历史记录与导出的报告不会保存渠道密钥。配置保存不会发送测试请求。").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
             if let error { Text(error).foregroundStyle(.red).font(.callout) }
             HStack { Spacer(); Button("取消",role:.cancel) { dismiss() }.keyboardShortcut(.cancelAction); Button("保存连接") { do { try model.saveChannel(draft,key:key); dismiss() } catch { self.error=error.localizedDescription } }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(model.workspace.busy) }
-        }.padding(28).frame(width:500).onAppear { draft=model.channel;key=model.apiKey }
+        }.padding(30).frame(width:510).background(.white).tint(DesktopTheme.accent).onAppear { draft=model.channel;key=model.apiKey }
     }
 }
 struct SettingsView:View {
     @ObservedObject var model:AppModel
     var body:some View {
         Form {
-            Section("外观") { Picker("应用外观",selection:model.$appearance) { Text("跟随系统").tag("system");Text("浅色").tag("light");Text("深色").tag("dark") }.pickerStyle(.segmented) }
+            Section("外观") { LabeledContent("统一外观",value:"亮白 · 原生蓝"); Text("所有工作区保持一致的明亮界面。动效遵循 macOS 的减少动态效果设置。").font(.caption).foregroundStyle(.secondary) }
             Section("本地数据") {
                 LabeledContent("存储位置") { Button("在 Finder 中显示") { NSWorkspace.shared.open(model.engine.dataDirectory) } }
                 Text("测试历史与报告保存在这台 Mac。桌面版的数据与服务器网页版分开保存。").font(.caption).foregroundStyle(.secondary)
@@ -36,7 +36,7 @@ struct SettingsView:View {
                 LabeledContent("运行状态",value:model.engine.isReady ? "已连接 · 仅本机访问" : "正在连接 / 已停止")
                 HStack { Button("重新启动引擎") { model.restart() }.disabled(model.workspace.busy); Text("不会清除已保存记录").foregroundStyle(.secondary).font(.caption) }
             }
-            Section { Text("小小宇宙无敌 · Nebula Studio \(AppVersion.current)\nmacOS 原生窗口 · 本地检测引擎").foregroundStyle(.secondary).font(.caption) }
-        }.formStyle(.grouped).padding(10).frame(width:520,height:410)
+            Section { Text("\(AppVersion.name) · \(AppVersion.current)\nmacOS 原生窗口 · 本地检测引擎").foregroundStyle(.secondary).font(.caption) }
+        }.formStyle(.grouped).scrollContentBackground(.hidden).padding(12).frame(width:540,height:450).background(DesktopTheme.canvas).tint(DesktopTheme.accent)
     }
 }

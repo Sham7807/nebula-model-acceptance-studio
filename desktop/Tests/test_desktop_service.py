@@ -79,7 +79,7 @@ class DesktopEngineTests(unittest.TestCase):
             self.assertEqual(self.engine.request('/api/history')[0], 200)
         finally: other.close()
     def test_bundled_runtime_and_engine(self):
-        resources=ROOT/'desktop/dist/小小宇宙无敌.app/Contents/Resources'
+        resources=ROOT/'desktop/dist/渠道测试系统.app/Contents/Resources'
         if not resources.exists():self.skipTest('App not built yet')
         with tempfile.TemporaryDirectory() as folder:
             other=Engine(folder,workspace=resources/'Workbench',python=resources/'Python/bin/python3.12')
@@ -93,6 +93,9 @@ class DesktopEngineTests(unittest.TestCase):
                 status,body=other.request('/api/reports','POST',payload)
                 self.assertEqual(status,200,body[:200])
                 html=body.decode()
+                self.assertIn('渠道测试系统',html)
+                self.assertNotIn('小小宇宙无敌',html)
+                self.assertIn('color-scheme:only light',html)
                 for phrase in ('desktop-report-fixture','验收模块总览','测试总耗时','请求耗时 P50','2 秒'):
                     self.assertIn(phrase,html)
                 # A single successful sample must keep the new grade provisional.
@@ -103,7 +106,8 @@ class DesktopEngineTests(unittest.TestCase):
                 self.assertLess(html.index('id="modules"'),html.index('id="all-results"'))
                 status,css=other.request('/report-theme.css')
                 self.assertEqual(status,200)
-                self.assertEqual(css,(ROOT/'multimodal-workbench/report-theme.css').read_bytes())
+                expected=(ROOT/'multimodal-workbench/report-theme.css').read_bytes()+b'\n'+(ROOT/'desktop/Resources/report-desktop.css').read_bytes()
+                self.assertEqual(css,expected)
             finally:other.close()
 
 if __name__=='__main__':unittest.main()
