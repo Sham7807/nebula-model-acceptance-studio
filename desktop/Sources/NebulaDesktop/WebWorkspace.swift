@@ -9,6 +9,15 @@ final class WebWorkspace: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     @Published var busy = false
     @Published var error: String?
     @Published var currentRoute = "text"
+    @Published var taskState = "draft"
+    @Published var modelName = ""
+    @Published var channelHost = ""
+    @Published var progressText = "准备好后即可开始测试"
+    @Published var fraction: Double?
+    @Published var startedAt: Date?
+    @Published var finishedAt: Date?
+    private(set) var runID: String?
+    let identity = UUID()
     let webView: WKWebView
     private var session: EngineSession?
     private var resources: URL
@@ -37,6 +46,7 @@ final class WebWorkspace: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     }
 
     func connect(_ session: EngineSession) async {
+        guard self.session?.url != session.url else { return }
         self.session = session; loaded = false; error = nil; busy = false
         let controller = webView.configuration.userContentController
         controller.removeAllUserScripts()
@@ -49,7 +59,7 @@ final class WebWorkspace: NSObject, ObservableObject, WKNavigationDelegate, WKUI
                 .domain:"127.0.0.1", .path:"/", HTTPCookiePropertyKey("HttpOnly"):"TRUE"]
             guard let cookie = HTTPCookie(properties: properties) else { throw URLError(.userAuthenticationRequired) }
             await webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie)
-            webView.load(URLRequest(url: session.url))
+            webView.load(URLRequest(url: workspaceURL(session)))
         } catch { self.error = "无法打开检测工作区："+error.localizedDescription }
     }
 
@@ -67,8 +77,28 @@ final class WebWorkspace: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         if let id { call("openHistory", arguments: ["id":id]) }
     }
     func refresh() {
-        guard !busy, let session else { return }
-        loaded = false; error = nil; webView.load(URLRequest(url: session.url))
+        guard !busy || !loaded, let session else { return }
+        loaded = false; error = nil; webView.load(URLRequest(url: workspaceURL(session)))
+    }
+    private func workspaceURL(_ session: EngineSession) -> URL {
+        var url = URLComponents(url:session.url,resolvingAgainstBaseURL:false)!
+        url.queryItems = [URLQueryItem(name:"desktop_workspace",value:identity.uuidString)]
+        if let runID { url.queryItems?.append(URLQueryItem(name:"desktop_run",value:runID)) }
+        return url.url!
+    }
+    func dispose() {
+        guard !busy else { return }
+        previews.forEach { $0.close() }; previews.removeAll()
+        webView.stopLoading()
+        webView.configuration.userContentController.removeScriptMessageHandler(forName:"nebula")
+        webView.loadHTMLString("",baseURL:nil)
+    }
+    func engineStopped() {
+        if busy { taskState = "interrupted"; finishedAt = Date(); progressText = "本地引擎已停止，重新启动后请检查已保存结果。" }
+        busy = false; loaded = false
+        // Discard late page messages from the dead session. A new engine
+        // connection installs a fresh origin and retains only this run's ID.
+        session = nil
     }
     func stopTests() { call("stop", arguments: [:]) }
     private func call(_ method: String, arguments: [String:Any]) {
@@ -90,7 +120,16 @@ final class WebWorkspace: NSObject, ObservableObject, WKNavigationDelegate, WKUI
             if let profile { configure(profile, key:apiKey) }
             navigate(requestedRoute)
         case "state":
-            busy = body["busy"] as? Bool ?? false
+            let next = body["busy"] as? Bool ?? false
+            if next && !busy { startedAt = Date(); finishedAt = nil }
+            if !next && busy { finishedAt = Date() }
+            busy = next
+            taskState = body["status"] as? String ?? (next ? "running" : taskState)
+            if let value = body["model"] as? String, !value.isEmpty { modelName = value }
+            channelHost = body["channel"] as? String ?? channelHost
+            progressText = body["progress"] as? String ?? progressText
+            fraction = body["fraction"] as? Double
+            runID = body["runID"] as? String
             currentRoute = body["route"] as? String ?? currentRoute
         case "history": onHistoryChanged?()
         case "notice": error = body["message"] as? String
@@ -127,7 +166,9 @@ final class WebWorkspace: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         if (error as NSError).code != NSURLErrorCancelled { self.error = "工作区连接中断，请重新打开工作区。" }
     }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        loaded = false; busy = false; error = "工作区进程已停止。后台验收任务可能仍在运行；重新打开后可恢复查看，任务不会重复提交。"
+        loaded = false
+        if runID == nil { busy = false; taskState = "interrupted"; finishedAt = Date() }
+        error = "工作区进程已停止。可重新打开恢复本任务；后台验收不会重复提交。浏览器内执行的请求需要重新确认。"
     }
     func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
         let panel = NSOpenPanel(); panel.canChooseDirectories = false; panel.allowsMultipleSelection = parameters.allowsMultipleSelection

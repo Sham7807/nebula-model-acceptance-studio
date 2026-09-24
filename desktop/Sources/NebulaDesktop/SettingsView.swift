@@ -7,10 +7,12 @@ struct ChannelSheet:View {
     @State private var draft=ChannelProfile()
     @State private var key=""
     @State private var error:String?
+    @State private var route:Destination = .text
     var body:some View {
         VStack(alignment:.leading,spacing:22) {
-            HStack(spacing:13) { Image(systemName:"link.circle.fill").font(.system(size:40)).foregroundStyle(.blue); VStack(alignment:.leading,spacing:5) { Text("连接你的渠道").font(.title2.weight(.semibold)); Text("统一填入各工作区，仍可在测试时单独调整。").font(.callout).foregroundStyle(.secondary) } }
+            HStack(spacing:13) { Image(systemName:"link.circle.fill").font(.system(size:40)).foregroundStyle(.blue); VStack(alignment:.leading,spacing:5) { Text("为新渠道创建任务").font(.title2.weight(.semibold)); Text("独立保存连接，已有任务继续运行。").font(.callout).foregroundStyle(.secondary) } }
             Form {
+                Picker("测试工作区",selection:$route) { ForEach(Destination.allCases.filter(\.isTest)) { item in Text(item.title).tag(item) } }
                 TextField("连接名称",text:$draft.name)
                 TextField("Base URL",text:$draft.base,prompt:Text("https://api.example.com/v1"))
                 SecureField("API Key",text:$key,prompt:Text("sk-…"))
@@ -19,8 +21,8 @@ struct ChannelSheet:View {
             }.textFieldStyle(.roundedBorder)
             Text("不记住密钥时，退出应用即清除。历史记录与导出的报告不会保存渠道密钥。配置保存不会发送测试请求。").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
             if let error { Text(error).foregroundStyle(.red).font(.callout) }
-            HStack { Spacer(); Button("取消",role:.cancel) { dismiss() }.keyboardShortcut(.cancelAction); Button("保存连接") { do { try model.saveChannel(draft,key:key); dismiss() } catch { self.error=error.localizedDescription } }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(model.workspace.busy) }
-        }.padding(30).frame(width:510).background(.white).tint(DesktopTheme.accent).onAppear { draft=model.channel;key=model.apiKey }
+            HStack { Spacer(); Button("取消",role:.cancel) { dismiss() }.keyboardShortcut(.cancelAction); Button("创建任务") { do { try model.saveChannel(draft,key:key,route:route); dismiss() } catch { self.error=error.localizedDescription } }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction) }
+        }.padding(30).frame(width:510).background(.white).tint(DesktopTheme.accent).onAppear { draft=model.channel;key=model.apiKey;route=model.selected.isTest ? model.selected : .text }
     }
 }
 struct SettingsView:View {
@@ -34,7 +36,7 @@ struct SettingsView:View {
             }
             Section("检测引擎") {
                 LabeledContent("运行状态",value:model.engine.isReady ? "已连接 · 仅本机访问" : "正在连接 / 已停止")
-                HStack { Button("重新启动引擎") { model.restart() }.disabled(model.workspace.busy); Text("不会清除已保存记录").foregroundStyle(.secondary).font(.caption) }
+                HStack { Button("重新启动引擎") { model.restart() }.disabled(model.hasRunningTasks); Text("所有任务结束后可重启").foregroundStyle(.secondary).font(.caption) }
             }
             Section { Text("\(AppVersion.name) · \(AppVersion.current)\nmacOS 原生窗口 · 本地检测引擎").foregroundStyle(.secondary).font(.caption) }
         }.formStyle(.grouped).scrollContentBackground(.hidden).padding(12).frame(width:540,height:450).background(DesktopTheme.canvas).tint(DesktopTheme.accent)

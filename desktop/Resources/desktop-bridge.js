@@ -8,9 +8,9 @@
   if (window !== window.top || !document.getElementById('workbench')) return;
   const $ = id => document.getElementById(id);
   const post = body => window.webkit?.messageHandlers?.nebula?.postMessage(body);
-  let profile = null, route = 'text', activeRoute = 'text', previousState = '';
+  let profile = null, route = 'text', activeRoute = 'text', previousState = '', run = null, didRun = false, stopping = false, wasBusy = false;
   const legacyDocument = () => { try { const frame = $('legacyFrame'); return frame?.contentWindow?.location.pathname === '/legacy.html' ? frame.contentDocument : null; } catch { return null; } };
-  const isBusy = () => ['stopBtn','acceptanceStop','gptStop'].some(id => $(id) && !$(id).disabled) || !!legacyDocument()?.getElementById('btnStop') && !legacyDocument().getElementById('btnStop').disabled;
+  const isBusy = () => run?.status === 'running' || $('configFields')?.disabled || ['stopBtn','acceptanceStop','gptStop'].some(id => $(id) && !$(id).disabled) || !!legacyDocument()?.getElementById('btnStop') && !legacyDocument().getElementById('btnStop').disabled;
   const fill = (doc,id,value) => {
     const field = doc?.getElementById(id); if (!field || field.disabled || field.value === value) return;
     field.value = value; field.dispatchEvent(new Event('input',{bubbles:true})); field.dispatchEvent(new Event('change',{bubbles:true}));
@@ -21,7 +21,13 @@
     for (const prefix of ['', 'acceptance', 'gpt']) for (const key of ['base','key','model']) fill(document,prefix ? prefix + key[0].toUpperCase()+key.slice(1) : key,profile[key]);
     configureLegacy();
   };
-  $('legacyFrame')?.addEventListener('load',configureLegacy);
+  const observeControls = doc => {
+    if(!doc)return;
+    new MutationObserver(reportState).observe(doc,{subtree:true,attributes:true,attributeFilter:['disabled']});
+    doc.addEventListener('click',event=>{if(event.target.closest?.('#stopBtn,#acceptanceStop,#gptStop,#btnStop'))stopping=true;},true);
+  };
+  $('legacyFrame')?.addEventListener('load',()=>{configureLegacy();observeControls(legacyDocument());});
+  observeControls(document);
   window.NebulaDesktop = Object.freeze({
     navigate({route:next}) {
       const allowed = ['text','image','video','audio','general','ccmax','claude','kimi','gpt','history'];
@@ -52,11 +58,30 @@
       entry?.click();
     },
     stop() {
+      stopping = true;
       for (const id of ['stopBtn','acceptanceStop','gptStop']) if ($(id) && !$(id).disabled) $(id).click();
       const stop = legacyDocument()?.getElementById('btnStop'); if (stop && !stop.disabled) stop.click();
     }
   });
-  function reportState() { const state = {type:'state',busy:isBusy(),route:activeRoute}; const signature=JSON.stringify(state); if(signature!==previousState){previousState=signature;post(state);} }
+  const text = (doc,id) => doc?.getElementById(id)?.textContent?.trim() || '';
+  function reportState() {
+    const busy=isBusy(), specialist=['ccmax','claude','kimi'].includes(activeRoute), general=activeRoute==='general', gpt=activeRoute==='gpt', doc=general?legacyDocument():document;
+    if(busy&&!wasBusy){didRun=true;stopping=false;}
+    wasBusy=busy;
+    const base=doc?.getElementById(general?'inBase':specialist?'acceptanceBase':gpt?'gptBase':'base')?.value || '';
+    let channel='';try{channel=new URL(base).host;}catch{}
+    const model=doc?.getElementById(general?'inModel':specialist?'acceptanceModel':gpt?'gptModel':'model')?.value || '';
+    const status=busy?'running':(specialist&&run?run.status:didRun?(stopping?'cancelled':'finished'):'draft');
+    let fraction=null,progress=busy?'正在等待渠道响应':didRun?'已结束 · 打开查看测试结论':'准备好后即可开始测试';
+    if(specialist&&run){
+      progress=[text(document,'acceptanceStage'),text(document,'acceptanceCount')].filter(Boolean).join(' · ')||progress;
+      if(Number(run.total)>0)fraction=Math.min(1,Number(run.completed||0)/Number(run.total));
+    }else if(busy&&gpt)progress=text(document,'gptProgressText')||progress;
+    else if(busy&&!general){progress=text(document,'progressStage')||progress;const v=$('progressBar')?.getAttribute('aria-valuenow');if(v!==null&&v!==undefined)fraction=Number(v)/100;}
+    const state={type:'state',busy,route:activeRoute,status,model:String((specialist&&run?.model)||model).slice(0,240),channel,progress:progress.slice(0,300),fraction,runID:run?.id||null};
+    const signature=JSON.stringify(state);if(signature!==previousState){previousState=signature;post(state);}
+  }
+  window.addEventListener('workbench:run-state',event=>{run=event.detail;didRun=true;reportState();});
   window.addEventListener('workbench:history-saved',()=>post({type:'history'}));
   setInterval(reportState,250);
   post({type:'ready'});reportState();

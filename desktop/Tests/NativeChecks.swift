@@ -36,6 +36,76 @@ final class WorkspaceTests {
         XCTFail("Timeout: \(label)");throw NSError(domain:"TestTimeout",code:1)
     }
     func js(_ web:WKWebView,_ source:String) async throws -> Any { try await web.evaluateJavaScript(source) ?? NSNull() }
+    func testIndependentTasks() async throws {
+        guard ProcessInfo.processInfo.environment["NEBULA_TEST_PROVIDER"] == "1", let path=ProcessInfo.processInfo.environment["NEBULA_TEST_RESOURCES"] else { return }
+        let model=AppModel(resources:URL(fileURLWithPath:path),isolated:true)
+        let reports=model.engine.dataDirectory.appendingPathComponent("Reports/abcdef")
+        try FileManager.default.createDirectory(at:reports,withIntermediateDirectories:true)
+        let saved=#"{"suite":"ccmax_acceptance","status":"completed","run_id":"abcdef","started_at":1700000000,"finished_at":1700000001,"configuration":{"suite":"ccmax","model":"previous-channel-result","base":"https://previous.fixture.test/v1"},"summary":{"total":1,"completed":1,"passed":1},"checks":[{"id":"baseline","label":"Offline fixture","status":"passed"}]}"#
+        try Data(saved.utf8).write(to:reports.appendingPathComponent("report.json"))
+        let window=NSWindow(contentRect:NSRect(x:0,y:0,width:1100,height:800),styleMask:[.titled],backing:.buffered,defer:false)
+        let container=NSView(frame:window.contentView!.bounds);window.contentView=container;window.orderFront(nil)
+        func mount(_ task:TestSession) { task.workspace.webView.frame=container.bounds; container.addSubview(task.workspace.webView) }
+        defer { window.orderOut(nil); try? FileManager.default.removeItem(at:model.engine.dataDirectory) }
+        model.start()
+        do {
+            try await eventually("task engine ready") { model.engine.isReady }
+            let specialist=try XCTUnwrap(model.createTask(for:.ccmax));mount(specialist)
+            try await eventually("fresh specialist workspace") { specialist.workspace.loaded }
+            try await Task.sleep(for:.milliseconds(400))
+            XCTAssertTrue(try await js(specialist.workspace.webView,"document.getElementById('acceptanceProgress').hidden") as? Bool == true,"old report is not automatically restored")
+            XCTAssertFalse(specialist.workspace.busy)
+            let session=try JSONSerialization.jsonObject(with:await model.engine.request("/api/session")) as! [String:Any]
+            XCTAssertEqual(session["latest"] as? String,"abcdef")
+            _ = try await js(specialist.workspace.webView,"sessionStorage.setItem('desktopAcceptanceRun','abcdef')")
+            specialist.workspace.refresh()
+            try await eventually("explicit own report reconnect") { specialist.workspace.runID == "abcdef" }
+            let clean=try XCTUnwrap(model.createTask(for:.ccmax));mount(clean)
+            try await eventually("second specialist stays clean") { clean.workspace.loaded }
+            XCTAssertNil(clean.workspace.runID)
+            XCTAssertTrue(try await js(clean.workspace.webView,"document.getElementById('acceptanceProgress').hidden") as? Bool == true)
+            var profile=ChannelProfile();profile.name="渠道 A";profile.base="http://127.0.0.1:18991/channel-a";profile.model="fixture-slow-a"
+            try model.saveChannel(profile,key:"qa-a",route:.text)
+            let first=try XCTUnwrap(model.activeTask);mount(first)
+            try await eventually("channel A workspace") { first.workspace.loaded }
+            _ = try await js(first.workspace.webView,"document.getElementById('runBtn').click()")
+            try await eventually("channel A running") { first.workspace.busy }
+            model.select(.image)
+            XCTAssertEqual(model.selected,.image)
+            XCTAssertTrue(first.workspace.busy,"switching routes keeps the original request alive")
+            profile.name="渠道 B";profile.base="http://127.0.0.1:18991/channel-b";profile.model="fixture-slow-b"
+            try model.saveChannel(profile,key:"qa-b",route:.text)
+            let second=try XCTUnwrap(model.activeTask);mount(second)
+            try await eventually("channel B workspace") { second.workspace.loaded }
+            _ = try await js(second.workspace.webView,"document.getElementById('runBtn').click()")
+            try await eventually("two channels running together") { first.workspace.busy && second.workspace.busy && model.runningTasks.count == 2 }
+            XCTAssertTrue(try await js(first.workspace.webView,"document.getElementById('key').value==='qa-a' && document.getElementById('model').value==='fixture-slow-a'") as? Bool == true,"new channel cannot replace the running task's credentials")
+            model.select(.tasks);XCTAssertEqual(model.selected,.tasks)
+            model.openTask(first);XCTAssertEqual(model.workspace,first.workspace)
+            model.closeTask(first);XCTAssertTrue(model.tasks.contains{$0.id==first.id},"running task cannot be closed")
+            let enginePID=model.engine.session?.pid;model.restart();XCTAssertEqual(model.engine.session?.pid,enginePID)
+            first.workspace.stopTests()
+            try await eventually("stop affects only channel A") { !first.workspace.busy && second.workspace.busy }
+            XCTAssertEqual(first.workspace.taskState,"cancelled")
+            try await eventually("channel B completes in background",seconds:12) { !second.workspace.busy && second.workspace.taskState == "finished" }
+            XCTAssertTrue(try await js(second.workspace.webView,"document.getElementById('results').textContent.includes('DESKTOP_FIXTURE_OK')") as? Bool == true)
+            let (peakData,_)=try await URLSession.shared.data(from:URL(string:"http://127.0.0.1:18991/qa/state")!)
+            let peak=try JSONSerialization.jsonObject(with:peakData) as! [String:Any]
+            XCTAssertTrue((peak["peak"] as? Int ?? 0) >= 2,"provider observed overlapping requests")
+            model.openTask(second);XCTAssertEqual(model.workspace,second.workspace)
+            let new=try XCTUnwrap(model.createTask(for:.text));mount(new)
+            try await eventually("new task blank after completed result") { new.workspace.loaded }
+            XCTAssertEqual(new.workspace.taskState,"draft")
+            XCTAssertFalse(try await js(new.workspace.webView,"document.getElementById('results').textContent.includes('DESKTOP_FIXTURE_OK')") as? Bool == true)
+            model.closeTask(first);XCTAssertFalse(model.tasks.contains{$0.id==first.id})
+            try await eventually("old and new history preserved") {
+                let data=try await model.engine.request("/api/history")
+                let page=try JSONDecoder().decode(HistoryPage.self,from:data)
+                return page.stats.total >= 2 && page.items.contains{$0.model=="previous-channel-result"} && page.items.contains{$0.model=="fixture-slow-b"}
+            }
+            await model.stop()
+        } catch { await model.stop(); throw error }
+    }
     func testBundledEngineAndAllWorkspaces() async throws {
         guard let path=ProcessInfo.processInfo.environment["NEBULA_TEST_RESOURCES"] else { throw NSError(domain:"MissingResources",code:1) }
         let resources=URL(fileURLWithPath:path),data=FileManager.default.temporaryDirectory.appendingPathComponent("Nebula-WebKit-QA-"+UUID().uuidString)
@@ -116,6 +186,7 @@ struct NativeChecks {
             do {
                 let values=ValueTests(); values.testChannelURLs();try values.testOriginIncludesSchemeAndPort();try values.testProfileNeverSerializesAPIKey()
                 try await WorkspaceTests().testBundledEngineAndAllWorkspaces()
+                try await WorkspaceTests().testIndependentTasks()
                 print("PASS: Native value, engine and WebKit checks (\(assertionCount) assertions)")
                 exit(0)
             } catch { print("FAIL: \(error)");exit(1) }

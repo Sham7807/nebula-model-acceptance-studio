@@ -28,6 +28,9 @@ REPORTS = Path(os.environ.get('WORKBENCH_REPORTS', str(ROOT / 'reports')))
 TOKEN = secrets.token_urlsafe(32)
 JOBS = {}
 LOCK = threading.RLock()
+# The website retains serial execution. The private desktop engine opts into
+# bounded parallel top-level jobs; batch children share their parent's slot.
+MAX_CONCURRENT_RUNS = 1
 SUITES = {'kvv11', 'kvvfull', 'ccmax', 'claude'}
 MAX_BATCH_MODELS = 30
 MAX_ACCEPTANCE_CONFIG = 8 * 1024 * 1024
@@ -335,7 +338,9 @@ def _persist_jobs():
                     'completed':job.get('completed',0),'total':job.get('total'),'children':[
                         {k:v for k,v in child.items() if k in ('id','model','status','completed','total','summary','run_id')}
                         for child in job.get('children',[])]})
-        tmp=QUEUE_META.with_suffix('.tmp');tmp.write_text(json.dumps(payload,ensure_ascii=False),encoding='utf-8');tmp.replace(QUEUE_META)
+            # Keep the shared metadata replacement in the same critical section
+            # as its snapshot. Parallel jobs must not race on the temporary file.
+            tmp=QUEUE_META.with_suffix('.tmp');tmp.write_text(json.dumps(payload,ensure_ascii=False),encoding='utf-8');tmp.replace(QUEUE_META)
     except Exception:
         pass
 
@@ -1077,7 +1082,9 @@ class Handler(BaseHTTPRequestHandler):
                     for existing in JOBS.values():
                         if existing.get('client_request_id')==request_id:
                             return self.send_json(202,{'id':existing['id'],'duplicate':True})
-                if any(j['status']=='running' for j in JOBS.values()):return self.send_json(409,{'error':'已有验收任务运行中，请完成或取消后再开始'})
+                running=sum(j['status']=='running' and not j.get('batch_child') for j in JOBS.values())
+                if running >= MAX_CONCURRENT_RUNS:
+                    return self.send_json(409,{'error':f'同时运行的验收任务已达上限（{MAX_CONCURRENT_RUNS} 个），请等待一个任务结束或取消后再开始。'})
                 models=c.get('models') or [c['model']]; batch=len(models)>1
                 job={'id':uuid.uuid4().hex,'suite':c['suite'],'model':c['model'] if not batch else f'多模型对比（{len(models)}）','base':c['base'],'status':'running','started_at':time.time(),'total':(11 if c['suite']=='kvv11' else None) if not batch else len(models),'completed':0,'events':[],'cancel':threading.Event(),'client_request_id':request_id}
                 if batch:

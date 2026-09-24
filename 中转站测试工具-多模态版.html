@@ -3703,6 +3703,10 @@ function showSuiteResult(){
 function recordRun(data,id){
  const suite=data.suite==='ccmax'?'ccmax':data.suite==='claude'?'claude':'kimi';
  suiteRuns.set(suite,{id,data});runningSuite=suite;setActive(data.status==='running');
+ if(new URLSearchParams(location.search).has('desktop_workspace')){
+  sessionStorage.setItem('desktopAcceptanceRun',id);
+  window.dispatchEvent(new CustomEvent('workbench:run-state',{detail:{id,status:data.status,model:data.model,completed:data.completed,total:data.total}}));
+ }
  if(data.history_saved&&data.history_id&&!historyNotified.has(data.history_id)){historyNotified.add(data.history_id);window.dispatchEvent(new CustomEvent('workbench:history-saved',{detail:{id:data.history_id,kind:suite}}));}
  if(selected===suite)render(data,id);
 }
@@ -3895,6 +3899,11 @@ async function connect(){
  try{
   data=await (await api('/api/session')).json();token=typeof data.token==='string'?data.token:'';
   if(!token)throw new Error('本地验收会话不可用');
+  // Each desktop workspace owns one run. A fresh workspace must never claim
+  // another channel's active job or reopen an unrelated completed report.
+  if(new URLSearchParams(location.search).has('desktop_workspace')){
+   data.active=sessionStorage.getItem('desktopAcceptanceRun')||new URLSearchParams(location.search).get('desktop_run');data.latest=null;
+  }
   serviceReady=true;serviceState='connected';kvvRevision=typeof data.kvv_revision==='string'?data.kvv_revision:'';restoring=!!(data.active||data.latest);
   updateServiceBadge();el('acceptanceLocalHelp').hidden=true;setActive(false);
  }catch{

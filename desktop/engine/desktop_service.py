@@ -39,6 +39,7 @@ def main():
     os.environ.pop('WORKBENCH_AUTH_FILE', None)
     sys.path.insert(0, str(args.workspace / 'integrations'))
     import server
+    server.MAX_CONCURRENT_RUNS = 4
     from auth_history import COOKIE_NAME, hash_password
     # A fresh credential version invalidates earlier desktop sessions; the stable
     # owner retains history across launches without storing a login password.

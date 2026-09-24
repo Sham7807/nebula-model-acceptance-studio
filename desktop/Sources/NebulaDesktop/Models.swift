@@ -8,11 +8,13 @@ enum AppVersion {
 }
 
 enum Destination: String, CaseIterable, Identifiable {
-    case overview, text, image, video, audio, general, ccmax, claude, kimi, gpt, history
+    case overview, tasks, text, image, video, audio, general, ccmax, claude, kimi, gpt, history
+    var isTest: Bool { ![.overview, .tasks, .history].contains(self) }
     var id: String { rawValue }
     var title: String {
         switch self {
         case .overview: return "概览"
+        case .tasks: return "任务中心"
         case .text: return "文本对话"
         case .image: return "图像创作"
         case .video: return "视频生成"
@@ -28,6 +30,7 @@ enum Destination: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .overview: return "square.grid.2x2"
+        case .tasks: return "square.stack.3d.up"
         case .text: return "text.bubble"
         case .image: return "photo.on.rectangle.angled"
         case .video: return "play.rectangle"
@@ -43,6 +46,7 @@ enum Destination: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .overview: return "每一次验证，都有据可循。"
+        case .tasks: return "独立渠道 · 并行测试 · 随时返回"
         case .text: return "对话、流式输出与多模态理解"
         case .image: return "图像生成、图生图与多图参照"
         case .video: return "生成视频，追踪进度，直接预览"

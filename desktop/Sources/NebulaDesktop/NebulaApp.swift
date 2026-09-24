@@ -15,7 +15,9 @@ struct NebulaApp: App {
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
         .commands {
-            CommandGroup(replacing:.newItem) {}
+            CommandGroup(replacing:.newItem) {
+                Button("新建测试任务") { model.createTask() }.keyboardShortcut("n")
+            }
             CommandGroup(after:.appInfo) {
                 Button("渠道连接…") { model.showChannel = true }.keyboardShortcut("k")
                 Divider()
@@ -23,7 +25,7 @@ struct NebulaApp: App {
             CommandMenu("工作台") {
                 ForEach(Destination.allCases) { item in Button(item.title) { model.select(item) } }
                 Divider()
-                Button("重新打开工作区") { model.workspace.refresh() }.keyboardShortcut("r").disabled(model.workspace.busy)
+                Button("重新打开工作区") { model.workspace.refresh() }.keyboardShortcut("r").disabled(model.workspace.busy && model.workspace.loaded)
                 Button("停止当前测试") { model.workspace.stopTests() }.disabled(!model.workspace.busy)
             }
         }
@@ -42,7 +44,7 @@ struct MainWindow: View {
                     Spacer(minLength:0)
                 }.padding(.horizontal,18).padding(.top,20).padding(.bottom,22)
                 List(selection:$model.destination) {
-                    section(nil,[.overview,.history])
+                    section(nil,[.overview,.tasks,.history])
                     section("多模态工作区",[.text,.image,.video,.audio])
                     section("专业验收",[.general,.ccmax,.claude,.kimi,.gpt])
                 }.listStyle(.sidebar).scrollContentBackground(.hidden)
@@ -52,7 +54,7 @@ struct MainWindow: View {
                         Circle().fill(model.engine.isReady ? .green : .orange).frame(width:6,height:6)
                         Text(engineLabel).font(.system(size:11))
                         Spacer()
-                        if model.workspace.busy { ProgressView().controlSize(.mini) }
+                        if model.hasRunningTasks { Text("\(model.runningTasks.count) 个运行中").font(.system(size:10)).foregroundStyle(DesktopTheme.accent) }
                     }.foregroundStyle(.secondary)
                     Text("历史记录保存在这台 Mac").font(.system(size:10)).foregroundStyle(.tertiary)
                 }.padding(18)
@@ -66,22 +68,31 @@ struct MainWindow: View {
                     HStack { Image(systemName:"info.circle"); Text(message).font(.callout); Spacer(); Button { model.notice=nil; model.workspace.error=nil } label:{Image(systemName:"xmark")}.buttonStyle(.plain) }
                         .padding(12).background(.blue.opacity(0.08))
                 }
+                if let task = model.activeTask, model.selected.isTest { TaskStrip(model:model,task:task) }
                 ZStack {
-                    WorkspaceView(workspace:model.workspace)
-                        .opacity(model.selected == .overview || !model.engine.isReady ? 0 : 1)
-                        .allowsHitTesting(model.selected != .overview && model.engine.isReady)
-                        .accessibilityHidden(model.selected == .overview || !model.engine.isReady)
-                    if model.selected == .overview { OverviewView(model:model) }
-                    else if !model.engine.isReady || !model.workspace.loaded { EnginePlaceholder(model:model) }
+                    WorkspaceView(workspace:model.archiveWorkspace)
+                        .opacity(model.selected == .history && model.engine.isReady ? 1 : 0)
+                        .allowsHitTesting(model.selected == .history && model.engine.isReady)
+                        .accessibilityHidden(model.selected != .history || !model.engine.isReady)
+                    // Keep every web view mounted: switching the visible task must
+                    // not destroy requests, inputs, files, scroll position or previews.
+                    ForEach(model.tasks) { task in
+                        let visible = model.activeTask?.id == task.id && model.selected.isTest && model.engine.isReady
+                        WorkspaceView(workspace:task.workspace)
+                            .opacity(visible ? 1 : 0).allowsHitTesting(visible).accessibilityHidden(!visible).zIndex(visible ? 1 : 0)
+                    }
+                    if model.selected == .overview { OverviewView(model:model).zIndex(2) }
+                    else if model.selected == .tasks { TaskCenterView(model:model).zIndex(2) }
+                    else if !model.engine.isReady || !model.workspace.loaded { EnginePlaceholder(model:model).zIndex(2) }
                 }
             }.background(DesktopTheme.canvas)
             .navigationTitle(model.selected.title)
             .navigationSubtitle(model.selected.subtitle)
             .toolbar {
                 ToolbarItemGroup(placement:.primaryAction) {
-                    if model.workspace.busy { Label("测试进行中",systemImage:"waveform.path").font(.callout).foregroundStyle(.secondary) }
-                    Button { model.showChannel=true } label:{Label(model.channel.base.isEmpty ? "连接渠道" : model.channel.name,systemImage:"link")}
-                        .disabled(model.workspace.busy).help("配置默认渠道地址和密钥（⌘K）")
+                    if model.hasRunningTasks { Button { model.select(.tasks) } label:{Label("\(model.runningTasks.count) 个任务运行中",systemImage:"waveform.path")}.help("查看所有后台任务") }
+                    Button { model.showChannel=true } label:{Label("新渠道任务",systemImage:"plus.circle")}
+                        .help("配置另一渠道并新建独立任务（⌘K）")
                     Button { model.select(.history) } label:{Image(systemName:"clock.arrow.circlepath")}.help("测试档案")
                 }
             }
@@ -95,7 +106,14 @@ struct MainWindow: View {
     }
     @ViewBuilder func section(_ title:String?,_ items:[Destination]) -> some View {
         Section {
-            ForEach(items) { item in Label { Text(item.title).font(.system(size:13)) } icon:{ Image(systemName:item.icon).foregroundColor(model.selected == item ? nil : item.tint).frame(width:20) }.padding(.vertical,4).tag(item) }
+            ForEach(items) { item in
+                HStack {
+                    Label { Text(item.title).font(.system(size:13)) } icon:{ Image(systemName:item.icon).foregroundColor(model.selected == item ? nil : item.tint).frame(width:20) }
+                    Spacer()
+                    let count = item == .tasks ? model.runningTasks.count : model.runningTasks.filter { $0.destination == item }.count
+                    if count > 0 { Text("\(count)").font(.system(size:10,weight:.semibold)).padding(.horizontal,6).padding(.vertical,2).background(DesktopTheme.accent.opacity(0.10),in:Capsule()).accessibilityLabel("\(count) 个任务运行中") }
+                }.padding(.vertical,4).tag(item)
+            }
         } header: { if let title { Text(title).font(.system(size:10,weight:.medium)).padding(.top,12) } }
     }
 }
