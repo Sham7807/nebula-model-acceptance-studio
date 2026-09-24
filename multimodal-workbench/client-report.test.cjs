@@ -92,3 +92,30 @@ test('derived or inapplicable token totals never display arithmetic verification
     else assert.match(html,/总计 30（派生）/);
   }
 });
+test('unknown capability evidence earns no score and remains separate from coverage',async()=>{
+  const r=record();r.result.checks=[{id:'cache-missing',name:'大上下文缓存',status:'inconclusive',dimensions:['cache'],parameters:{target_tokens:12000},scenario_id:'cache-cold',reason_code:'evidence_missing',request_ids:['one']}];
+  const html=await harness().WorkbenchReport.render([r]);
+  assert.match(html,/<div class="score-total">—<small>/);
+  assert.match(html,/可判定率 0%/);
+  assert.match(html,/有限样本/);
+  assert.match(html,/返回证据不足/);
+  assert.match(html,/target_tokens/);assert.match(html,/12000/);
+  assert.doesNotMatch(html,/无法判定=40/);
+});
+test('capability pass ratio excludes inconclusive evidence but exposes the resolution denominator',async()=>{
+  const r=record();r.result.checks=[
+    {id:'cap-1',name:'max_tokens=1',status:'passed',dimensions:['max_tokens'],parameters:{max_tokens:1},scenario_id:'enumeration',request_ids:['one']},
+    {id:'cap-10',name:'max_tokens=10',status:'failed',dimensions:['max_tokens'],parameters:{max_tokens:10},scenario_id:'enumeration'},
+    {id:'cap-20',name:'max_tokens=20',status:'inconclusive',dimensions:['max_tokens'],parameters:{max_tokens:20},scenario_id:'enumeration'},
+  ];
+  const html=await harness().WorkbenchReport.render([r]);
+  assert.match(html,/<div class="score-total">50<small>/);
+  assert.match(html,/参数组合 3 · 关联请求 1 · 可判定率 67%/);
+  assert.match(html,/有限样本 · 不代表完整能力/);
+});
+test('general injection has its own capability dimension and request parameter evidence',async()=>{
+  const r=record();r.result.checks=[{id:'injection-canary',name:'合成注入',status:'passed',module:'injection',dimensions:['injection','security'],parameters:{attack:'direct'},request_ids:['one']}];
+  const html=await harness().WorkbenchReport.render([r]);
+  assert.match(html,/注入与指令隔离/);assert.match(html,/参数组合 1/);assert.match(html,/<dt>attack<\/dt><dd>direct<\/dd>/);
+  assert.match(html,/覆盖 1 \/ 7 维/);assert.equal((html.match(/score-dimension not_covered/g)||[]).length,6);
+});

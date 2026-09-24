@@ -270,6 +270,13 @@ def validate(data, *, require_key=True):
     advanced = data.get('advanced', c['suite'] in ('ccmax','claude'))
     if not isinstance(advanced, bool): raise ValueError('高级探针开关必须为布尔值')
     c['advanced'] = advanced
+    # Legacy API callers retain their old request volume; the workbench sends
+    # an explicit standard matrix profile for every new acceptance run.
+    c['matrix_profile']=data.get('matrix_profile','off')
+    if c['matrix_profile'] not in ('off','quick','standard','comprehensive'):raise ValueError('参数矩阵方案无效')
+    matrix_modules=data.get('matrix_modules',['protocol','tools','multimodal','max_tokens','injection','cache','stress'])
+    if not isinstance(matrix_modules,list) or (not matrix_modules and c['matrix_profile']!='off') or any(x not in ('protocol','tools','multimodal','max_tokens','injection','cache','stress') for x in matrix_modules):raise ValueError('参数矩阵检测范围无效；启用矩阵时请至少选择一个检测层面')
+    c['matrix_modules']=list(dict.fromkeys(matrix_modules))
     if claude:
         c['provider']=data.get('provider','auto')
         if c['provider'] not in ('auto','anthropic','aws'):raise ValueError('Claude 上游来源选项无效')
@@ -323,6 +330,26 @@ def _persist_jobs():
     except Exception:
         pass
 
+def acceptance_plan(config, *, include_native=False):
+    """Build reviewed request previews without API keys or provider traffic."""
+    from acceptance_matrix import build_plan
+    matrix=build_plan(config) if config.get('matrix_profile','off')!='off' else {'request_count':0,'requests':[],'limitations':[]}
+    if include_native and config['suite']=='claude':
+        from claude_acceptance import build_plan as claude_plan
+        native=claude_plan(config)
+        native['native_request_count']=native['request_count']
+        native['matrix_request_count']=matrix.get('request_count',0)
+        native['request_count']+=matrix.get('request_count',0)
+        native['requests']+=matrix.get('requests',[])
+        native.setdefault('limitations',[]).extend(matrix.get('limitations',[]))
+        native['limitations'].append('包含原生专项与参数矩阵；矩阵单独的 Token 规模：'+str(matrix.get('token_estimate','未启用')))
+        native['conditional_requests']=native.get('conditional_requests',0)+matrix.get('conditional_requests',0)
+        return native
+    matrix['suite']=config['suite']
+    matrix['matrix_only']=True
+    matrix.setdefault('limitations',[]).insert(0,'此处展示附加参数矩阵；执行时会先运行所选原验收套件，实际总请求数还包含原套件。KVV官方检查与工作台矩阵分开列证据。')
+    return matrix
+
 def run_job(job,c):
     directory = REPORTS / job['id']; directory.mkdir(parents=True, exist_ok=True)
     key = c['key']
@@ -351,6 +378,29 @@ def run_job(job,c):
         # evidence.  This keeps raw request evidence intact while preventing
         # unselected dimensions from being scored as passing.
         apply_enabled_modules(result, c)
+        if c.get('matrix_profile','off')!='off':
+            from acceptance_matrix import run as run_matrix
+            native_summary=dict(result.get('summary') or {})
+            native_count=int((result.get('transport') or {}).get('request_count') or native_summary.get('request_count') or len(result.get('samples') or []))
+            native_completed=int(job.get('completed') or 0)
+            def matrix_emit(event):
+                event={**event,'phase':'parameter_matrix','message':'参数矩阵 · '+str(event.get('message') or event.get('type') or '')}
+                if event.get('completed') is not None:event['completed']+=native_completed
+                if event.get('total') is not None:event['total']+=native_completed
+                if event.get('request_count') is not None:event['request_count']+=native_count
+                emit(event)
+            try:
+                matrix=run_matrix(c,matrix_emit,job['cancel'].is_set)
+            except Exception as exc:
+                matrix={'cases':[{'id':'matrix-execution-error','title':'参数矩阵执行诊断','status':'inconclusive','reason_code':'execution_error','detail':clean(str(exc),key),'method':'运行本轮选择的参数矩阵。','expected':'保留每条参数变体的完整执行证据。','observed':'矩阵执行器出现异常，原专项结果已保留。','next_step':'检查服务日志并重跑参数矩阵。'}],'samples':[],'summary':{'total':1,'completed':1,'inconclusive':1,'request_count':0}}
+            result['matrix_validation']=clean(matrix,key)
+            result['native_summary']=native_summary
+            result['native_transport']=dict(result.get('transport') or {})
+            result.setdefault('transport',{})['request_count']=native_count+int((matrix.get('summary') or {}).get('request_count') or len(matrix.get('samples') or []))
+            primary=result.get('checks') or result.get('cases') or []
+            all_cases=primary+(matrix.get('cases') or [])
+            result['summary']={'total':len(all_cases),'completed':len(all_cases),'request_count':result['transport']['request_count'],**{status:sum(x.get('status')==status for x in all_cases) for status in ('passed','failed','inconclusive','skipped','not_covered','cancelled')}}
+            if job['cancel'].is_set():result['status']='cancelled'
         result['configuration'] = clean({**result.get('configuration',{}), **{k:v for k,v in c.items() if k!='key'}})
     except Exception as exc:
         result = {'suite':c['suite'],'status':'error','error':clean(str(exc),key),'summary':{}}
@@ -700,17 +750,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(200); self.send_header('Content-Type','application/json; charset=utf-8'); self.set_session_cookie(token); self.send_header('Content-Length','0'); self.end_headers(); return
             except Exception as exc: return self.send_json(400, {'error':str(exc)})
         if not self.guard(auth=True):return
-        if path == '/api/claude/plan':
+        if path in ('/api/claude/plan','/api/acceptance/plan'):
             # This is the runner's own request builder. Previewing never
             # contacts the upstream, stores credentials, or creates a job.
             try:
                 length=int(self.headers.get('Content-Length','0'))
                 if self.headers.get_content_type()!='application/json' or not 0<length<=65536:raise ValueError('请求预览内容无效或过大')
                 data=json.loads(self.rfile.read(length))
-                if not isinstance(data,dict) or data.get('suite')!='claude':raise ValueError('请选择 Claude 专项')
+                if not isinstance(data,dict) or (path=='/api/claude/plan' and data.get('suite')!='claude'):raise ValueError('请选择正确的验收专项')
                 config=validate({**data,'key':''},require_key=False)
-                from claude_acceptance import build_plan
-                return self.send_json(200,clean(build_plan(config)))
+                return self.send_json(200,clean(acceptance_plan(config,include_native=path=='/api/claude/plan')))
             except (ValueError,TypeError,KeyError) as exc:
                 return self.send_json(400,{'error':str(exc)})
         if path == '/api/auth/logout':

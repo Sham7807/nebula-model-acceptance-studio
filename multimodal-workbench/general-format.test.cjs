@@ -7,6 +7,25 @@ const payload=(extra={})=>({model:'test-model',messages:[{role:'user',content:'h
 const body=(format,extra={},cfg={})=>F.build(payload(extra),config(format,cfg)).preview;
 const tool={type:'function',function:{name:'Calculator',description:'Calculate',parameters:{type:'object',properties:{expr:{type:'string'}},required:['expr']}}};
 
+test('native tool roundtrips retain original thinking signatures and opaque provider items',()=>{
+ const fixtures={
+  anthropic:{type:'message',role:'assistant',content:[{type:'thinking',thinking:'Use the calculator.',signature:'real-fixture-signature'},{type:'redacted_thinking',data:'opaque-fixture-data'},{type:'tool_use',id:'call-1',name:'Calculator',input:{expr:'3*7'}}],stop_reason:'tool_use'},
+  gemini:{candidates:[{content:{role:'model',parts:[{text:'Use the calculator.',thought:true},{functionCall:{id:'call-1',name:'Calculator',args:{expr:'3*7'}},thoughtSignature:'real-fixture-thought-signature'}]},finishReason:'STOP'}]},
+  'openai-responses':{object:'response',status:'completed',output:[{type:'reasoning',id:'rs-1',summary:[{type:'summary_text',text:'Use the calculator.'}],encrypted_content:'opaque-fixture-reasoning'},{type:'function_call',id:'fc-1',call_id:'call-1',name:'Calculator',arguments:'{"expr":"3*7"}',status:'completed'}]}
+ };
+ for(const [format,raw]of Object.entries(fixtures)){
+  const before=JSON.stringify(raw),assistant=F.assistantMessage(raw,format);
+  const result=body(format,{tools:[tool],tool_choice:'none',messages:[{role:'user',content:'Calculate 3*7'},assistant,{role:'tool',tool_call_id:'call-1',content:'21'},{role:'user',content:'Repeat the result.'}]});
+  if(format==='anthropic'){assert.deepEqual(result.messages[1].content,raw.content);assert.equal(result.messages[2].content[0].tool_use_id,'call-1');}
+  if(format==='gemini'){assert.deepEqual(result.contents[1],raw.candidates[0].content);assert.equal(result.contents[2].parts[0].functionResponse.name,'Calculator');assert.equal(result.contents[2].parts[0].functionResponse.id,'call-1');}
+  if(format==='openai-responses'){assert.deepEqual(result.input.slice(1,3),raw.output);assert.deepEqual(result.input[3],{type:'function_call_output',call_id:'call-1',output:'21'});}
+  assert.equal(JSON.stringify(raw),before,'raw evidence is immutable');assert.ok(!JSON.stringify(result).includes('native_assistant'),'internal replay wrapper is never sent to provider');
+  for(const mismatch of ['openai-chat','anthropic','gemini','openai-responses'].filter(x=>x!==format))assert.throws(()=>body(mismatch,{messages:[assistant]}),F.NotApplicableError);
+ }
+ const message={role:'assistant',content:null,reasoning_content:'Use a calculator.',tool_calls:[{id:'call-1',type:'function',function:{name:'Calculator',arguments:'{"expr":"3*7"}'}}]};
+ assert.deepEqual(F.assistantMessage({choices:[{message}]},'openai-chat'),message,'Chat provider assistant extensions survive unchanged');
+});
+
 test('Chat requests stay exact and use the selected auth',()=>{
  const input=payload({tools:[tool],tool_choice:'required',stream:false,n:2});
  const request=F.build(input,config('openai-chat'));

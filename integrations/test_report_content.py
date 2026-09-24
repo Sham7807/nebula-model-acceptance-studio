@@ -66,7 +66,7 @@ class ReportContentTests(unittest.TestCase):
         dimension = next(row for row in report["score"]["dimensions"] if row["id"] == "multimodal")
         self.assertEqual(dimension["covered"], 0)
         self.assertEqual(dimension["status"], "not_covered")
-        self.assertEqual(dimension["score"], 0)
+        self.assertIsNone(dimension["score"])
 
     def test_cc_advanced_checks_have_professional_scope_and_limitations(self):
         source = {"suite": "ccmax_acceptance", "configuration": {"advanced": True},
@@ -93,7 +93,8 @@ class ReportContentTests(unittest.TestCase):
         self.assertIn("通过 1/4 条", check["observed"])
         self.assertEqual(check["counts"]["not_covered"], 1)
         self.assertEqual(check["counts"]["inconclusive"], 1)
-        self.assertEqual(check["request_ids"], ["up-1", "up-2", "up-3", "up-4"])
+        self.assertEqual(check["request_ids"], ["sse-1", "sse-2", "sse-3", "sse-4"])
+        self.assertEqual(check["upstream_request_ids"], ["up-1", "up-2", "up-3", "up-4"])
         self.assertIn('"token": 4', check["observed"])
 
     def test_cc_response_eof_is_distinct_from_tcp_disconnect(self):

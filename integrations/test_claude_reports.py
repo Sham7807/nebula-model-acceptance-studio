@@ -61,10 +61,11 @@ class ClaudeReportTests(unittest.TestCase):
         data = build_report_data(value)
         modules = {entry['id']: entry for entry in data['score']['modules']}
         self.assertEqual(sum(entry['weight'] for entry in modules.values()), 100)
-        self.assertEqual(modules['cache']['score'], 40)
+        self.assertIsNone(modules['cache']['score'])
+        self.assertEqual(modules['cache']['conclusive'], 0)
         self.assertEqual(modules['auth_signature']['covered'], 0)
         self.assertEqual(modules['stress']['covered'], 0)
-        self.assertEqual(data['score']['weight_covered'], 10)
+        self.assertEqual(data['score']['weight_covered'], 0)
         text = '\n'.join(data['scope'] + data['focus'] + data['limitations'])
         self.assertNotIn('KVV', text)
         self.assertNotIn('Kimi', text)

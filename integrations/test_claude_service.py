@@ -68,9 +68,11 @@ class ClaudeServiceTests(unittest.TestCase):
                     with httpx.Client(trust_env=False) as client:
                         body = self.payload(key='')
                         self.assertEqual(client.post(url + '/api/claude/plan', json=body).status_code, 401)
+                        self.assertEqual(client.post(url + '/api/acceptance/plan', json=body).status_code, 401)
                         self.assertEqual(client.post(url + '/api/auth/login', json={'username': 'fixture', 'password': 'fixture-password'}).status_code, 200)
                         token = client.get(url + '/api/session').json()['token']
                         self.assertEqual(client.post(url + '/api/claude/plan', json=body).status_code, 403)
+                        self.assertEqual(client.post(url + '/api/acceptance/plan', json=body).status_code, 403)
                         headers = {'X-Workbench-Token': token}
                         with patch.object(claude_acceptance, 'build_plan', create=True,
                                           return_value={'suite': 'claude', 'request_count': 1, 'requests': []}) as build:
@@ -84,6 +86,13 @@ class ClaudeServiceTests(unittest.TestCase):
                             self.assertEqual(build.call_args.args[0]['key'], '')
                         for bad in [[], self.payload(suite='ccmax'), self.payload(cache_tokens=1)]:
                             self.assertEqual(client.post(url + '/api/claude/plan', headers=headers, json=bad).status_code, 400)
+                        for suite in ('ccmax','claude','kvv11','kvvfull'):
+                            response=client.post(url+'/api/acceptance/plan',headers=headers,
+                                json=self.payload(suite=suite,key='',matrix_profile='standard',matrix_modules=['max_tokens']))
+                            self.assertEqual(response.status_code,200,response.text[:500])
+                            plan=response.json()
+                            self.assertTrue(plan['matrix_only'])
+                            self.assertEqual(len([x for x in plan['requests'] if x['id'].startswith('matrix-cap-')]),12)
                 finally:
                     service.shutdown(); service.server_close()
 

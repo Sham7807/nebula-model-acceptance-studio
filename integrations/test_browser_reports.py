@@ -48,7 +48,7 @@ class BrowserReportTests(unittest.TestCase):
         self.assertFalse(result['cases'][0]['applicable'])
         self.assertEqual(result['summary']['passed'], 0)
         score = report_data(result)['score']
-        self.assertEqual(score['total'], 0)
+        self.assertIsNone(score['total'])
         self.assertEqual(score['covered_dimensions'], 0)
         html = render_report(result).decode()
         self.assertIn('data-filter="not_covered"', html)
@@ -159,9 +159,11 @@ class UnifiedThemeTests(unittest.TestCase):
         score = report_data(result)['score']
         dimension = next(row for row in score['dimensions'] if row['id']=='tools')
         module = next(row for row in score['modules'] if row['id']=='tools')
-        self.assertEqual(dimension['score'],70)
+        self.assertEqual(dimension['score'],100)
+        self.assertEqual(dimension['conclusive'],1)
+        self.assertEqual(dimension['resolution_percent'],50)
         self.assertEqual(dimension['covered'],2)
-        self.assertEqual(module['score'],70)
+        self.assertEqual(module['score'],100)
         self.assertEqual(dimension['counts']['skipped'],1)
         self.assertEqual(dimension['counts']['not_covered'],1)
 

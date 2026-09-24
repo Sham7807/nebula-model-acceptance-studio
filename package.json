@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "python3 multimodal-workbench/build.py",
-    "test": "node --test multimodal-workbench/engine.test.cjs multimodal-workbench/model-discovery.test.cjs multimodal-workbench/general-format.test.cjs multimodal-workbench/general-check-content.test.cjs multimodal-workbench/client-report.test.cjs multimodal-workbench/gpt-suite-report.test.cjs",
+    "test": "node --test multimodal-workbench/engine.test.cjs multimodal-workbench/model-discovery.test.cjs multimodal-workbench/general-format.test.cjs multimodal-workbench/general-matrix.test.cjs multimodal-workbench/general-check-content.test.cjs multimodal-workbench/client-report.test.cjs multimodal-workbench/gpt-suite-report.test.cjs",
     "test:models": "node multimodal-workbench/model-picker.test.cjs && node multimodal-workbench/general-model-picker.test.cjs && node multimodal-workbench/model-discovery-ui.test.cjs && node multimodal-workbench/gpt-suite-discovery.test.cjs",
     "test:choices": "node multimodal-workbench/choice-picker.test.cjs",
     "test:acceptance": "node multimodal-workbench/acceptance-ui.test.cjs",

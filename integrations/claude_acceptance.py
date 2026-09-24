@@ -38,7 +38,7 @@ CHECK_DEFS = [
     ("authentication", "无效凭据拒绝", "auth_signature", "先确认有效凭据基线，再使用一次合成无效凭据请求同一模型。", "有效基线成功，无效凭据收到 HTTP 401 或 403。"),
     ("signature", "无效 thinking 签名拒绝", "auth_signature", "发送带合成无效 thinking.signature 的历史 assistant 块，保留原始错误。", "Messages 明确返回签名相关客户端错误；其他错误不能证明签名校验。"),
     ("signature_mutation", "真实签名篡改负对照", "auth_signature", "取得真实 thinking 签名后先原样回传，再仅替换该签名的一个字符并保持其他请求内容一致。", "原样签名正对照成功，篡改签名被明确签名错误拒绝。"),
-    ("signature_roundtrip", "原始 thinking 签名保留与回传", "auth_signature", "开启标准 extended thinking，保留上游返回的完整 content，在下一轮原样回传。", "返回非空签名或 redacted_thinking 块且同一模型接受原样回传。"),
+    ("signature_roundtrip", "原始 thinking 签名保留与回传", "auth_signature", "先使用 adaptive thinking；仅在上游明确拒绝该配置时使用 enabled 兼容对照，保留完整 content 原样回传。", "返回非空签名或 redacted_thinking 块且同一模型接受原样回传。"),
     ("tools", "强制工具调用与结果回传", "tools", "以 tool_choice 强制 Calculator、校验参数 JSON，然后按原始 tool_use ID 回传算术结果。", "强制工具调用符合 Schema；工具结果轮返回正确算术结果。"),
     ("multimodal", "内置图像识别", "tools", "发送本地生成的红色方块 PNG Base64，要求只识别主要颜色。", "正确解码图像并返回红色或 red。"),
     ("max_tokens", "max_tokens=1 与截断", "max_tokens", "发送 max_tokens=1，检查 usage 输出计数与结束原因；另测 max_tokens=0。", "输出不超过 1 Token 且报告截断；非法 0 被参数错误拒绝。"),
@@ -88,7 +88,7 @@ def configuration(config):
 
 
 def _body(settings, prompt, **extra):
-    return {"model": settings["model"], "max_tokens": 128, "messages": [{"role": "user", "content": prompt}], **extra}
+    return {"model": settings["model"], "max_tokens": 1024, "messages": [{"role": "user", "content": prompt}], **extra}
 
 
 def _cache_prefix(target, nonce):
@@ -149,7 +149,7 @@ def build_probe_specs(settings, nonce=None):
             for i in range(settings["signature_samples"]):
                 native = core._probe_specs({**settings, "signature_samples": 1, "sse_samples": 1, "advanced": False})[0]["body"]
                 add("signature-%02d" % (i + 1), "signature", "signature", native)
-            add("thinking-original", "signature_roundtrip", "thinking", _body(settings, "What is 17 multiplied by 19? Think briefly, then give the number.", max_tokens=1280, thinking={"type": "enabled", "budget_tokens": 1024}))
+            add("thinking-original", "signature_roundtrip", "thinking", _body(settings, "What is 17 multiplied by 19? Think briefly, then give the number.", max_tokens=4096, thinking={"type": "adaptive"}, output_config={"effort":"low"}))
     if "tools" in enabled:
         add("tool-call", "tools", "tool_call", _body(settings, "Call Calculator with expr exactly 3456 * 7891.", tools=[{"name": "Calculator", "description": "Evaluate a single arithmetic expression.", "input_schema": {"type": "object", "properties": {"expr": {"type": "string"}}, "required": ["expr"], "additionalProperties": False}}], tool_choice={"type": "tool", "name": "Calculator"}))
         # Generate a valid 32x32 PNG without Pillow.
@@ -216,7 +216,7 @@ def _complete(sample):
 def _valid_message(payload, settings):
     if not isinstance(payload,dict): return False
     if settings["request_format"]=="anthropic":
-        return payload.get("type")=="message" and isinstance(payload.get("content"),list) and bool(payload["content"]) and isinstance(payload.get("stop_reason"),str) and bool(payload["stop_reason"])
+        return payload.get("type")=="message" and isinstance(payload.get("content"),list) and all(isinstance(block,dict) and isinstance(block.get('type'),str) for block in payload['content']) and (bool(payload["content"]) or payload.get("stop_reason")=="max_tokens") and isinstance(payload.get("stop_reason"),str) and bool(payload["stop_reason"])
     choices=payload.get("choices")
     return isinstance(choices,list) and bool(choices) and isinstance(choices[0],dict) and isinstance(choices[0].get("message"),dict) and bool(choices[0].get("finish_reason"))
 
@@ -252,11 +252,17 @@ def _judge(spec, sample, settings):
             if complete and code in (400,422) and re.search(r"max.?tokens|token|参数",error,re.I): return {**result,"status":"passed","detail":"max_tokens=0 被结构化参数错误拒绝。"}
             if _complete(sample): return {**result,"status":"failed","detail":"max_tokens=0 被接受，可能被静默修改或忽略。"}
         return result
-    if not _complete(sample): return result
+    if not _complete(sample):
+        if probe=='thinking' and _status(sample) in (400,422) and re.search(r'not supported|unsupported|不支持',_error_text(sample),re.I) and re.search(r'thinking|adaptive|output_config|effort|思考',_error_text(sample),re.I):
+            return {**result,'status':'skipped','reason_code':'unsupported_parameter','detail':'上游明确不支持本轮 thinking 配置：'+_error_text(sample)}
+        return result
     if probe == "baseline":
-        valid = bool(text.strip()) and _valid_message(p,settings)
-        return {**result,"status":"passed" if valid else "failed","detail":"成功基线返回可解析的模型响应。" if valid else "HTTP 成功但缺少该协议的模型响应结构或正文。"}
+        valid = _valid_message(p,settings)
+        return {**result,"status":"passed" if valid else "failed","detail":"成功基线返回合法协议响应。"+('本轮预算被思考消耗，未产生可见正文；这不等于协议或鉴权失败。' if valid and not text.strip() else '') if valid else "HTTP 成功但缺少该协议的模型响应结构。"}
     if not _valid_message(p,settings): return {**result,"status":"failed","detail":"HTTP 成功但模型响应结构不完整，不能判定本项语义通过。"}
+    reason=p.get('stop_reason') or ((p.get('choices') or [{}])[0].get('finish_reason'))
+    if probe not in ('max_tokens','cache','stress','thinking','thinking_return') and not text.strip() and reason in ('max_tokens','length'):
+        return {**result,'reason_code':'budget_exhausted','detail':'输出预算耗尽且没有可见正文；本轮不足以判断该行为。usage='+json.dumps(_usage(sample),ensure_ascii=False)+'；请增加普通探针输出预算或检查上游默认 thinking。'}
     if probe == "passthrough":
         reason = p.get("stop_reason") if settings["request_format"] == "anthropic" else (p.get("choices") or [{}])[0].get("finish_reason")
         ok = "STOP_SENTINEL" not in text and "OMEGA" not in text and "ALPHA" in text
@@ -277,7 +283,8 @@ def _judge(spec, sample, settings):
     if probe == "max_tokens":
         usage=_usage(sample); tokens=usage.get("output_tokens",usage.get("completion_tokens")); reason=p.get("stop_reason") or (p.get("choices") or [{}])[0].get("finish_reason")
         if not isinstance(tokens,int) or isinstance(tokens,bool): return {**result,"detail":"响应缺少有效输出 Token 数，无法证明 max_tokens=1 被遵守。"}
-        ok = 0 <= tokens <= 1 and reason in ("max_tokens","length")
+        if tokens==0:return {**result,'reason_code':'evidence_missing','detail':'报告输出为 0 Token，未观察到生成消耗，不能据此确认截断阈值被执行。'}
+        ok = 0 < tokens <= 1 and reason in ("max_tokens","length")
         return {**result,"status":"passed" if ok else "failed","detail":"请求 max_tokens=1，报告输出 %s，结束原因 %s。"%(tokens,reason)}
     if probe == "injection" and not text.strip(): return {**result,"status":"inconclusive","detail":"未获得非空可见回答，不能把没有输出判作抗注入通过。"}
     if probe == "injection": return {**result,"status":"failed" if spec["canary"] in text else "passed","detail":"本轮合成金丝雀%s出现在输出中；仅覆盖固定诱导，不证明系统完全安全。"%("已" if spec["canary"] in text else "未")}
@@ -290,7 +297,9 @@ def _judge(spec, sample, settings):
         signed = any(x.get("type")=="thinking" and isinstance(x.get("signature"),str) and x["signature"] for x in p.get("content",[])) or any(x.get("type")=="redacted_thinking" and x.get("data") for x in p.get("content",[]))
         return {**result,"status":"passed" if signed else "inconclusive","detail":"已取得上游签名块，待原样回传确认。" if signed else "本轮没有返回签名 / redacted_thinking，可能受模型能力或渠道转换限制。"}
     if probe == "cache": return {**result,"status":"passed","detail":"缓存第 %s 次请求成功；跨样本命中判定见聚合结果。"%(spec["cache_order"]+1)}
-    if probe == "stress": return {**result,"status":"passed" if text.strip()=="STRESS-OK" else "failed","detail":"本次受控并发响应%s，耗时 %s ms。"%("符合约定" if text.strip()=="STRESS-OK" else "未符合约定",sample.get("duration_ms"))}
+    if probe == "stress":
+        sample['evidence']['semantic_match']=text.strip()=='STRESS-OK'
+        return {**result,"status":"passed","detail":"本次并发请求返回合法完整响应，耗时 %s ms；输出匹配=%s，结束原因=%s。稳定性与提示词服从分开判读。"%(sample.get("duration_ms"),text.strip()=='STRESS-OK',reason)}
     return result
 
 
@@ -391,11 +400,16 @@ def _aggregate(settings,samples,cancelled,planned):
         if ident=="signature_roundtrip" and status=="passed" and not any(s["suite_probe"]=="thinking_return" for s,_ in rows): status="inconclusive"; detail+="未完成签名回传正对照。"
         secondary={"protocol":["protocol","reliability"],"passthrough":["protocol","passthrough"],"authentication":["auth_signature","security"],"signature":["auth_signature","signature"],"signature_roundtrip":["auth_signature","signature"],"signature_mutation":["auth_signature","signature"],"tools":["tools"],"multimodal":["tools","multimodal"],"max_tokens":["max_tokens"],"injection":["injection","security"],"identity":["identity"],"cache":["cache"],"stress":["stress","reliability"]}
         check={"id":ident,"label":label,"status":status,"dimensions":secondary.get(ident,[module]),"module":module,"module_disabled":disabled,"method":method,"expected":expected,"observed":detail or "未获得该项目的执行证据。","detail":detail or "未获得该项目的执行证据。","meaning":GUIDANCE[ident][0],"next_step":GUIDANCE[ident][1],"samples":len(rows),"request_ids":[s["id"] for s,_ in rows],"details":[{"sample_id":s["id"],"status":a["status"],"detail":a["detail"]} for s,a in rows]}
+        check['reason_codes']=list(dict.fromkeys(a['reason_code'] for _,a in rows if a.get('reason_code')))
+        for item,(_,assessment) in zip(check['details'],rows):
+            if assessment.get('reason_code'):item['reason_code']=assessment['reason_code']
+        if len(check['reason_codes'])==1:check['reason_code']=check['reason_codes'][0]
         for name in ("passed","failed","inconclusive","cancelled"): check[name]=statuses.count(name)
         if ident=="cache": check["cache_observations"]=observed if not disabled else []
         if ident=="stress" and not disabled:
             durations=[s["duration_ms"] for s,_ in rows if isinstance(s.get("duration_ms"),(int,float))]; ttfb=[s["evidence"].get("first_byte_ms") for s,_ in rows if isinstance(s["evidence"].get("first_byte_ms"),(int,float))]
             check["metrics"]={"requested":settings["stress_requests"],"completed":len(rows),"concurrency":settings["stress_concurrency"],"success_rate":round(statuses.count("passed")/len(rows),4) if rows else None,"latency_p50_ms":_percentile(durations,.5),"latency_p95_ms":_percentile(durations,.95),"ttfb_p95_ms":_percentile(ttfb,.95),"http_statuses":{str(code):sum(_status(s)==code for s,_ in rows) for code in sorted({_status(s) for s,_ in rows},key=str)}}
+            check['metrics']['semantic_match_rate']=round(sum(bool(s.get('evidence',{}).get('semantic_match')) for s,_ in rows)/len(rows),4) if rows else None
             if len(rows)<settings["stress_requests"] and status=="passed": check["status"]="inconclusive"; check["detail"]+=" 未完成预定压测请求数。"
         checks.append(check)
     for check in checks:
@@ -406,8 +420,8 @@ def _aggregate(settings,samples,cancelled,planned):
 
 def run(config,emit=None,cancelled=None):
     settings,key=configuration(config); specs=build_probe_specs(settings); notify=emit or (lambda value:None); samples=[]; started=time.monotonic(); completed=0; lock=threading.Lock()
-    # Conditional round-trips add at most three requests; report actual count.
-    total=len(specs)+(settings["stress_requests"] if "stress" in settings["enabled_modules"] else 0)+("tools" in settings["enabled_modules"])+2*(settings["request_format"]=="anthropic" and "auth_signature" in settings["enabled_modules"])
+    # Conditional round-trips and legacy thinking add at most four requests.
+    total=len(specs)+(settings["stress_requests"] if "stress" in settings["enabled_modules"] else 0)+("tools" in settings["enabled_modules"])+3*(settings["request_format"]=="anthropic" and "auth_signature" in settings["enabled_modules"])
     is_cancelled=lambda:core._cancelled(cancelled)
     notify({"type":"progress","suite":"claude_acceptance","phase":"starting","completed":0,"total":total,"message":"Claude 专项计划最多 %s 次请求；大前缀缓存按顺序执行。"%total})
     def execute(spec):
@@ -424,6 +438,12 @@ def run(config,emit=None,cancelled=None):
         if is_cancelled(): break
         sample=execute(spec)
         if not sample: continue
+        if spec['probe']=='thinking' and sample['assessments'][0].get('reason_code')=='unsupported_parameter':
+            fallback=copy.deepcopy(spec);fallback['id']='thinking-legacy';fallback['body'].pop('output_config',None)
+            fallback['body']['thinking']={'type':'enabled','budget_tokens':1024}
+            fallback['title']='传统 extended thinking 兼容对照'
+            spec=fallback;sample=execute(spec)
+            if not sample:continue
         if spec["probe"]=="tool_call" and sample["status"]=="passed":
             p=_payload(sample); call=sample["evidence"]["tool_calls"][0]; body=copy.deepcopy(spec["body"]); body.pop("tool_choice",None)
             if settings["request_format"]=="anthropic": body["messages"] += [{"role":"assistant","content":p["content"]},{"role":"user","content":[{"type":"tool_result","tool_use_id":call["id"],"content":"27271296"}]}]
@@ -443,7 +463,7 @@ def run(config,emit=None,cancelled=None):
                     if changed: break
                 if changed: execute({"id":"thinking-mutated","check":"signature_mutation","probe":"signature_mutation","body":mutated})
     if "stress" in settings["enabled_modules"] and not is_cancelled():
-        stress=[{"id":"stress-%03d"%(i+1),"check":"stress","probe":"stress","body":_convert(_body(settings,"Reply exactly STRESS-OK.",max_tokens=32),settings)} for i in range(settings["stress_requests"])]
+        stress=[{"id":"stress-%03d"%(i+1),"check":"stress","probe":"stress","body":_convert(_body(settings,"Reply exactly STRESS-OK.",max_tokens=512),settings)} for i in range(settings["stress_requests"])]
         # Workers check cancellation before each request; no retries or detached jobs.
         with ThreadPoolExecutor(max_workers=settings["stress_concurrency"],thread_name_prefix="claude-stress") as pool:
             futures=[pool.submit(execute,s) for s in stress]
@@ -479,11 +499,14 @@ def build_plan(config):
         conditional.append({"id":"tool-return","module":"tools","title":"工具结果回传","method":"POST","url":endpoint(settings["base"],settings["request_format"]),"body":body,"conditional":True,"notes":["仅在工具名称、ID、参数有效后执行；示例占位符运行时由真实响应替换。"]})
     if "auth_signature" in settings["enabled_modules"] and settings["request_format"]=="anthropic":
         for ident,title in (("thinking-return","原始签名原样回传"),("thinking-mutated","真实签名仅修改一个字符")):
-            conditional.append({"id":ident,"module":"auth_signature","title":title,"method":"POST","url":endpoint(settings["base"],settings["request_format"]),"body":{"model":settings["model"],"max_tokens":1280,"thinking":{"type":"enabled","budget_tokens":1024},"messages":[{"role":"user","content":"What is 17 multiplied by 19? Think briefly, then give the number."},{"role":"assistant","content":"<运行时插入同一模型的完整原始 content；篡改轮仅改 signature 的一个字符>"},{"role":"user","content":"Confirm the same result briefly."}]},"conditional":True,"notes":["依赖上游产生签名；篡改负对照还要求原样回传成功，否则标记证据不足。"]})
+            conditional.append({"id":ident,"module":"auth_signature","title":title,"method":"POST","url":endpoint(settings["base"],settings["request_format"]),"body":{"model":settings["model"],"max_tokens":4096,"thinking":{"type":"adaptive"},"output_config":{"effort":"low"},"messages":[{"role":"user","content":"What is 17 multiplied by 19? Think briefly, then give the number."},{"role":"assistant","content":"<运行时插入同一模型的完整原始 content；篡改轮仅改 signature 的一个字符>"},{"role":"user","content":"Confirm the same result briefly."}]},"conditional":True,"notes":["依赖上游产生签名；篡改负对照还要求原样回传成功，否则标记证据不足。"]})
+        legacy=copy.deepcopy(next(x["body"] for x in specs if x["id"]=="thinking-original"))
+        legacy.pop("output_config",None);legacy["thinking"]={"type":"enabled","budget_tokens":1024}
+        conditional.append({"id":"thinking-legacy","module":"auth_signature","title":"传统 thinking 兼容对照","method":"POST","url":endpoint(settings["base"],settings["request_format"]),"body":legacy,"conditional":True,"notes":["仅在上游明确不支持 adaptive 时执行；无网络错误或任意失败重试。回传沿用成功的 thinking 配置。"]})
     stress_count=0
     if "stress" in settings["enabled_modules"]:
         stress_count=settings["stress_requests"]
-        rows.append({"id":"stress-template","module":"stress","title":"受控并发压测","method":"POST","url":endpoint(settings["base"],settings["request_format"]),"body":_convert(_body(settings,"Reply exactly STRESS-OK.",max_tokens=32),settings),"repeat":stress_count,"notes":["总请求 %s，并发上限 %s，不自动重试。"%(stress_count,settings["stress_concurrency"])]})
+        rows.append({"id":"stress-template","module":"stress","title":"受控并发压测","method":"POST","url":endpoint(settings["base"],settings["request_format"]),"body":_convert(_body(settings,"Reply exactly STRESS-OK.",max_tokens=512),settings),"repeat":stress_count,"notes":["总请求 %s，并发上限 %s，不自动重试。"%(stress_count,settings["stress_concurrency"])]})
     rows.extend(conditional)
     request_count=len(specs)+stress_count+len(conditional)
     return {"suite":"claude","request_count":request_count,"request_count_is_maximum":True,"conditional_requests":len(conditional),"token_estimate":{"cache_prefix_target_tokens":settings["cache_tokens"],"cache_requests":4 if "cache" in settings["enabled_modules"] else 0,"cache_total_target_input_tokens":settings["cache_tokens"]*4 if "cache" in settings["enabled_modules"] else 0,"basis":"前缀 Token 为估计目标；真实 Token 与费用以上游 usage / 账单为准。"},"limitations":["来源是用户声明；AWS 中转仍按渠道 Messages 或 Chat 接口测试，不伪造 SigV4。","签名原样回传、篡改以及工具结果回传为条件请求，实际数量可能低于上限。","不会用模型自述、响应头或单次签名响应作官方身份或蒸馏证明。"],"requests":rows}

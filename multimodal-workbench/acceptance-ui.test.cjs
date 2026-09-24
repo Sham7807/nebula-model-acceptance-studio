@@ -67,11 +67,11 @@ async function fixture(browser, options = {}) {
         return send({ token: state.sessionNoToken ? '' : token, active: state.job?.status === 'running' ? state.job.id : null, latest: state.job?.id || null, kvv_revision: state.kvvRevision, ready: true });
       }
       assert.equal(req.headers()['x-workbench-token'], token, 'API call carries only local session token');
-      if (url.pathname === '/api/claude/plan') {
+      if (url.pathname === '/api/claude/plan' || url.pathname === '/api/acceptance/plan') {
         assert.equal(req.method(),'POST');const body=JSON.parse(req.postData());state.planPosts.push(body);
         assert.equal(Object.hasOwn(body,'key'),false,'request plan never submits API key');
         assert.doesNotMatch(req.postData(),/mock-channel-key/);
-        return send({suite:'claude',request_count:6,request_count_is_maximum:true,conditional_requests:1,token_estimate:{cache_prefix_target_tokens:6000,cache_requests:4,cache_total_target_input_tokens:24000,basis:'实际消耗以上游 usage 为准。'},limitations:['来源标签不是官方身份证明。','长前缀 token 为估算，以实测 usage 为准。'],requests:[
+        return send({suite:body.suite,matrix_only:url.pathname==='/api/acceptance/plan',request_count:6,request_count_is_maximum:true,conditional_requests:1,token_estimate:{cache_prefix_target_tokens:6000,cache_requests:4,cache_total_target_input_tokens:24000,basis:'实际消耗以上游 usage 为准。'},limitations:['来源标签不是官方身份证明。','长前缀 token 为估算，以实测 usage 为准。'],requests:[
           {id:'baseline',module:'protocol',title:'基础 Messages 基线',method:'POST',url:'https://relay.test/v1/messages',body:{model:body.model,max_tokens:32,messages:[{role:'user',content:'<script>window.__previewExecuted=true</script>'}]},notes:'保留响应结构。'},
           {id:'cache-warm',module:'cache',title:'长前缀缓存预热',method:'POST',url:'https://relay.test/v1/messages',repeat:3,conditional:true,body:{model:body.model,system:[{type:'text',text:'prefix '.repeat(300),cache_control:{type:'ephemeral'}}],max_tokens:16,messages:[{role:'user',content:'返回 OK'}]}}
         ]});
@@ -906,6 +906,43 @@ async function download(page, format, bytes) {
       } finally { for (const resolve of state.restorePending) resolve();await f.close(); }
     }
     passed.push('slow latest/active restoration keeps starts disabled and cannot overwrite a competing newly submitted job');
+    for (const name of ['ccmax','claude','kimi']) {
+      const f=await fixture(browser);const {page,state}=f;
+      try {
+        await suite(page,name);await fill(page);
+        assert.equal(await page.locator('#acceptanceMatrixProfile').inputValue(),'standard');
+        assert.equal(await page.locator('[data-matrix-module]:checked').count(),7);
+        await page.locator('#acceptanceMatrixProfile').selectOption('comprehensive');
+        assert.match(await page.locator('#acceptanceMatrixHelp').innerText(),/72/);
+        await page.locator('#acceptanceMatrixPreview').click();
+        await page.locator('#claudePlanDialog').waitFor({state:'visible'});
+        assert.equal(state.planPosts[0].matrix_profile,'comprehensive');
+        assert.equal(state.planPosts[0].matrix_modules.length,7);
+        assert.match(await page.locator('#claudePlanSummary').innerText(),/不包含原专项/);
+        assert.equal(state.posts.length,0);
+        await page.locator('#claudePlanClose').click();
+        await page.locator('#acceptanceMatrixProfile').selectOption('quick');
+        await page.locator('#acceptanceMatrixFields details summary').click();
+        await page.locator('[data-matrix-module="stress"]').uncheck();
+        await page.setViewportSize({width:390,height:844});await noOverflow(page);
+        await page.locator('#acceptanceRun').click();
+        await page.waitForFunction(()=>document.getElementById('acceptanceStop').disabled===false);
+        assert.equal(state.posts[0].matrix_profile,'quick');
+        assert.equal(state.posts[0].matrix_modules.includes('stress'),false);
+        assert.equal(await page.locator('#acceptanceMatrixProfile').isDisabled(),true);
+        assert.equal(await page.locator('#acceptanceMatrixPreview').isDisabled(),true);
+        await page.locator('#acceptanceStop').click();
+      } finally {await f.close();}
+    }
+    passed.push('all acceptance suites default to standard matrix, preview without key/calls, persist selection, lock during runs and fit mobile');
+    {
+      const f=await fixture(browser,{latest:'ccmax',configuration:{matrix_profile:'comprehensive',matrix_modules:['tools','max_tokens']}});
+      try {
+        await f.page.waitForFunction(()=>document.getElementById('acceptanceMatrixProfile').value==='comprehensive');
+        assert.deepEqual(await f.page.locator('[data-matrix-module]:checked').evaluateAll(xs=>xs.map(x=>x.dataset.matrixModule).sort()),['max_tokens','tools']);
+      } finally {await f.close();}
+    }
+    passed.push('history restoration preserves matrix profile and module selection');
     assert.deepEqual(unexpected, [], 'every request is local and mocked');
     assert.deepEqual(errors, [], 'no browser runtime errors');
     await fs.writeFile(path.join(output, 'summary.json'), JSON.stringify({ passed: true, groups: passed, requests: count, realApiRequests: 0 }, null, 2));

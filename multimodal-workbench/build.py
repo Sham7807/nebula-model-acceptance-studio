@@ -11,7 +11,7 @@ discovery_script = '<script>\n' + (root / 'model-discovery.js').read_text().repl
 legacy_source = (root / 'legacy.html').read_text().replace('<script src="model-discovery.js"></script>', discovery_script)
 legacy_source = legacy_source.replace('<link rel="stylesheet" href="model-multiselect.css">', '<style>\n' + (root / 'model-multiselect.css').read_text() + '\n</style>')
 legacy_source = legacy_source.replace('<script src="model-multiselect.js"></script>', '<script>\n' + (root / 'model-multiselect.js').read_text().replace('</script', '<\\/script') + '\n</script>')
-for script in ['general-format.js', 'general-check-content.js', 'client-report.js']:
+for script in ['general-format.js', 'general-matrix.js', 'general-check-content.js', 'client-report.js']:
     legacy_source = legacy_source.replace('<script src="'+script+'"></script>', '<script>\n' + (root / script).read_text().replace('</script', '<\\/script') + '\n</script>')
 theme_script = '<script>window.WORKBENCH_REPORT_THEME=' + json.dumps((root / 'report-theme.css').read_text(), ensure_ascii=False).replace('</', '<\\/') + ';</script>'
 legacy_source = legacy_source.replace('<script src="report-theme.js"></script>', theme_script)

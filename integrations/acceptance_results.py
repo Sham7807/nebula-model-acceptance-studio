@@ -16,16 +16,26 @@ def decorate(result):
     # ``ccmax_acceptance``.  Both must use the CCMax check collection so a
     # standalone render cannot accidentally count its checks as KVV cases.
     entries = (result.get('checks') or result.get('cases')) if result.get('suite') in ('claude', 'claude_acceptance') else result.get('checks') if result.get('suite') in ('ccmax', 'ccmax_acceptance') else result.get('cases')
-    entries = entries or []
+    matrix = result.get('matrix_validation') or {}
+    entries = list(entries or []) + list(matrix.get('cases') or [])
     local = [x for x in entries if 'tolerance_boundaries' in x.get('id','')]
     not_applicable = [x for x in entries if x.get('applicable') is False]
     not_selected = [x for x in entries if x.get('module_disabled') is True]
-    remote = [x for x in entries if x not in local and x not in not_applicable and x not in not_selected]
+    def observational(entry):
+        metadata = entry.get('metadata') or {}
+        dimensions = entry.get('dimensions') or metadata.get('dimensions') or []
+        return entry.get('evidence_category') == 'observation' or dimensions == ['identity'] or entry.get('id') in ('identity','authenticity','model_identity')
+    observations = [x for x in entries if observational(x)]
+    remote = [x for x in entries if x not in local and x not in not_applicable and x not in not_selected and x not in observations]
     counts = {status: sum(x.get('status') == status for x in remote) for status in ('passed','failed','inconclusive','skipped','not_covered')}
     unknown = sum(x.get('status') not in counts for x in remote)
     transport = result.get('transport') or {}
     transport_bad = [x for x in transport.get('checks',[]) if x.get('status')=='failed']
-    untested = max(0, int(result.get('summary',{}).get('total') or 0) - int(result.get('summary',{}).get('completed') or 0))
+    summary = result.get('native_summary') or result.get('summary') or {}
+    untested = max(0, int(summary.get('total') or 0) - int(summary.get('completed') or 0))
+    if result.get('native_summary') and matrix:
+        matrix_summary = matrix.get('summary') or {}
+        untested += max(0, int(matrix_summary.get('total') or 0) - int(matrix_summary.get('completed') or 0))
     if result.get('status')=='cancelled':
         status,label,detail='inconclusive','已取消 · 结论不完整','保留已完成样本，未完成项不计为通过。'
     elif counts['failed'] or transport_bad:
@@ -35,5 +45,5 @@ def decorate(result):
         status,label,detail='inconclusive','证据不足 · 无法确认通过','存在调用错误、未执行项或无法判定项，不能把本次运行视为通过。'
     else:
         status,label,detail='passed','本轮已执行检查通过','仅对本轮采样负责；不代表模型身份认证或长期稳定性保证。'
-    result['verdict']={'status':status,'label':label,'detail':detail,'counts':counts,'skipped':counts['skipped'],'not_applicable':len(not_applicable),'not_selected':len(not_selected),'untested':untested,'local_checks':len(local),'transport_failures':len(transport_bad),'unclassified':unknown}
+    result['verdict']={'status':status,'label':label,'detail':detail,'counts':counts,'skipped':counts['skipped'],'not_applicable':len(not_applicable),'not_selected':len(not_selected),'untested':untested,'local_checks':len(local),'transport_failures':len(transport_bad),'unclassified':unknown,'observational':len(observations)}
     return result

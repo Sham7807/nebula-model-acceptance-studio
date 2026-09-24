@@ -262,7 +262,8 @@ def normalize_browser_report(payload):
                     'expected': check.get('expected') or ('返回可执行的 HTML/SVG 鹈鹕骑自行车 2D 动画，并提供可核对的 input/output/total token usage。' if gpt_evaluation else '符合该内置用例的输出与协议断言；旧记录未保存独立预期值，详见原始判定。'),
                     'observed': observed, 'skip_reason': check.get('skip_reason') or check.get('reason'), 'meaning': check.get('meaning') or check.get('judge') or ('GPT 专项只评价本次生成中可观察的 HTML/SVG 结构与 token 字段一致性，不等同于模型身份认证或内容审美评分。' if gpt_evaluation else '依据保存的原始判定；单项不能推导所有能力。'),
                     'next_step': check.get('next_step') or ('此项不适用于当前协议，不参与计分。' if check.get('applicable') is False else '优先按模型和请求地址核对失败项，再重跑该专项。' if status != 'passed' else '此结论仅适用于当前样本；可增加输入、并发和重复测试。'),
-                    'metadata': metadata, 'raw': check, 'request_ids': [row['id'] for row in linked]})
+                    'metadata': metadata, 'raw': check, 'request_ids': [row['id'] for row in linked],
+                    **{key: deepcopy(check[key]) for key in ('parameters','scenario_id','repetition','score_applicable','evidence_category','reason_code') if key in check}})
         else:
             status = STATUS.get(record.get('status') or result.get('status'), 'inconclusive')
             title = result.get('preset') or (KINDS.get(kind, kind) + '基础测试')
@@ -296,8 +297,8 @@ def normalize_browser_report(payload):
 
 
 def report_data(result):
-    from report_content import _report_score, _findings
-    checks = result['cases']
+    from report_content import _report_score, _findings, _explain_check
+    checks = [_explain_check(check) for check in result['cases']]
     general = result.get('report_kind') == 'general'
     return {'title': '通用深度检测报告' if general else '多模态基础测试报告',
             'engine': '通用检测内置用例' if general else '工作台基础接口观察', 'checks': checks,

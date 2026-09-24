@@ -207,7 +207,79 @@ class ClaudeAcceptanceTests(unittest.TestCase):
         self.assertEqual(plan['request_count'],sum(x.get('repeat',1) for x in plan['requests']))
         self.assertNotIn('fixture-secret',json.dumps(plan))
         self.assertTrue(all('module' in x and 'title' in x for x in plan['requests']))
-        self.assertEqual(len([x for x in plan['requests'] if x.get('conditional')]),3)
+        self.assertEqual(len([x for x in plan['requests'] if x.get('conditional')]),4)
+
+    def test_empty_content_at_max_tokens_one_is_valid_truncation(self):
+        calls=[];base=self.handler(calls)
+        def handler(req):
+            body=json.loads(req.content)
+            if body.get('max_tokens')==1:
+                return httpx.Response(200,json={'type':'message','content':[], 'stop_reason':'max_tokens',
+                    'usage':{'input_tokens':8,'output_tokens':1,'output_tokens_details':{'thinking_tokens':1}}})
+            return base(req)
+        r=c.run(self.config(enabled_modules=['max_tokens'],transport=httpx.MockTransport(handler)))
+        cap=next(s for s in r['samples'] if s['id']=='max-tokens-one')
+        self.assertEqual(cap['status'],'passed')
+        self.assertEqual(next(x for x in r['checks'] if x['id']=='max_tokens')['status'],'passed')
+
+    def test_thinking_only_baseline_keeps_authentication_positive_control(self):
+        calls=[];base=self.handler(calls)
+        def handler(req):
+            body=json.loads(req.content)
+            if body['messages'][0].get('content')=='Reply exactly CLAUDE-BASELINE-OK.':
+                return httpx.Response(200,json={'type':'message','content':[{'type':'thinking','thinking':''}],
+                    'stop_reason':'max_tokens','usage':{'output_tokens':1024}})
+            return base(req)
+        r=c.run(self.config(enabled_modules=['auth_signature'],transport=httpx.MockTransport(handler)))
+        self.assertEqual(next(s for s in r['samples'] if s['id']=='baseline')['status'],'passed')
+        self.assertEqual(next(x for x in r['checks'] if x['id']=='authentication')['status'],'passed')
+
+    def test_no_visible_text_at_budget_is_evidence_gap_not_semantic_failure(self):
+        settings,_=c.configuration(self.config())
+        sample={'response':{'status':200,'body':json.dumps({'type':'message','content':[],
+            'stop_reason':'max_tokens','usage':{'output_tokens':1024}})},'termination':'eof','evidence':{}}
+        row=c._judge({'probe':'passthrough','check':'passthrough'},sample,settings)
+        self.assertEqual(row['status'],'inconclusive')
+        self.assertEqual(row['reason_code'],'budget_exhausted')
+        self.assertIn('1024',row['detail'])
+        for body in ({'type':'message','content':[],'stop_reason':'end_turn'},
+                     {'type':'message','content':{},'stop_reason':'max_tokens'},
+                     {'type':'message','content':[]}, {'type':'message','content':['bad'],'stop_reason':'end_turn'},{}):
+            self.assertFalse(c._valid_message(body,settings))
+
+    def test_adaptive_fallback_is_only_for_explicit_unsupported_configuration(self):
+        for code,error,expected in [(400,'adaptive thinking is not supported',True),
+                                    (422,'unsupported thinking mode',True),
+                                    (429,'rate limited',False),(502,'upstream unavailable',False),
+                                    (400,'request rejected',False),(400,'unsupported account tier',False),(200,'',False)]:
+            with self.subTest(code=code,error=error):
+                calls=[];base=self.handler(calls)
+                def handler(req):
+                    body=json.loads(req.content)
+                    if body.get('thinking',{}).get('type')=='adaptive' and not any(m['role']=='assistant' for m in body['messages']) and code!=200:
+                        return httpx.Response(code,json={'error':{'message':error}})
+                    return base(req)
+                r=c.run(self.config(enabled_modules=['auth_signature'],transport=httpx.MockTransport(handler)))
+                ids={s['id'] for s in r['samples']}
+                self.assertEqual('thinking-legacy' in ids,expected)
+                if expected:
+                    legacy=next(s for s in r['samples'] if s['id']=='thinking-legacy')
+                    self.assertEqual(legacy['request']['body']['thinking']['type'],'enabled')
+                    self.assertNotIn('output_config',legacy['request']['body'])
+                    self.assertEqual(next(x for x in r['checks'] if x['id']=='signature_roundtrip')['status'],'passed')
+
+    def test_stress_reports_transport_and_semantics_separately(self):
+        calls=[];base=self.handler(calls)
+        def handler(req):
+            if 'STRESS-OK' in req.content.decode():
+                return httpx.Response(200,json={'type':'message','content':[],'stop_reason':'max_tokens',
+                    'usage':{'output_tokens':512}})
+            return base(req)
+        r=c.run(self.config(enabled_modules=['stress'],transport=httpx.MockTransport(handler)))
+        stress=next(x for x in r['checks'] if x['id']=='stress')
+        self.assertEqual(stress['status'],'passed')
+        self.assertEqual(stress['metrics']['success_rate'],1)
+        self.assertEqual(stress['metrics']['semantic_match_rate'],0)
 
     def test_signature_tamper_only_runs_after_original_roundtrip(self):
         calls=[]

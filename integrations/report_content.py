@@ -262,13 +262,26 @@ def _meaning(status, meaning):
     return prefix[_status(status)] + meaning
 
 
+
+def _request_parameters(body):
+    if isinstance(body,str):
+        try: body=json.loads(body)
+        except (ValueError,TypeError): return {}
+    body=_dict(body)
+    keys=('model','max_tokens','max_completion_tokens','max_output_tokens','stream','temperature','top_p','top_k','seed','stop','stop_sequences','tool_choice','parallel_tool_calls','response_format','thinking','reasoning_effort','output_config')
+    values={key:deepcopy(body[key]) for key in keys if key in body}
+    if isinstance(body.get('tools'),list):
+        values['tools']=[_dict(tool).get('name') or _dict(_dict(tool).get('function')).get('name') or _dict(tool).get('type') for tool in body['tools']]
+    return values
+
 def _cc_evidence(sample, check_id, assessment):
     evidence = _dict(sample.get("evidence"))
     sse = _dict(evidence.get("sse"))
     response = _dict(sample.get("response"))
     data = {"sample_id": _text(sample.get("id")), "status": _status(assessment.get("status")), "detail": _text(assessment.get("detail")),
             "http_status": response.get("status"), "termination": sample.get("termination"), "duration_ms": sample.get("duration_ms"),
-            "request_ids": _header_ids(evidence.get("request_ids")), "transport_error": evidence.get("transport_error")}
+            "request_ids": _header_ids(evidence.get("request_ids")), "transport_error": evidence.get("transport_error"),
+            "parameters": _request_parameters(_dict(sample.get("request")).get("body")), "reason_code": assessment.get("reason_code")}
     fields = {"message_start": ("message_start_count", "message_ids"),
               "message_stop": ("message_stop_count", "message_delta_count", "stop_reasons", "malformed_events", "sequence_errors", "incomplete_event"),
               "stream_error": ("errors",), "usage_cache": ("usage",), "tool_stream": ("tools", "tool_errors")}
@@ -371,7 +384,7 @@ def _cc_checks(result):
                     for row in _list(original.get("details")) if isinstance(row, dict)]
         counts = _counts(rows)
         sample_ids = _unique(row["sample_id"] for row in rows)
-        status = _status(original.get("status"))
+        status = _status(original.get("status")) if original or rows else "not_covered"
         observed = "涉及 %s 个样本、%s 条判定；%s。" % (len(sample_ids), counts["total"], _count_text(counts))
         if check_id == "connection":
             grace = _dict(result.get("configuration")).get("close_grace")
@@ -384,7 +397,8 @@ def _cc_checks(result):
         checks.append({"id": check_id, "title": title, "status": status, "method": method, "expected": expected,
                        "observed": observed, "observed_summary": observed_summary, "applicable":original.get('applicable',True),
                        "meaning": _meaning(status, meaning), "next_step": next_step,
-                       "request_ids": _unique(value for row in rows for value in row["request_ids"]), "sample_ids": sample_ids,
+                       "request_ids": sample_ids or _unique(value for row in rows for value in row["request_ids"]), "sample_ids": sample_ids,
+                       "upstream_request_ids": _unique(value for row in rows for value in row["request_ids"]),
                        "counts": counts, "evidence_rows": rows, "category": "CCMax 协议验收", "local_only": False,
                        # Keep CCMax probes mapped explicitly.  Signature and
                        # error-shape checks exercise protocol/error handling;
@@ -403,8 +417,8 @@ def _cc_checks(result):
                            # Security-behavior probes are deliberately kept
                            # out of the protocol score: none of the six
                            # capability dimensions represents prompt safety.
-                           "prompt_injection": [],
-                           "instruction_hierarchy": [],
+                           "prompt_injection": ["security"],
+                           "instruction_hierarchy": ["security"],
                            "behavioral_consistency": ["reliability"],
                            "parameter_validation": ["max_tokens", "protocol"],
                        }.get(check_id, []),
@@ -438,6 +452,9 @@ def _claude_observation_sections(original, samples, result):
             _claude_value(metrics.get(key), " ms") for key in ("latency_p50_ms", "latency_p95_ms", "ttfb_p95_ms"))
         status_counts = _dict(metrics.get("http_statuses"))
         statuses = "HTTP 状态分布：" + ("、".join("%s × %s" % (code, _claude_value(count)) for code, count in status_counts.items()) or "未记录") + "。"
+        semantic=metrics.get('semantic_match_rate')
+        if isinstance(semantic,(int,float)) and not isinstance(semantic,bool) and math.isfinite(semantic):
+            performance += " 字面响应匹配率 %.2f%%（与请求成功率分别统计）。" % (semantic*100)
         details.append("压测实测统计\n" + performance + "\n" + latency + "\n" + statuses)
         summaries.append(performance + " " + latency + " " + statuses)
     cache_rows = _list(original.get("cache_observations"))
@@ -563,6 +580,7 @@ def _claude_checks(result):
                        "next_step": next_step, "request_ids": request_ids, "sample_ids": sample_ids,
                        "counts": counts, "evidence_rows": rows, "category": original.get("category") or "Claude 专项验收",
                        "local_only": original.get("local_only", False), "metadata": metadata,
+                       **{key: deepcopy(original[key]) for key in ("parameters", "scenario_id", "repetition", "score_applicable", "evidence_category", "reason_code", "reason_codes", "metrics", "cache_observations") if key in original},
                        "raw": {"check": deepcopy(original), "sample_ids": sample_ids, "evidence": deepcopy(rows)}})
     return checks
 
@@ -796,12 +814,13 @@ MODULE_PRESETS = {
         ("stress", "压测与稳定性", 10, "受控并发下统计成功率、延迟、限流、断流和超时，区分容量表现与 SLA。"),
     ),
     "browser": (
-        ("protocol", "接口与协议", 25, "保存请求、HTTP 状态、响应正文与错误诊断。"),
-        ("multimodal", "多模态结果", 25, "按图像、视频、音频和文本结果分别展示媒体证据。"),
+        ("protocol", "接口与协议", 20, "保存请求、HTTP 状态、响应正文与错误诊断。"),
+        ("multimodal", "多模态结果", 20, "按图像、视频、音频和文本结果分别展示媒体证据。"),
         ("tools", "工具调用", 15, "展示工具声明、调用结果和调用失败原因。"),
         ("max_tokens", "长度控制", 10, "展示 max_tokens、完成长度和终止原因。"),
         ("cache", "缓存与 usage", 10, "展示 usage/cached_tokens 字段及重复请求观察。"),
-        ("reliability", "稳定性与性能", 15, "展示耗时、失败率、取消和超时证据。"),
+        ("reliability", "稳定性与性能", 10, "展示耗时、失败率、取消和超时证据。"),
+        ("security", "注入与指令隔离", 15, "使用合成金丝雀和多类不可信输入验证本轮指令隔离，不代表长期安全保证。"),
     ),
 }
 
@@ -822,9 +841,17 @@ def _module_id_for_check(check, result):
     check = _dict(check)
     metadata = _dict(check.get("metadata"))
     explicit = metadata.get("module") or check.get("module")
-    if explicit:
-        return _text(explicit)
     suite = _text(_dict(result).get("suite"))
+    if suite == 'batch_acceptance': suite = _dict(_dict(result).get('configuration')).get('suite', suite)
+    if explicit:
+        if suite == 'browser_report' and explicit in ('injection','security'):
+            return 'security'
+        if metadata.get('source') == 'matrix_validation':
+            mapping = ({'multimodal':'tools'} if suite in ('claude','claude_acceptance') else
+                       {'max_tokens':'parameters','injection':'security','multimodal':'tools','stress':'protocol'} if suite in ('ccmax','ccmax_acceptance') else
+                       {'injection':'protocol','stress':'reliability'})
+            return mapping.get(_text(explicit), _text(explicit))
+        return _text(explicit)
     check_id = _text(check.get("id"))
     dims = set(_list(metadata.get("dimensions")) or _list(check.get("dimensions")))
     # These IDs are stable across standalone and batch reports.  Resolve them
@@ -866,100 +893,204 @@ def _module_id_for_check(check, result):
     return "protocol"
 
 
+def _observation_only(check):
+    metadata = _dict(check.get("metadata"))
+    dimensions = _list(metadata.get("dimensions")) or _list(check.get("dimensions"))
+    return (check.get("evidence_category") == "observation"
+            or ("identity" in dimensions and not any(d != "identity" for d in dimensions)))
+
+
+def _sample_identifiers(result):
+    if result.get('suite') == 'batch_acceptance':
+        return {'model-%s-%s' % (i, identity) for i,item in enumerate(_list(result.get('results')),1)
+                for identity in _sample_identifiers(_dict(item.get('result')))}
+    samples = _list(result.get('samples')) + _list(_dict(result.get('matrix_validation')).get('samples')) + _list(_dict(result.get('matrix_validation')).get('evidence_samples'))
+    requests = _list(_dict(result.get('transport')).get('requests')) + _list(result.get('browser_requests'))
+    return {_text(row.get('id') or row.get('request_id')) for row in samples + requests if isinstance(row,dict) and (row.get('id') or row.get('request_id'))}
+
+
+def _score_stats(checks, known_samples=None):
+    """Separate observed coverage from conclusive capability assertions.
+
+    Assertions can share requests. Neither check counts nor upstream headers
+    are a substitute for the number of independently observed HTTP samples.
+    """
+    counts = _counts(checks)
+    present = [c for c in checks if c.get("status") in ("passed", "failed", "inconclusive")]
+    ancillary = [c for c in present if _observation_only(c) or c.get('evidence_category') in ('control','aggregate')]
+    observed = [c for c in present if c not in ancillary]
+    scored = [c for c in observed if c.get("status") in ("passed", "failed") and not _observation_only(c)
+              and c.get("score_applicable") is not False and _dict(c.get("metadata")).get("score_applicable") is not False]
+    sample_ids = _unique(identity for c in observed for identity in (_list(c.get("sample_ids")) or _list(c.get("request_ids"))))
+    if known_samples is not None:
+        sample_ids = [identity for identity in sample_ids if identity in known_samples]
+    scenarios = _unique(c.get("scenario_id") or _dict(c.get("metadata")).get("scenario_id") or c.get("id") for c in observed)
+    variants = set()
+    def add_variant(params):
+        if isinstance(params,dict):
+            params = {key:value for key,value in params.items() if key not in ('repetition','round','sample_id','request_id','source_request_id','prefix_sha256','prefix_chars','estimate')}
+        variants.add(json.dumps(params, sort_keys=True, ensure_ascii=False, default=str))
+    for c in observed:
+        params = c.get("parameters", _dict(c.get("metadata")).get("parameters"))
+        if params is not None:
+            add_variant(params)
+        else:
+            for row in _list(c.get('evidence_rows')):
+                if _dict(row).get('parameters'): add_variant(row['parameters'])
+    passed = sum(c.get("status") == "passed" for c in scored)
+    score = round(passed / len(scored) * 100) if scored else None
+    status = ("not_covered" if not present else "failed" if any(c.get("status") == "failed" for c in scored)
+              else "inconclusive" if not scored or counts.get("inconclusive") or counts.get("not_covered") or counts.get("cancelled") or counts.get("skipped") else "passed")
+    return {"score": score, "max_score": 100, "status": status, "covered": len(present),
+            "capability_observed":len(observed), "observation_count":len(ancillary), "scored_passed":passed, "scored_failed":len(scored)-passed,
+            "conclusive": len(scored), "counts": counts, "resolution_percent": round(len(scored) / len(observed) * 100) if observed else None,
+            "scenario_count": len(scenarios), "parameter_count": len(variants), "sample_count": len(sample_ids),
+            "small_sample": bool(observed) and (len(sample_ids) < 10 or len(scenarios) < 3),
+            "observational": bool(present) and not observed,
+            "check_ids": [_text(c.get("id")) for c in checks]}
+
+
 def _report_modules(checks, result):
     modules = []
     configured = _dict(result).get("enabled_modules")
     enabled = set(configured) if isinstance(configured, (list, tuple, set)) and configured else None
-    for module_id, label, weight, description in _module_preset(result):
+    presets = list(_module_preset(result))
+    if any(_module_id_for_check(c, result) == 'reliability' for c in checks) and not any(p[0]=='reliability' for p in presets):
+        presets.append(('reliability','压测与稳定性',0,'独立展示受控负载、成功率、延迟与限流；不改变官方 KVV 模块权重。'))
+    for module_id, label, weight, description in presets:
         disabled = enabled is not None and module_id not in enabled
-        matched = [] if disabled else [check for check in checks if _module_id_for_check(check, result) == module_id]
-        matched = [check for check in matched if not check.get("local_only") and check.get("applicable") is not False]
-        counts = _counts(matched)
-        observed = [check for check in matched if check.get("status") in ("passed", "failed", "inconclusive")]
-        covered = len(observed)
-        points = sum(1.0 if check.get("status") == "passed" else 0.4 if check.get("status") == "inconclusive" else 0.0 for check in observed)
-        score = round(points / covered * 100) if covered else 0
-        if not covered:
-            status = "not_covered"
-        elif counts.get("failed"):
-            status = "failed"
-        elif counts.get("inconclusive") or counts.get("skipped") or counts.get("cancelled") or counts.get("not_covered"):
-            status = "inconclusive"
-        else:
-            status = "passed"
+        matched = [c for c in checks if _module_id_for_check(c, result) == module_id
+                   and (not disabled or _dict(c.get('metadata')).get('source') == 'matrix_validation')]
+        disabled = disabled and not matched
+        matched = [c for c in matched if not c.get("local_only") and c.get("applicable") is not False]
         modules.append({"id": module_id, "label": label, "weight": weight, "description": description,
-                        "score": score, "max_score": 100, "status": status, "covered": covered,
-                        "counts": counts, "check_ids": [_text(check.get("id")) for check in matched], "disabled": disabled})
-    covered = [module for module in modules if module["covered"]]
-    weight_total = sum(module["weight"] for module in covered)
-    weighted_total = round(sum(module["score"] * module["weight"] for module in covered) / weight_total) if weight_total else 0
-    return {"modules": modules, "weighted_total": weighted_total, "weight_covered": weight_total,
-            "weight_total": sum(module["weight"] for module in modules)}
+                        **_score_stats(matched, _sample_identifiers(result)), "disabled": disabled})
+    scored = [m for m in modules if m["score"] is not None]
+    weight_total = sum(m["weight"] for m in scored)
+    total = round(sum(m["score"] * m["weight"] for m in scored) / weight_total) if weight_total else None
+    return {"modules": modules, "weighted_total": total, "weight_covered": weight_total,
+            "weight_total": sum(m["weight"] for m in modules)}
 
 
 def _report_score(checks, result):
-    """Return a transparent, dimensioned score for the HTML report.
-
-    Scores use observed checks only: passed=1, inconclusive=0.4, failed=0.
-    Skipped/not-covered/cancelled/inapplicable checks stay in coverage counts
-    and do not participate in the score denominator.
-    """
+    """Conclusive pass ratio, coverage, and evidence resolution are distinct."""
     dimensions = []
     enabled = result.get("enabled_modules")
     enabled = set(enabled) if isinstance(enabled, (list, tuple, set)) and enabled else None
     claude = result.get("suite") in ("claude", "claude_acceptance") or (result.get("suite") == 'batch_acceptance' and _dict(result.get('configuration')).get('suite') == 'claude')
     dimension_definitions = REPORT_DIMENSIONS + (("security", "注入与指令隔离"), ("identity", "模型身份一致性观察"),
-        ("signature", "签名契约"), ("passthrough", "字段透传")) if claude else REPORT_DIMENSIONS
+        ("signature", "签名契约"), ("passthrough", "字段透传")) if claude else REPORT_DIMENSIONS + ((("security", "注入与指令隔离"),) if any("security" in (_list(_dict(c.get("metadata")).get("dimensions")) or _list(c.get("dimensions"))) or "injection" in (_list(_dict(c.get("metadata")).get("dimensions")) or _list(c.get("dimensions"))) for c in checks) else ())
     for key, label in dimension_definitions:
-        # A module that was explicitly disabled is always shown as uncovered,
-        # even when a shared protocol check also carries another dimension.
-        enabled_dimensions = {"security": "injection", "signature": "auth_signature", "passthrough": "protocol", "reliability": "stress", "multimodal": "tools"} if claude else {}
-        if enabled is not None and enabled_dimensions.get(key, key) not in enabled:
-            dimensions.append({"id": key, "label": label, "score": 0, "max_score": 100,
-                               "status": "not_covered", "covered": 0,
-                               "counts": {"total": 0, "passed": 0, "failed": 0, "inconclusive": 0, "skipped": 0, "not_covered": 0, "cancelled": 0},
-                               "check_ids": [], "disabled": True})
-            continue
-        matched = [check for check in checks if key in (_list(_dict(check.get("metadata")).get("dimensions")) or _list(check.get("dimensions")))]
-        # Avoid double counting local-only helper checks in a capability score.
-        matched = [check for check in matched if not check.get("local_only") and check.get('applicable') is not False]
-        counts = _counts(matched)
-        # Missing and inapplicable checks remain separate from observed
-        # performance. Coverage and status expose incomplete test scopes.
-        observed = [c for c in matched if c.get("status") in ("passed", "failed", "inconclusive")]
-        covered = len(observed)
-        points = sum(1.0 if c.get("status") == "passed" else 0.4 if c.get("status") == "inconclusive" else 0.0 for c in observed)
-        score = round(points / covered * 100) if covered else 0
-        if not covered:
-            status = "not_covered"
-        elif counts.get("failed", 0):
-            status = "failed"
-        elif counts.get("inconclusive", 0) or counts.get("skipped", 0) or counts.get("not_covered", 0) or counts.get("cancelled", 0):
-            status = "inconclusive"
-        else:
-            status = "passed"
-        dimensions.append({"id": key, "label": label, "score": score, "max_score": 100,
-                           "status": status, "covered": covered, "counts": counts,
-                           "check_ids": [_text(c.get("id")) for c in matched]})
+        # Module ownership gates execution; dimensions describe the resulting
+        # evidence. A multimodal check in Claude's tools module is not a tool
+        # invocation merely because it lives in that module.
+        matched = [c for c in checks if key in (_list(_dict(c.get("metadata")).get("dimensions")) or _list(c.get("dimensions")))]
+        matched = [c for c in matched if not c.get("local_only") and c.get("applicable") is not False
+                   and (enabled is None or _module_id_for_check(c, result) in enabled or _dict(c.get('metadata')).get('source') == 'matrix_validation')]
+        dimensions.append({"id": key, "label": label, **_score_stats(matched, _sample_identifiers(result))})
     covered_dims = [d for d in dimensions if d["covered"]]
-    total = round(sum(d["score"] for d in covered_dims) / len(covered_dims)) if covered_dims else 0
+    scored_dims = [d for d in dimensions if d["score"] is not None]
+    total = round(sum(d["score"] for d in scored_dims) / len(scored_dims)) if scored_dims else None
     recommendations = []
-    for dimension in dimensions:
-        if dimension["status"] == "not_covered":
-            recommendations.append("补充“%s”专项请求后再评价该能力；本轮没有可计分证据。" % dimension["label"])
-        elif dimension["status"] == "failed":
-            recommendations.append("优先复核“%s”中的失败用例，并依据请求 ID 对照网关与上游日志。" % dimension["label"])
-        elif dimension["status"] == "inconclusive":
-            recommendations.append("补齐“%s”的超时、鉴权或断流证据，再重新运行未完成用例。" % dimension["label"])
-    if not recommendations:
-        recommendations.append("各已覆盖维度均有完整通过证据；仍建议扩大模型、输入和并发样本后复测。")
+    for d in dimensions:
+        if d["observational"]:
+            recommendations.append("“%s”当前仅有对照、汇总或来源观察，不纳入能力分；请补充可独立判定的能力用例。" % d["label"])
+        elif d["status"] == "not_covered":
+            recommendations.append("补充“%s”的专项请求；本轮没有可计分证据。" % d["label"])
+        elif d["status"] == "failed":
+            recommendations.append("复核“%s”的失败参数组合，按本地样本 ID 对照原始响应和网关日志后复测。" % d["label"])
+        elif d["status"] == "inconclusive":
+            recommendations.append("“%s”证据不足项不记得分；先按鉴权、限流、超时、协议适用性或字段缺失原因修复，再重复相同参数。" % d["label"])
+        if d["small_sample"] and not d["observational"]:
+            recommendations.append("“%s”当前只有 %s 个场景、%s 条关联请求；该分仅为已判定检查通过率，不能解释为完整能力百分比。" % (d["label"], d["scenario_count"], d["sample_count"]))
     modules = _report_modules(checks, result)
+    overall = _score_stats([c for c in checks if not c.get("local_only") and c.get("applicable") is not False], _sample_identifiers(result))
     return {"total": total, "max_total": 100, "dimensions": dimensions,
-            "covered_dimensions": len(covered_dims), "dimension_count": len(dimensions),
-            "recommendations": recommendations,
-            "modules": modules["modules"], "weighted_total": modules["weighted_total"],
-            "weight_covered": modules["weight_covered"], "weight_total": modules["weight_total"],
-            "method": "模块按权重计分；已观察项目通过=100%，无法判定=40%，失败=0%。跳过、未覆盖、取消和不适用项不计入分母，覆盖范围单独统计；无覆盖模块不参与加权总分。"}
+            "covered_dimensions": len(covered_dims), "scored_dimensions": len(scored_dims), "dimension_count": len(dimensions),
+            "evidence": overall, "recommendations": recommendations, **modules,
+            "method": "维度分为已判定检查通过率：通过 ÷（通过 + 失败）；无法判定不赠分，也不作为能力失败。无可判定项显示 —。各可评分维度等权汇总；模块总览按权重汇总。覆盖量、可判定率与来源观察分别列出；少量样本通过不代表完整能力 100%。"}
+
+
+REASON_LABELS = {"authentication": "鉴权或权限阻断", "rate_limit": "限流或额度阻断", "timeout": "超时或连接中断",
+                 "infrastructure": "上游或网络基础设施异常", "not_applicable": "协议不适用 / 已跳过", "unsupported": "能力不支持",
+                 "insufficient_evidence": "返回证据不足", "capability_failure": "实测不符合断言", "observation": "来源观察，不作能力评分",
+                 "not_covered": "本轮未执行", "passed": "本轮断言通过", "control": "正向 / 负向对照观察", "aggregate": "汇总统计，不重复计分"}
+
+
+REASON_CODE_LABELS = {
+    'assertion_passed':'本轮断言通过', 'assertion_failed':'实测不符合断言', 'transport_error':'传输未正常完成',
+    'authentication_error':'鉴权或权限阻断', 'http_error':'HTTP 错误，需结合状态与正文定位', 'rate_limited':'限流或额度阻断',
+    'unsupported_parameter':'当前请求参数或能力不支持', 'unsupported_format':'当前协议不适用',
+    'evidence_missing':'缺少充分判定证据', 'prerequisite_failed':'前置正对照尚未成立', 'usage_missing':'返回 Token 计量字段缺失',
+    'budget_exhausted':'输出预算耗尽，行为证据不完整', 'cap_not_exercised':'本轮未触及输出截断',
+    'auto_no_tool_selected':'自动模式本轮未选择工具', 'cache_not_observed':'本轮未观察到缓存命中',
+    'cache_context_too_small':'实际前缀规模未达到大 Token 目标', 'cache_scale_insufficient':'实际前缀规模未达到大 Token 目标', 'cache_scale_not_reached':'实际前缀规模未达到大 Token 目标',
+    'cancelled':'用户取消，证据不完整'}
+
+
+def _explain_check(check):
+    """Attach a reason category without overwriting the original assertion."""
+    check = deepcopy(check)
+    metadata = _dict(check.get("metadata"))
+    raw_check = _dict(_dict(check.get("raw")).get("check")) or _dict(check.get("raw"))
+    for key in ("parameters", "scenario_id", "repetition", "score_applicable", "evidence_category", "reason_code"):
+        if key not in check and key in raw_check:
+            check[key] = deepcopy(raw_check[key])
+    text = _text(check.get("observed"))
+    status = check.get("status")
+    explicit = check.get("evidence_category") or metadata.get("evidence_category")
+    category = explicit if explicit in REASON_LABELS else None
+    reason_code = check.get('reason_code') or metadata.get('reason_code')
+    if reason_code:
+        check['reason_label'] = REASON_CODE_LABELS.get(reason_code, reason_code)
+    if check.get('reason_codes'):
+        check['reason_labels'] = [REASON_CODE_LABELS.get(code,code) for code in check['reason_codes']]
+    if category == 'infrastructure' and reason_code in ('authentication_error','rate_limited'):
+        category = {'authentication_error':'authentication','rate_limited':'rate_limit'}[reason_code]
+    if not category and reason_code:
+        category = {'assertion_passed':'passed','assertion_failed':'capability_failure','transport_error':'infrastructure','authentication_error':'authentication',
+                    'rate_limited':'rate_limit','unsupported_parameter':'unsupported','unsupported_format':'not_applicable',
+                    'evidence_missing':'insufficient_evidence','usage_missing':'insufficient_evidence','cap_not_exercised':'insufficient_evidence',
+                    'budget_exhausted':'not_covered' if status in ('not_covered','cancelled') else 'insufficient_evidence','prerequisite_failed':'insufficient_evidence',
+                    'auto_no_tool_selected':'not_covered','cache_not_observed':'insufficient_evidence','cache_context_too_small':'insufficient_evidence','cache_scale_not_reached':'insufficient_evidence','cancelled':'not_covered'}.get(reason_code)
+    if not category:
+        if _observation_only(check): category = "observation"
+        elif check.get("applicable") is False or status == "skipped": category = "not_applicable"
+        elif status == "not_covered": category = "not_covered"
+        elif status == "passed": category = "passed"
+        elif re.search(r"(?:HTTP[\s=:]*)?\b(401|403)\b|authentication_error|unauthorized|invalid.api.key", text, re.I): category = "authentication"
+        elif re.search(r"(?:HTTP[\s=:]*)?\b429\b|rate.limit|quota.exceeded|限流|额度不足", text, re.I): category = "rate_limit"
+        elif re.search(r"timeout|timed.out|network_error|connection.error|超时|网络中断", text, re.I): category = "timeout"
+        elif re.search(r"\b(?:500|502|503|504)\b|DNS|TLS|SSL", text, re.I): category = "infrastructure"
+        elif re.search(r"unsupported|not.supported|不支持", text, re.I): category = "unsupported"
+        elif status == "failed": category = "capability_failure"
+        else: category = "insufficient_evidence"
+    if status == 'passed' and check.get('score_applicable') is False and category == 'passed': category = 'control'
+    check["evidence_category"] = category
+    check["evidence_category_label"] = REASON_LABELS[category]
+    advice = {"authentication": "检查当前请求格式对应的鉴权头、API Key 权限与模型授权；修复后重复原参数。",
+              "rate_limit": "降低并发，检查配额及 Retry-After；保留本轮限流次数，在配额恢复后复测。",
+              "timeout": "按请求 ID 核对连接、首字节与读超时；修复网络或调整合理时限后复测，勿把超时当能力不支持。",
+              "infrastructure": "先恢复上游/网关连通性，核对 HTTP 5xx、DNS 或 TLS 错误；恢复后复测同一请求。",
+              "unsupported": "核对所选模型及协议支持范围；明确拒绝表示此请求组合不支持，不推断其他格式也不支持。",
+              "insufficient_evidence": "补齐该项所需字段、正向对照或完整响应，保持相同参数重复采样；不凭空补作通过或失败。"}.get(category)
+    if reason_code == 'budget_exhausted' and status not in ('not_covered','cancelled'):
+        advice = '普通行为探针的输出预算已耗尽；提高该探针预算或检查默认 thinking 后复测。max_tokens 截断专项必须保持原设定上限，不能以放宽上限替代验证。'
+    if advice and advice not in _text(check.get("next_step")):
+        check["next_step"] = advice + " " + _text(check.get("next_step"))
+    return check
+
+
+def _matrix_checks(result):
+    matrix = _dict(result.get("matrix_validation"))
+    if not matrix:
+        return []
+    checks = _claude_checks({"cases": matrix.get("cases"), "samples": matrix.get("samples") or matrix.get("evidence_samples"),
+                            "configuration": result.get("configuration")})
+    for check in checks:
+        check["category"] = "跨套件参数矩阵"
+        check["metadata"]["source"] = "matrix_validation"
+    return checks
 
 
 def build_report_data(result):
@@ -986,9 +1117,11 @@ def build_report_data(result):
                 entry['id'] = 'batch-%s-%s' % (len(checks) + 1, _text(entry.get('id')))
                 entry['title'] = '%s · %s' % (model, _text(entry.get('title') or entry.get('id')))
                 entry['model'] = model
-                if child.get('suite') in ('claude', 'claude_acceptance'):
-                    child_request_ids = {_text(sample.get('id')) for sample in _list(child.get('samples')) if isinstance(sample, dict)}
-                    entry['request_ids'] = ['model-%s-%s' % (item_index, identity) if identity in child_request_ids else identity for identity in entry.get('request_ids', [])]
+                child_samples = _list(child.get('samples')) + _list(_dict(child.get('matrix_validation')).get('samples'))
+                child_request_ids = {_text(sample.get('id')) for sample in child_samples if isinstance(sample, dict)}
+                child_request_ids.update(_text(r.get('request_id') or r.get('id')) for r in _list(_dict(child.get('transport')).get('requests')) if isinstance(r, dict))
+                for key in ('request_ids', 'sample_ids'):
+                    entry[key] = ['model-%s-%s' % (item_index, identity) if identity in child_request_ids else identity for identity in entry.get(key, [])]
                 checks.append(entry)
             scopes.extend(child_data.get('scope', [])); focuses.extend(child_data.get('focus', [])); limitations.extend(child_data.get('limitations', []))
         counts = {key: sum(1 for c in checks if c.get('status') == key) for key in ('passed','failed','inconclusive','cancelled','skipped','not_covered')}
@@ -1011,7 +1144,8 @@ def build_report_data(result):
     claude = suite in ("claude", "claude_acceptance")
     openai = result.get('request_format')=='openai' or _dict(result.get('configuration')).get('request_format')=='openai' or (not cc and not claude and _dict(result.get('configuration')).get('think_mode')=='openai')
     checks = _cc_checks(result) if cc else _claude_checks(result) if claude else _kvv_checks(result)
-    summary = _dict(result.get("summary"))
+    checks = [_explain_check(check) for check in checks + _matrix_checks(result)]
+    summary = _dict(result.get("native_summary") or result.get("summary"))
     remote = [check for check in checks if not check.get("local_only")]
     local = [check for check in checks if check.get("local_only")]
     total = summary.get("total")
@@ -1047,6 +1181,9 @@ def build_report_data(result):
         else:
             scope += ['覆盖参数与协议、工具与 Schema、能力特性、token / usage / 缓存四个检测层面。兼容预检为 11 项，全套增加专项用例并执行官方 Schema 兼容矩阵。','用例来源：工作台 OpenAI 兼容用例；全套的 Schema 矩阵来自固定版本 KVV。兼容结果不等于官方原生 K3 全套验证。']
     scope.append("本轮计划 %s 项%s，已有 %s 项结果；没有结果的项目不视为通过。" % (total if total is not None else "未记录", "请求样本" if cc else "Claude 专项检查" if claude else "兼容 / Schema 用例" if openai else "官方用例", completed if completed is not None else "未记录"))
+    if result.get("matrix_validation"):
+        matrix = _dict(result["matrix_validation"])
+        scope.append("附加参数矩阵保留 %s 个独立断言和 %s 条实际请求；参数值、重复序号、预期与观察逐项列出，与原生套件分开统计。" % (len(_list(matrix.get("cases"))), len(_list(matrix.get("samples") or matrix.get("evidence_samples")))))
     if claude:
         scope.append("已记录 %s 项 Claude 检查；%s。真实请求数与检查数分别统计。" % (len(checks), _count_text(_counts(checks))))
     elif not cc:

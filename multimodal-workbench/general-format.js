@@ -86,7 +86,10 @@
     const rows=typeof value==='string'?[{type:'text',text:value}]:Array.isArray(value)?value:value==null?[]:[{type:'text',text:String(value)}];
     return rows.map((item,index)=>{
       if(typeof item==='string')item={type:'text',text:item};
-      if(item?.type==='text')return format==='gemini'?{text:String(item.text||'')}:{type:format==='openai-responses'?(role==='assistant'?'output_text':'input_text'):'text',text:String(item.text||'')};
+      if(item?.type==='text'){
+        if(item.cache_control&&format!=='anthropic')reject(field+'['+index+'].cache_control','当前协议没有等价的显式缓存断点');
+        return format==='gemini'?{text:String(item.text||'')}:{type:format==='openai-responses'?(role==='assistant'?'output_text':'input_text'):'text',text:String(item.text||''),...(format==='anthropic'&&item.cache_control?{cache_control:clone(item.cache_control)}:{})};
+      }
       if(item?.type==='image_url'||item?.type==='video_url'){
         const kind=item.type==='image_url'?'image':'video',source=item[item.type],part=mediaPart(typeof source==='string'?source:source?.url,kind,format,reject,field+'['+index+']');
         if(part&&source?.detail){if(format==='openai-responses')part.detail=source.detail;else reject(field+'['+index+'].detail','当前协议没有已验证的图片 detail 映射');}
@@ -119,6 +122,17 @@
     }
     reject('tool_choice','无法映射该工具选择形式');return undefined;
   }
+  function assistantMessage(raw,format='openai-chat') {
+    const p=profile(format),message=normalize(raw,p.id)?.choices?.[0]?.message;
+    if(!message)throw new Error('工具回填缺少本轮真实 assistant 响应。');
+    if(p.id==='openai-chat')return clone(message);
+    // A normalized tool call is sufficient for assertions, but not for replay:
+    // provider signatures and opaque reasoning items must survive verbatim.
+    const native=p.id==='anthropic'?{content:raw.content}:p.id==='gemini'?{content:raw.candidates?.[0]?.content}:{output:raw.output};
+    const parts=p.id==='openai-responses'?native.output:p.id==='gemini'?native.content?.parts:native.content;
+    if(!Array.isArray(parts))throw new Error('工具回填缺少本轮完整原生 assistant 内容。');
+    return {role:'assistant',content:message.content,...(message.tool_calls?{tool_calls:clone(message.tool_calls)}:{}),native_assistant:{format:p.id,...clone(native)}};
+  }
   function build(payload,config={}) {
     if(!payload||typeof payload!=='object'||Array.isArray(payload))throw new Error('检测请求体必须是 JSON 对象。');
     const p=profile(config),input=clone(payload),notApplicable=[],seen=new Set();
@@ -126,7 +140,10 @@
     const source=Array.isArray(input.messages)?input.messages:[];
     if(!Array.isArray(input.messages))throw new Error('检测请求必须包含 messages 数组。');
     let body;
-    if(p.id==='openai-chat')body=input;
+    if(p.id==='openai-chat'){
+      if(source.some(message=>message?.native_assistant))reject('messages.native_assistant','原生 assistant 证据不能跨协议回填到 Chat');
+      body=input;
+    }
     else {
       const known=new Set(['model','messages','stream','max_tokens','max_completion_tokens','temperature','top_p','tools','tool_choice','response_format','stream_options']);
       const allowed=p.id==='openai-responses'?['parallel_tool_calls','reasoning','metadata','store','user','service_tier','truncation']:p.id==='anthropic'?['stop','top_k','metadata','service_tier','thinking']:['stop','top_k','seed','n','presence_penalty','frequency_penalty','logprobs','top_logprobs','safetySettings','cachedContent'];
@@ -135,7 +152,11 @@
       for(const [index,message] of source.entries()){
         if(!message||typeof message!=='object'||Array.isArray(message)){reject('messages['+index+']','消息必须为对象');continue;}
         if(own(message,'tools'))reject('messages['+index+'].tools','动态 system tools 属于 Chat 扩展，当前原生协议没有等价语义');
-        for(const key of Object.keys(message))if(!['role','content','tools','tool_calls','tool_call_id'].includes(key)&&!(p.id==='gemini'&&message.role==='tool'&&key==='name'))reject('messages['+index+'].'+key,'当前协议没有已验证的等价消息字段');
+        for(const key of Object.keys(message))if(!['role','content','tools','tool_calls','tool_call_id','native_assistant'].includes(key)&&!(p.id==='gemini'&&message.role==='tool'&&key==='name'))reject('messages['+index+'].'+key,'当前协议没有已验证的等价消息字段');
+        if(own(message,'native_assistant')){
+          const native=message.native_assistant,parts=p.id==='openai-responses'?native?.output:p.id==='gemini'?native?.content?.parts:native?.content;
+          if(message.role!=='assistant'||native?.format!==p.id||!Array.isArray(parts))reject('messages['+index+'].native_assistant','原生 assistant 证据必须完整且与当前协议一致');
+        }
       }
       if(source.some(message=>!message||typeof message!=='object'||Array.isArray(message)))throw new NotApplicableError(p.id,notApplicable);
       if(own(input,'max_tokens')&&own(input,'max_completion_tokens'))reject('max_tokens / max_completion_tokens','两个输出上限字段不可同时映射到同一原生字段');
@@ -144,6 +165,7 @@
       if(p.id==='openai-responses'){
         body={model:input.model,input:[]};
         for(const [index,message] of source.entries()){
+          if(message.role==='assistant'&&message.native_assistant?.format===p.id&&Array.isArray(message.native_assistant.output)){body.input.push(...clone(message.native_assistant.output));continue;}
           if(message.role==='tool'){body.input.push({type:'function_call_output',call_id:message.tool_call_id,output:plain(message.content)});continue;}
           if(!['system','developer','user','assistant'].includes(message.role)){reject('messages['+index+'].role','无法映射该消息角色');continue;}
           const parts=contentParts(message.content,p.id,reject,'messages['+index+'].content',message.role);
@@ -159,6 +181,7 @@
         body={model:input.model,max_tokens:cap===undefined?1024:cap,messages:[]};
         const systems=[];
         for(const [index,message] of source.entries()){
+          if(message.role==='assistant'&&message.native_assistant?.format===p.id&&Array.isArray(message.native_assistant.content)){body.messages.push({role:'assistant',content:clone(message.native_assistant.content)});continue;}
           if(['system','developer'].includes(message.role)){systems.push(...contentParts(message.content,p.id,reject,'messages['+index+'].content'));continue;}
           if(message.role==='tool'){body.messages.push({role:'user',content:[{type:'tool_result',tool_use_id:message.tool_call_id,content:plain(message.content)}]});continue;}
           if(!['user','assistant'].includes(message.role)){reject('messages['+index+'].role','无法映射该消息角色');continue;}
@@ -176,15 +199,19 @@
           else if(input.response_format.type!=='text')reject('response_format','Messages 不提供与 json_object 等价的独立 JSON Mode；可使用 JSON Schema');
         }
       } else {
-        body={contents:[]};const systems=[],calls=new Map();
-        for(const message of source)for(const call of message.tool_calls||[])calls.set(call.id,call.function?.name);
+        body={contents:[]};const systems=[],calls=new Map(),nativeCallIds=new Set();
+        for(const message of source){
+          for(const call of message.tool_calls||[])calls.set(call.id,call.function?.name);
+          if(message.native_assistant?.format===p.id&&Array.isArray(message.native_assistant.content?.parts))for(const part of message.native_assistant.content.parts)if(part?.functionCall?.id)nativeCallIds.add(part.functionCall.id);
+        }
         for(const [index,message] of source.entries()){
+          if(message.role==='assistant'&&message.native_assistant?.format===p.id&&Array.isArray(message.native_assistant.content?.parts)){body.contents.push(clone(message.native_assistant.content));continue;}
           if(['system','developer'].includes(message.role)){systems.push(...contentParts(message.content,p.id,reject,'messages['+index+'].content'));continue;}
           if(message.role==='tool'){
             const name=message.name||calls.get(message.tool_call_id);if(!name){reject('messages['+index+']','Gemini 工具结果需要函数名或对应 tool_call_id');continue;}
             let response;try{response=JSON.parse(plain(message.content));}catch{response={result:plain(message.content)};}
             if(!response||typeof response!=='object'||Array.isArray(response))response={result:response};
-            body.contents.push({role:'user',parts:[{functionResponse:{name,response}}]});continue;
+            body.contents.push({role:'user',parts:[{functionResponse:{name,...(nativeCallIds.has(message.tool_call_id)?{id:message.tool_call_id}:{}),response}}]});continue;
           }
           if(!['user','assistant'].includes(message.role)){reject('messages['+index+'].role','无法映射该消息角色');continue;}
           const parts=contentParts(message.content,p.id,reject,'messages['+index+'].content');
@@ -311,6 +338,6 @@
     return {push(chunk){buffer+=String(chunk);return consume(false);},finish(){return consume(true);}};
   }
   function parseSSE(text,format='openai-chat'){const parser=createStreamParser(format);return [...parser.push(text),...parser.finish()];}
-  root.GeneralFormat={profiles,profile,build,endpoint,authHeaders,normalize,normalizedUsage,streamEvent,createStreamParser,parseSSE,NotApplicableError};
+  root.GeneralFormat={profiles,profile,build,endpoint,authHeaders,assistantMessage,normalize,normalizedUsage,streamEvent,createStreamParser,parseSSE,NotApplicableError};
   if(typeof module!=='undefined'&&module.exports)module.exports=root.GeneralFormat;
 })(typeof window!=='undefined'?window:globalThis);

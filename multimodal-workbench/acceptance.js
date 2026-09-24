@@ -69,9 +69,10 @@ function selectedAcceptanceModels(){
 function config(){
  const isClaude=selected==='claude', requestFormat=isClaude?el('claudeFormat').value:selected==='ccmax'?el('acceptanceFormat').value:el('acceptanceThinkMode').value==='openai'?'openai':'native';
  const models=selectedAcceptanceModels();
- return {suite:isClaude?'claude':selected==='ccmax'?'ccmax':el('acceptanceScope').value,base:el('acceptanceBase').value.trim(),key:el('acceptanceKey').value.trim(),model:models[0]||el('acceptanceModel').value.trim(),models,timeout:Number(el('acceptanceTimeout').value),signature_samples:Number(isClaude?el('claudeSignature').value:el('acceptanceSignature').value),sse_samples:Number(isClaude?el('claudeSse').value:el('acceptanceSse').value),concurrency:isClaude?Number(el('claudeStressConcurrency').value):2,auth:requestFormat==='openai'?'bearer':isClaude?el('claudeAuth').value:el('acceptanceAuth').value,request_format:requestFormat,provider:isClaude?el('claudeProvider').value:undefined,sampling:isClaude?el('claudeSampling').value:undefined,cache_tokens:isClaude?Number(el('claudeCacheTokens').value):undefined,stress_requests:isClaude?Number(el('claudeStressRequests').value):undefined,stress_concurrency:isClaude?Number(el('claudeStressConcurrency').value):undefined,think_mode:el('acceptanceThinkMode').value,thinking:!['none','openai'].includes(el('acceptanceThinkMode').value),advanced:selected==='ccmax'||isClaude,enabled_modules:[...(enabledModules[selected]||[]) ]};
+ return {matrix_profile:el('acceptanceMatrixProfile').value,matrix_modules:[...document.querySelectorAll('[data-matrix-module]:checked')].map(x=>x.dataset.matrixModule),suite:isClaude?'claude':selected==='ccmax'?'ccmax':el('acceptanceScope').value,base:el('acceptanceBase').value.trim(),key:el('acceptanceKey').value.trim(),model:models[0]||el('acceptanceModel').value.trim(),models,timeout:Number(el('acceptanceTimeout').value),signature_samples:Number(isClaude?el('claudeSignature').value:el('acceptanceSignature').value),sse_samples:Number(isClaude?el('claudeSse').value:el('acceptanceSse').value),concurrency:isClaude?Number(el('claudeStressConcurrency').value):2,auth:requestFormat==='openai'?'bearer':isClaude?el('claudeAuth').value:el('acceptanceAuth').value,request_format:requestFormat,provider:isClaude?el('claudeProvider').value:undefined,sampling:isClaude?el('claudeSampling').value:undefined,cache_tokens:isClaude?Number(el('claudeCacheTokens').value):undefined,stress_requests:isClaude?Number(el('claudeStressRequests').value):undefined,stress_concurrency:isClaude?Number(el('claudeStressConcurrency').value):undefined,think_mode:el('acceptanceThinkMode').value,thinking:!['none','openai'].includes(el('acceptanceThinkMode').value),advanced:selected==='ccmax'||isClaude,enabled_modules:[...(enabledModules[selected]||[]) ]};
 }
 function updatePlan(){
+ const mp=el('acceptanceMatrixProfile').value;el('acceptanceMatrixHelp').textContent=mp==='off'?'仅执行原有套件。选择标准或完整矩阵可增加多参数证据。':mp==='quick'?'长度上限 1 / 10 / 20，各独立验证；包含基础阶梯压力采样。':mp==='standard'?'长度上限 1 / 10 / 20 × 两种场景 × 流式与非流式，共 12 条长度用例；另外验证工具、图像、注入、缓存与分阶段压力。':'长度上限 1 / 10 / 20 / 64 / 128 / 256 × 三种场景 × 流式与非流式 × 两轮，共 72 条长度用例；扩大各模块样本与压力阶段。';
  const cc=selected==='ccmax',claude=selected==='claude',full=el('acceptanceScope').value==='kvvfull',openai=cc?el('acceptanceFormat').value==='openai':claude?el('claudeFormat').value==='openai':el('acceptanceThinkMode').value==='openai';
  el('acceptanceTitle').textContent=cc?'CCMax渠道验收':claude?'Claude 上游专项验收':'Kimi Vendor Verifier';
  el('acceptanceDescription').textContent=claude?'面向 Anthropic 官方或 AWS Bedrock 上游的 Claude 中转渠道，检查基础能力、长前缀缓存、注入防护、签名和接口透传，保留逐请求证据。':cc?(openai?'使用 OpenAI Chat Completions 请求与响应格式，检查 Claude 兼容渠道的流式、工具、错误及安全行为。':'使用独立的 Anthropic Messages 检测器，检查流式可靠性、参数校验和工具调用，保留每次样本证据。'):(openai?'四个检测层面统一使用 OpenAI 兼容请求。预检运行 11 个兼容用例；全套增加能力探针及 KVV 工具 Schema 矩阵。':'网页通过同一个本地服务自动调用已集成的 MoonshotAI 官方 KVV，提供原生预检和完整 API 验证，无需另开项目。');
@@ -98,7 +99,7 @@ function updatePlan(){
   const check=document.createElement('input');check.type='checkbox';check.checked=enabledModules[moduleSuite].has(module.id);check.dataset.module=module.id;check.disabled=active||restoring;
   const mark=make('i','module-check','✓');
   const body=make('div','module-card-body');body.append(make('strong','',module.title),make('small','',module.desc));
-  const meta=make('div','module-card-meta');meta.append(make('b','',module.weight+'%'),make('em','',claude?'按当前配置执行':`约 ${module.requests} 次请求`));
+  const meta=make('div','module-card-meta');meta.append(make('b','',module.weight+'%'),make('em','','原专项模块'));
   card.append(check,mark,body,meta);cards.append(card);
   check.addEventListener('change',()=>{if(check.checked)enabledModules[moduleSuite].add(module.id);else enabledModules[moduleSuite].delete(module.id);updatePlan();});
  });
@@ -198,6 +199,8 @@ function restoreConfiguration(job){
   const inferredPlan=Object.entries({quick:[1,3,12000,1,1],professional:[3,5,12000,20,4],stress:[2,10,12000,100,10]}).find(([,values])=>values.every((value,index)=>numbers[index]===value))?.[0]||'custom';
   el('claudeSampling').value=knownPlan||inferredPlan;
  }
+ if(['off','quick','standard','comprehensive'].includes(saved.matrix_profile))el('acceptanceMatrixProfile').value=saved.matrix_profile;
+ if(Array.isArray(saved.matrix_modules))document.querySelectorAll('[data-matrix-module]').forEach(x=>x.checked=saved.matrix_modules.includes(x.dataset.matrixModule));
  if(['anthropic','openai'].includes(saved.request_format)&&job.suite==='ccmax')el('acceptanceFormat').value=saved.request_format;
  if(['kimi','opensource','none','openai'].includes(saved.think_mode))el('acceptanceThinkMode').value=saved.think_mode;
  if(restored.signature_samples!==undefined&&restored.sse_samples!==undefined){
@@ -243,7 +246,7 @@ function render(data,id){
  const events=Array.isArray(current?.events)?current.events:(data.events||[]);
  if(currentModel)el('acceptanceSummary').textContent+=`${el('acceptanceSummary').textContent?' · ':''}当前模型：${currentModel}`;
  const observedCases=latestEventCases(events).map(item=>currentModel?{...item,title:currentModel+' · '+(item.title||item.label||item.name||item.id||item.probe||'测试项'),model:currentModel}:item);
- const cases=result?.results?result.results.map(item=>({id:'batch-'+item.model,label:item.model+' · '+(item.status||'未完成'),status:item.status==='passed'?'passed':item.status==='failed'?'failed':'inconclusive',detail:item.result?.verdict?.detail||'该模型独立子任务已保存，可下载总报告查看逐项证据。'})):(result?(result.cases||result.checks||[]):observedCases);
+ const cases=result?.results?result.results.map(item=>({id:'batch-'+item.model,label:item.model+' · '+(item.status||'未完成'),status:item.status==='passed'?'passed':item.status==='failed'?'failed':'inconclusive',detail:item.result?.verdict?.detail||'该模型独立子任务已保存，可下载总报告查看逐项证据。'})):(result?[...(result.cases||result.checks||[]),...(result.matrix_validation?.cases||[])]:observedCases);
  const transportCases=(result?.transport?.checks||[]).filter(x=>x.status!=='passed');
  const matrixCases=[...cases.slice(-700),...transportCases];
  const matrix=el('acceptanceCases');matrix.replaceChildren();
@@ -305,18 +308,23 @@ el('acceptanceThinkMode').addEventListener('change',updatePlan);
 el('acceptanceFormat').addEventListener('change',()=>{if(el('acceptanceFormat').value==='openai')el('acceptanceAuth').value='bearer';invalidateModels();updatePlan();});
 el('acceptanceSampling').addEventListener('change',()=>{const mode=el('acceptanceSampling').value;if(mode!=='custom'){el('acceptanceSignature').value=mode==='batch'?5:1;el('acceptanceSse').value=mode==='batch'?50:3;}updatePlan();});
 for(const id of ['acceptanceSignature','acceptanceSse'])el(id).addEventListener('input',()=>{el('acceptanceSampling').value='custom';updatePlan();});
-async function previewClaudePlan(){
- const button=el('claudePlanPreview');if(selected!=='claude'||button.disabled)return;
+async function previewClaudePlan(matrixOnly=false){
+ const button=el(matrixOnly?'acceptanceMatrixPreview':'claudePlanPreview');if((!matrixOnly&&selected!=='claude')||button.disabled)return;
  if(!serviceReady){message('请求预览需要验收服务。请启动或恢复当前工作台服务后重试。',true);return;}
  const {key:discardedKey,...payload}=config();
  button.disabled=true;button.textContent='正在生成请求预览…';message('');
  try{
-  const data=await(await api('/api/claude/plan',{method:'POST',body:JSON.stringify(payload)})).json();
+  const data=await(await api(matrixOnly?'/api/acceptance/plan':'/api/claude/plan',{method:'POST',body:JSON.stringify(payload)})).json();
   const requests=Array.isArray(data.requests)?data.requests:[];
   const summary=el('claudePlanSummary');summary.replaceChildren();
+  if(data.matrix_only)summary.append(make('p','','以下请求数仅为附加矩阵，不包含原专项；不会因预览产生模型调用。'));
   const tokenEstimate=data.token_estimate,tokenText=tokenEstimate&&typeof tokenEstimate==='object'?`${tokenEstimate.cache_total_target_input_tokens??'未提供'} 输入 token（缓存请求合计目标）`:tokenEstimate??'未提供';
   for(const [label,value] of [[data.request_count_is_maximum?'请求数上限':'计划请求',data.request_count??'按前置结果确定'],['Token 估算',tokenText],['当前模型',payload.model||'模板模型']]){const item=make('div','claude-plan-stat');item.append(make('small','',label),make('strong','',String(value)));summary.append(item);}
-  if(tokenEstimate&&typeof tokenEstimate==='object')summary.append(make('p','',`缓存长前缀目标 ${tokenEstimate.cache_prefix_target_tokens??'—'} token × ${tokenEstimate.cache_requests??'—'} 次；${tokenEstimate.basis||'实际消耗以上游 usage 为准。'}`));
+  if(tokenEstimate&&typeof tokenEstimate==='object'){
+   summary.append(make('p','',`缓存长前缀目标 ${tokenEstimate.cache_prefix_target_tokens??'—'} token × ${tokenEstimate.cache_requests??'—'} 次；${tokenEstimate.basis||tokenEstimate.note||'实际消耗以上游 usage 为准。'}`));
+   if(tokenEstimate.output_token_limit_sum!=null)summary.append(make('p','',`输出额度上限合计 ${tokenEstimate.output_token_limit_sum} token；这是请求预算之和，实际生成量通常更少，也可能包含思考 Token。`));
+  }
+  if(Array.isArray(data.pressure_stages)&&data.pressure_stages.length)summary.append(make('p','',`阶梯压测：${data.pressure_stages.map(x=>`并发 ${x.concurrency} × ${x.requests} 请求`).join(' → ')}；每阶段完成后再升级，不自动重试。`));
   if(data.request_count_is_maximum)summary.append(make('p','',`包含 ${data.conditional_requests??0} 个条件请求；只有前置响应提供所需工具结果或签名时才会执行，实际数量以进度和报告为准。`));
   if((payload.models||[]).length>1)summary.append(make('p','',`已选 ${payload.models.length} 个模型；以下为当前模型请求模板，批量测试会逐个替换模型 ID。`));
   const limitations=el('claudePlanLimitations');limitations.replaceChildren();
@@ -324,12 +332,14 @@ async function previewClaudePlan(){
   limitations.hidden=!notes.length;if(notes.length){limitations.append(make('b','','执行边界'));const list=make('ul');for(const note of notes)list.append(make('li','',typeof note==='string'?note:JSON.stringify(note)));limitations.append(list);}
   const list=el('claudePlanRequests');list.replaceChildren();const groups=new Map();
   for(const request of requests){const module=String(request.module||'protocol');if(!groups.has(module))groups.set(module,[]);groups.get(module).push(request);}
-  for(const [module,items] of groups){const section=make('section','claude-plan-module'),definition=acceptanceModules.claude.find(item=>item.id===module);section.append(make('h3','',definition?.title||module));for(const request of items){const details=make('details','claude-plan-request'),head=make('summary');head.append(make('strong','',request.title||request.id||'测试请求'),make('span','',`${request.method||'POST'}${request.repeat?' × '+request.repeat:''}${request.conditional?' · 条件请求':''}`));details.append(head,make('p','claude-plan-endpoint',request.url||'使用当前渠道端点'));if(request.notes){const text=Array.isArray(request.notes)?request.notes.join('；'):String(request.notes);details.append(make('p','claude-plan-request-note',text));}const code=make('pre','',JSON.stringify(request.body??{},null,2));code.setAttribute('aria-label',(request.title||request.id||'测试')+' 请求体');details.append(code);section.append(details);}list.append(section);}
+  for(const [module,items] of groups){const section=make('section','claude-plan-module'),definition=acceptanceModules.claude.find(item=>item.id===module);section.append(make('h3','',({multimodal:'多模态识别与多图对照'}[module]||definition?.title||module)));for(const request of items){const details=make('details','claude-plan-request'),head=make('summary');head.append(make('strong','',request.title||request.id||'测试请求'),make('span','',`${request.method||'POST'}${request.repeat?' × '+request.repeat:''}${request.conditional?' · 条件请求':''}`));details.append(head,make('p','claude-plan-endpoint',request.url||'使用当前渠道端点'));if(request.notes){const text=Array.isArray(request.notes)?request.notes.join('；'):String(request.notes);details.append(make('p','claude-plan-request-note',text));}const code=make('pre','',JSON.stringify(request.body??{},null,2));code.setAttribute('aria-label',(request.title||request.id||'测试')+' 请求体');details.append(code);section.append(details);}list.append(section);}
   if(!requests.length)list.append(make('p','','当前选择未生成可执行请求。请检查已启用模块和接口格式。'));
   el('claudePlanDialog').showModal();
- }catch(error){message('请求预览失败：'+error.message,true);}finally{button.disabled=false;button.textContent='查看测试请求';}
+ }catch(error){message('请求预览失败：'+error.message,true);}finally{button.disabled=false;button.textContent=matrixOnly?'预览矩阵请求与用量':'查看测试请求';}
 }
-el('claudePlanPreview').addEventListener('click',previewClaudePlan);
+el('claudePlanPreview').addEventListener('click',()=>previewClaudePlan(false));
+el('acceptanceMatrixPreview').addEventListener('click',()=>previewClaudePlan(true));
+el('acceptanceMatrixProfile').addEventListener('change',updatePlan);
 el('claudePlanClose').addEventListener('click',()=>el('claudePlanDialog').close());
 el('claudePlanDialog').addEventListener('click',event=>{if(event.target===el('claudePlanDialog')){const rect=event.target.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)event.target.close();}});
 el('acceptanceRun').addEventListener('click',start);

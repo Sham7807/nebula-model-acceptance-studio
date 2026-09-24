@@ -20,24 +20,29 @@ function nativeResponse(request){
  const text=JSON.stringify(p);const cap=p.max_tokens??p.max_output_tokens??p.generationConfig?.maxOutputTokens;
  const isJson=p.response_format||p.text?.format||p.output_config?.format||p.generationConfig?.responseMimeType;
  const responseModel=p.model||decodeURIComponent(url.pathname.match(/\/models\/([^/:]+):/)?.[1]||model);
- const output=isJson?' {"name":"张三","age":30}':text.includes('秋天')?'秋天是一幅金色的画。':text.includes('ABCD')?'ABCD':'你好，我是 fixture-model。';
- const tool=!!(p.tools?.length)&&!isJson;
- const capped=cap===1||cap===30;
+ const marker=text.match(/(?:LOAD_|RESULT_|ALLOW_)[A-Z0-9_]+/)?.[0];
+ const output=marker|| (isJson?' {"name":"张三","age":30}':text.includes('秋天')?'秋天是一幅金色的画。':text.includes('ABCD')?'ABCD':'你好，我是 fixture-model。');
+ const choice=p.tool_choice??p.toolConfig?.functionCallingConfig?.mode;
+ const tool=!!(p.tools?.length)&&!isJson&&choice!=='none'&&choice?.type!=='none'&&choice!=='NONE';
+ const toolName=choice?.function?.name||choice?.name||p.toolConfig?.functionCallingConfig?.allowedFunctionNames?.[0]||(p.tools?.[0]?.function?.name||p.tools?.[0]?.name||p.tools?.[0]?.functionDeclarations?.[0]?.name);
+ const args=toolName==='lookup_order'?{filter:{order_id:text.includes('ORDER-851')?'ORDER-851':'ORDER-274',include_items:!text.includes('ORDER-851')}}:{city:text.includes('上海')?'上海':'北京',...(text.includes('celsius')?{unit:'celsius'}:text.includes('fahrenheit')?{unit:'fahrenheit'}:{})};
+ const call={id:'c',type:'function',function:{name:toolName,arguments:JSON.stringify(args)}};
+ const capped=(cap===1||cap===30||text.includes('编号N')||text.includes('1500字')||text.includes('200个对象'))&&Number.isFinite(cap);
  const input=10,out=capped?cap:5;
  const usage={prompt_tokens:input,completion_tokens:out,total_tokens:input+out,prompt_tokens_details:{cached_tokens:5}};
  let json,stream;
  if(format==='openai-chat'){
-  json={id:'chat-fixture',model:responseModel,choices:Array.from({length:p.n||1},(_,index)=>({index,message:{role:'assistant',content:tool?null:output,...(tool?{tool_calls:[{id:'c',type:'function',function:{name:'get_weather',arguments:'{"city":"北京"}'}}]}:{})},finish_reason:capped?'length':tool?'tool_calls':'stop',...(p.logprobs?{logprobs:{content:[]}}:{})})),usage};
-  stream=sse([{choices:[{delta:{content:'1'}}]},{choices:[{delta:{content:'2'},finish_reason:'stop'}],usage},'[DONE]']);
+  json={id:'chat-fixture',model:responseModel,choices:Array.from({length:p.n||1},(_,index)=>({index,message:{role:'assistant',content:tool?null:output,...(tool?{tool_calls:[call]}:{})},finish_reason:capped?'length':tool?'tool_calls':'stop',...(p.logprobs?{logprobs:{content:[]}}:{})})),usage};
+  stream=sse([{choices:[{delta:{content:'1'}}]},{choices:[{delta:{content:'2'},finish_reason:capped?'length':'stop'}],usage},'[DONE]']);
  } else if(format==='openai-responses'){
-  json={id:'response-fixture',object:'response',model:responseModel,status:capped?'incomplete':'completed',...(capped?{incomplete_details:{reason:'max_output_tokens'}}:{}),output:tool?[{type:'function_call',call_id:'c',name:'get_weather',arguments:'{"city":"北京"}'}]:[{type:'message',content:[{type:'output_text',text:output}]}],usage:{input_tokens:input,output_tokens:out,total_tokens:input+out,input_tokens_details:{cached_tokens:5}}};
-  stream=sse([{type:'response.output_text.delta',delta:'1'},{type:'response.output_text.delta',delta:'2'},{type:'response.completed',response:{...json,status:'completed'}}]);
+  json={id:'response-fixture',object:'response',model:responseModel,status:capped?'incomplete':'completed',...(capped?{incomplete_details:{reason:'max_output_tokens'}}:{}),output:tool?[{type:'reasoning',id:'reasoning-fixture',summary:[{type:'summary_text',text:'Use the requested tool.'}],encrypted_content:'opaque-reasoning-fixture'},{type:'function_call',call_id:'c',name:toolName,arguments:JSON.stringify(args)}]:[{type:'message',content:[{type:'output_text',text:output}]}],usage:{input_tokens:input,output_tokens:out,total_tokens:input+out,input_tokens_details:{cached_tokens:5}}};
+  stream=sse([{type:'response.output_text.delta',delta:'1'},{type:'response.output_text.delta',delta:'2'},{type:capped?'response.incomplete':'response.completed',response:json}]);
  } else if(format==='anthropic'){
-  json={id:'message-fixture',type:'message',model:responseModel,role:'assistant',content:tool?[{type:'tool_use',id:'c',name:'get_weather',input:{city:'北京'}}]:[{type:'text',text:output}],stop_reason:capped?'max_tokens':tool?'tool_use':'end_turn',usage:{input_tokens:5,cache_read_input_tokens:5,output_tokens:out}};
-  stream=sse([{type:'message_start',message:{usage:json.usage}},{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'1'}},{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'2'}},{type:'message_delta',delta:{stop_reason:'end_turn'},usage:{output_tokens:out}},{type:'message_stop'}]);
+  json={id:'message-fixture',type:'message',model:responseModel,role:'assistant',content:tool?[{type:'thinking',thinking:'Use the requested tool.',signature:'thinking-signature-fixture'},{type:'tool_use',id:'c',name:toolName,input:args}]:[{type:'text',text:output}],stop_reason:capped?'max_tokens':tool?'tool_use':'end_turn',usage:{input_tokens:5,cache_read_input_tokens:5,output_tokens:out}};
+  stream=sse([{type:'message_start',message:{usage:json.usage}},{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'1'}},{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'2'}},{type:'message_delta',delta:{stop_reason:capped?'max_tokens':'end_turn'},usage:{output_tokens:out}},{type:'message_stop'}]);
  } else {
-  json={modelVersion:responseModel,candidates:Array.from({length:p.generationConfig?.candidateCount||1},(_,index)=>({index,content:{role:'model',parts:tool?[{functionCall:{name:'get_weather',args:{city:'北京'}}}]:[{text:output}]},finishReason:capped?'MAX_TOKENS':'STOP',...(p.generationConfig?.responseLogprobs?{logprobsResult:{topCandidates:[]}}:{})})),usageMetadata:{promptTokenCount:input,candidatesTokenCount:out,totalTokenCount:input+out,cachedContentTokenCount:5}};
-  stream=sse([{candidates:[{content:{parts:[{text:'1'}]}}]},{...json,candidates:[{content:{parts:[{text:'2'}]},finishReason:'STOP'}]}]);
+  json={modelVersion:responseModel,candidates:Array.from({length:p.generationConfig?.candidateCount||1},(_,index)=>({index,content:{role:'model',parts:tool?[{text:'Use the requested tool.',thought:true},{functionCall:{name:toolName,args},thoughtSignature:'thought-signature-fixture'}]:[{text:output}]},finishReason:capped?'MAX_TOKENS':'STOP',...(p.generationConfig?.responseLogprobs?{logprobsResult:{topCandidates:[]}}:{})})),usageMetadata:{promptTokenCount:input,candidatesTokenCount:out,totalTokenCount:input+out,cachedContentTokenCount:5}};
+  stream=sse([{candidates:[{content:{parts:[{text:'1'}]}}]},{...json,candidates:[{content:{parts:[{text:'2'}]},finishReason:capped?'MAX_TOKENS':'STOP'}]}]);
  }
  return {format,json,stream};
 }
@@ -50,7 +55,7 @@ async function launchService(temp){
 }
 async function fixture(browser,origin,variant){
  const page=await browser.newPage({viewport:{width:1440,height:1080},acceptDownloads:true});page.setDefaultTimeout(12000);
- const state={calls:[],models:[],reports:[],errors:[],unexpected:[]};
+ const state={calls:[],models:[],reports:[],errors:[],unexpected:[],inFlight:0,peak:0};
  page.on('pageerror',error=>state.errors.push(error.message));
  page.on('dialog',async dialog=>{state.errors.push('dialog: '+dialog.message());await dialog.dismiss();});
  await page.route('**/*',async route=>{
@@ -65,9 +70,9 @@ async function fixture(browser,origin,variant){
   }
   if(url.pathname==='/api/models'){state.models.push(JSON.parse(request.postData()));return route.fulfill({contentType:'application/json',body:JSON.stringify({models:[model],total:1})});}
   if(url.pathname==='/api/proxy'){
-   const requestBody=JSON.parse(request.postData());assert.ok(request.headers()['x-workbench-token']);const call={...requestBody,body:JSON.parse(requestBody.body)};state.calls.push(call);const response=nativeResponse(call);
-   if(requestBody.stream)return route.fulfill({contentType:'text/event-stream',body:response.stream});
-   return route.fulfill({contentType:'application/json',body:JSON.stringify({status:200,headers:{'content-type':'application/json'},text:JSON.stringify(response.json)})});
+   const requestBody=JSON.parse(request.postData());assert.ok(request.headers()['x-workbench-token']);const call={...requestBody,body:JSON.parse(requestBody.body)};state.calls.push(call);const response=nativeResponse(call);state.inFlight++;state.peak=Math.max(state.peak,state.inFlight);
+   try{await new Promise(resolve=>setTimeout(resolve,12));if(requestBody.stream)return await route.fulfill({contentType:'text/event-stream',body:response.stream});
+   return await route.fulfill({contentType:'application/json',body:JSON.stringify({status:200,headers:{'content-type':'application/json'},text:JSON.stringify(response.json)})});}finally{state.inFlight--;}
   }
   if(url.pathname==='/api/reports')state.reports.push(JSON.parse(request.postData()));
   if(variant==='bundle'&&url.pathname==='/')return route.fulfill({contentType:'text/html',body:await fs.readFile(path.join(root,'中转站测试工具-多模态版.html'))});
@@ -111,16 +116,44 @@ async function report(f,format,temp,hosted=true){
 }
 
 async function runStandard(f,format,temp){
- await configure(f,format);await f.surface.locator('input[name="mode"][value="std"]').check();
+ await configure(f,format);const callStart=f.state.calls.length;f.state.peak=0;await f.surface.locator('input[name="mode"][value="std"]').check();
  await f.surface.locator('#btnRun').click();await f.frame.waitForFunction(()=>!RUNNING&&S.tEnd!==null,{},{timeout:25000});
  const result=await f.frame.evaluate(()=>({checks:S.details,requests:S.requests,logs:S.logs,total:S.total,mode:S.mode}));
  assert.equal(result.mode,'std');assert.ok(Number.isFinite(result.total));assert.ok(!result.logs.some(row=>row.msg.includes('流程中断')),format+' standard flow must complete');
  for(const pattern of [/视觉输入/,/视频输入/,/max_tokens=1/,/上下文缓存/])assert.ok(result.checks.some(row=>pattern.test(row.name)),format+' covers '+pattern);
+ const capChecks=result.checks.filter(row=>row.id?.startsWith('cap_'));assert.equal(capChecks.length,12,format+' has the full standard parameter cross-product');
+ assert.ok(capChecks.every(row=>row.status==='passed'),format+' preserves actual native cap and finish evidence for JSON and SSE');
+ for(const row of capChecks){assert.equal(row.request_ids.length,1);assert.ok([1,10,20].includes(row.parameters.max_tokens));assert.ok(row.method&&row.expected&&row.observed&&row.reason_code);}
+ assert.equal(result.checks.filter(row=>row.id?.startsWith('vision_')).length,6,format+' has independent actual-image fixtures');
+ assert.equal(result.checks.filter(row=>row.id?.startsWith('cache_')).length,4,format+' has cold/warm/changed-prefix controls');
+ const loads=result.checks.filter(row=>row.id?.startsWith('load_'));assert.equal(loads.length,3);assert.ok(loads.every(row=>row.metrics.passed===row.metrics.requests));assert.equal(loads.reduce((n,row)=>n+row.metrics.requests,0),16);
+ assert.ok(f.state.peak>=3&&f.state.peak<=5,format+' pressure really overlaps requests within configured bounds');
+ assert.equal(result.checks.filter(row=>row.id?.startsWith('injection_')).length,4);
+ assert.ok(result.checks.filter(row=>row.id?.startsWith('tools_')).length>=7,format+' tools include conditional result roundtrips');
+ const roundtrips=result.checks.filter(row=>row.id?.endsWith('_roundtrip'));assert.equal(roundtrips.length,2);assert.ok(roundtrips.every(row=>row.status==='passed'),format+' tool result roundtrips execute successfully');
+ const replayCalls=f.state.calls.slice(callStart).filter(call=>/RESULT_/.test(JSON.stringify(call.body)));
+ const signature={anthropic:'thinking-signature-fixture',gemini:'thought-signature-fixture','openai-responses':'opaque-reasoning-fixture'}[format];
+ if(signature)assert.ok(replayCalls.length>=2&&replayCalls.every(call=>JSON.stringify(call.body).includes(signature)),format+' replays original signed/opaque assistant evidence');
  if(['anthropic','openai-responses'].includes(format))assert.ok(result.checks.some(row=>/视频输入/.test(row.name)&&row.status==='skipped'));
  for(const check of result.checks.filter(row=>row.applicable!==false&&!row.local_only))assert.ok(check.request_ids.length,format+' '+check.name+' references requests');
  await report(f,format,temp);const downloaded=f.state.reports.at(-1).records[0].result;
  for(const pattern of [/视觉输入/,/视频输入/,/max_tokens=1/,/上下文缓存/])assert.ok(downloaded.checks.some(row=>pattern.test(row.name)),format+' exports '+pattern);
  console.log('PASS: '+format+' standard flow with '+result.checks.length+' checks / '+result.requests.length+' recorded requests');
+}
+async function fullMatrixAndCancel(f){
+ await configure(f,'anthropic');const start=f.state.calls.length;
+ const result=await f.frame.evaluate(async()=>{STOP=false;S.mode='full';S.details=[];S.requests=[];const rows=await tTokenMatrix();return {rows,checks:S.details,requests:S.requests};});
+ assert.equal(result.rows.length,72);assert.equal(f.state.calls.length-start,72);assert.ok(result.rows.every(row=>row.status==='passed'));
+ assert.ok(result.checks.every(row=>row.request_ids.length===1&&row.parameters.max_tokens));
+ const held=[];let release;const gate=new Promise(resolve=>release=resolve);
+ const block=async route=>{held.push(route);await gate;try{await route.abort();}catch{}};
+ await f.page.route('**/api/proxy',block);
+ await f.frame.evaluate(()=>{STOP=false;RUNNING=true;S.details=[];S.requests=[];window.__loadDone=null;window.__originalLoad=GeneralMatrix.load;GeneralMatrix.load=()=>[{concurrency:3,requests:8}];tConcurrency().then(()=>window.__loadDone='unexpected completion',error=>window.__loadDone=error.message).finally(()=>{GeneralMatrix.load=window.__originalLoad;RUNNING=false;});});
+ const deadline=Date.now()+5000;while(held.length<3&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,20));assert.equal(held.length,3);
+ await f.frame.evaluate(()=>stopRun());await f.frame.waitForFunction(()=>window.__loadDone!==null);assert.equal(await f.frame.evaluate(()=>window.__loadDone),'用户中断');
+ release();await f.page.unroute('**/api/proxy',block);await new Promise(resolve=>setTimeout(resolve,50));assert.equal(held.length,3,'cancellation prevents remaining five queued requests');
+ assert.equal(await f.frame.evaluate(()=>ACTIVE_CONTROLLERS.size),0);await f.frame.evaluate(()=>{STOP=false;});
+ console.log('PASS: full 72-case native matrix and cancellation aborts all active load requests without dispatching queued work');
 }
 async function runBatch(f,temp){
  await configure(f,'anthropic');await f.frame.evaluate(()=>{$('inBatch').value='fixture-model,fixture-other';});
@@ -143,12 +176,13 @@ async function runBatch(f,temp){
  const temp=await fs.mkdtemp(path.join(os.tmpdir(),'general-formats-ui-'));let service,browser;
  try{
   service=await launchService(temp);browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
-  for(const variant of ['source','bundle']){
+  for(const variant of process.env.GENERAL_SOURCE_ONLY?['source']:['source','bundle']){
    const f=await fixture(browser,service.origin,variant);
    try{
     for(const format of formats){await runQuick(f,format);await report(f,format,temp);}
     if(variant==='source'){
       for(const format of formats)await runStandard(f,format,temp);await runBatch(f,temp);
+      await fullMatrixAndCancel(f);
       await configure(f,'anthropic');const accounting=await f.frame.evaluate(async()=>{STOP=false;S.details=[];const result=await tGptGeneration();const identity=await tIdentity();return {result,identity,check:S.details.find(row=>row.id==='gpt_usage_token_accounting'),evaluation:S.gptEvaluation};});
       assert.equal(accounting.result.usageDerived,true);assert.equal(accounting.result.usageConsistent,false);assert.equal(accounting.check.status,'skipped');assert.equal(accounting.check.applicable,false);assert.match(accounting.check.result,/适配器计算/);assert.equal(accounting.evaluation.token_usage.consistent,null);assert.equal(accounting.identity.usageOk,true);assert.equal(accounting.identity.usageDerived,true);
       console.log('PASS: Anthropic derived totals cannot masquerade as independently verified GPT accounting');
@@ -158,6 +192,7 @@ async function runBatch(f,temp){
     await configure(f,'gemini');const native=await f.frame.evaluate(()=>GeneralFormat.build({model:cfg().model,max_tokens:300,messages:[{role:'user',content:[{type:'video_url',video_url:{url:'https://video.test/sample.mp4'}},{type:'text',text:'describe'}]}]},cfg()).preview);assert.equal(native.contents[0].parts[0].fileData.mimeType,'video/mp4');
     assert.deepEqual(f.state.unexpected,[]);assert.deepEqual(f.state.errors,[]);
     await runQuick(f,'gemini');await f.page.screenshot({path:path.join(__dirname,'qa-general-formats-'+variant+'.png'),fullPage:true});
+    await f.frame.waitForFunction(()=>document.documentElement.scrollHeight<=innerHeight+4);assert.ok(await f.frame.evaluate(()=>document.documentElement.scrollHeight<=innerHeight+4),'general iframe expands into the main page without an internal scrollbox');
     await f.page.setViewportSize({width:390,height:844});assert.ok(await f.frame.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'general format controls fit mobile');
     console.log('PASS: '+variant+' embedded four-format quick runs, native parameters/media and unified real report API');
    }finally{await f.page.close();}
