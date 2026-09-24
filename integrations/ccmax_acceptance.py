@@ -109,17 +109,13 @@ def _configuration(config):
 
 
 def _endpoint(base, request_format="anthropic"):
-    if request_format == "openai":
-        if base.endswith("/v1/chat/completions"):
-            return base
-        if base.endswith("/v1/messages"):
-            base = base[:-len("/messages")]
-        return base + "/chat/completions" if base.endswith("/v1") else base + "/v1/chat/completions"
-    if base.endswith("/v1/messages"):
-        return base
-    if base.endswith("/v1"):
-        return base + "/messages"
-    return base + "/v1/messages"
+    parsed=urlsplit(base);path=parsed.path.rstrip('/')
+    suffix='/chat/completions' if request_format=='openai' else '/messages'
+    terminal=re.search(r'/(?:chat/completions|messages|responses|completions)$',path,re.I)
+    if terminal:path=path[:terminal.start()]+suffix
+    elif re.search(r'/v\d+(?:beta\d*)?(?:/openai)?$',path,re.I):path+=suffix
+    else:path+='/v1'+suffix
+    return parsed._replace(path=path,query='',fragment='').geturl()
 
 
 def _cancelled(value):

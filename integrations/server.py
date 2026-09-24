@@ -219,11 +219,13 @@ def model_discovery_failure(exc, key=''):
     return payload
 
 def normalized_base(raw):
-    u = urlsplit(str(raw).strip())
-    if u.scheme not in ('http','https') or not u.hostname or u.username or u.password or u.query or u.fragment:
+    value=str(raw).strip();u = urlsplit(value)
+    if u.scheme not in ('http','https') or not u.hostname or u.username or u.password or u.query or u.fragment or re.search(r'[\x00-\x20\\]',value):
         raise ValueError('渠道地址必须是完整 HTTP(S) 地址，不能带账号、查询参数或片段。')
     path = u.path.rstrip('/')
-    if not path.endswith('/v1'): path += '/v1'
+    terminal=re.search(r'/(?:chat/completions|messages|responses|completions)$',path,re.I)
+    if terminal:path=path[:terminal.start()]
+    elif not re.search(r'/v\d+(?:beta\d*)?(?:/openai)?$',path,re.I):path+='/v1'
     return urlunsplit((u.scheme,u.netloc,path,'',''))
 
 def validate(data, *, require_key=True):
@@ -242,12 +244,12 @@ def validate(data, *, require_key=True):
     model=str(data.get('model','')).strip() or (models[0] if models else '')
     c = {'suite':data['suite'], 'base':normalized_base(data.get('base','')), 'key':str(data.get('key','')).strip(), 'model':model, 'models':models}
     claude=c['suite']=='claude'
-    if claude:
+    if c['suite'] in ('ccmax','claude'):
         # Preserve a complete endpoint or explicit version for this adapter.
         raw_base=str(data.get('base','')).strip().rstrip('/')
         u=urlsplit(raw_base)
         if u.scheme not in ('http','https') or not u.hostname or u.username or u.password or u.query or u.fragment or re.search(r'[\x00-\x20\\]',raw_base):
-            raise ValueError('Claude 渠道地址必须为无凭据、查询参数的 HTTP(S) 地址')
+            raise ValueError('渠道地址必须为无凭据、查询参数的 HTTP(S) 地址')
         c['base']=raw_base
     if not c['model'] or (require_key and not c['key']): raise ValueError('请填写 API Key 和渠道模型 ID')
     if any('\n' in c[k] or '\r' in c[k] for k in ('key','model')): raise ValueError('密钥和模型名不能包含换行')
@@ -333,7 +335,8 @@ def _persist_jobs():
 def acceptance_plan(config, *, include_native=False):
     """Build reviewed request previews without API keys or provider traffic."""
     from acceptance_matrix import build_plan
-    matrix=build_plan(config) if config.get('matrix_profile','off')!='off' else {'request_count':0,'requests':[],'limitations':[]}
+    matrix_config={**config,'base':config['base'].rstrip('/')+'/chat/completions'} if config['suite'] in ('kvv11','kvvfull') else config
+    matrix=build_plan(matrix_config) if config.get('matrix_profile','off')!='off' else {'request_count':0,'requests':[],'limitations':[]}
     if include_native and config['suite']=='claude':
         from claude_acceptance import build_plan as claude_plan
         native=claude_plan(config)
@@ -390,7 +393,8 @@ def run_job(job,c):
                 if event.get('request_count') is not None:event['request_count']+=native_count
                 emit(event)
             try:
-                matrix=run_matrix(c,matrix_emit,job['cancel'].is_set)
+                matrix_config={**c,'base':c['base'].rstrip('/')+'/chat/completions'} if c['suite'] in ('kvv11','kvvfull') else c
+                matrix=run_matrix(matrix_config,matrix_emit,job['cancel'].is_set)
             except Exception as exc:
                 matrix={'cases':[{'id':'matrix-execution-error','title':'参数矩阵执行诊断','status':'inconclusive','reason_code':'execution_error','detail':clean(str(exc),key),'method':'运行本轮选择的参数矩阵。','expected':'保留每条参数变体的完整执行证据。','observed':'矩阵执行器出现异常，原专项结果已保留。','next_step':'检查服务日志并重跑参数矩阵。'}],'samples':[],'summary':{'total':1,'completed':1,'inconclusive':1,'request_count':0}}
             result['matrix_validation']=clean(matrix,key)

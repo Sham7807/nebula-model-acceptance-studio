@@ -112,5 +112,24 @@ class MatrixServiceTests(unittest.TestCase):
                 self.assertTrue(all(x['url'].endswith(expected) for x in caps))
                 self.assertNotIn('fixture-private-key',json.dumps(plan))
 
+    def test_full_endpoints_and_explicit_versions_are_shared_by_suites(self):
+        for suite in ('ccmax','claude','kvv11','kvvfull'):
+            for base in ('https://fixture.invalid/relay/v2','https://fixture.invalid/relay/v2/messages',
+                         'https://fixture.invalid/relay/v2/chat/completions'):
+                with self.subTest(suite=suite,base=base):
+                    cfg=self.config(suite,base=base)
+                    plan=server.acceptance_plan(cfg)
+                    suffix='messages' if suite in ('ccmax','claude') else 'chat/completions'
+                    self.assertEqual({r['url'] for r in plan['requests']},{'https://fixture.invalid/relay/v2/'+suffix})
+                    if suite=='ccmax':
+                        self.assertEqual(ccmax_acceptance._endpoint(cfg['base'],cfg['request_format']),next(iter(plan['requests']))['url'])
+                    if suite.startswith('kvv'):
+                        self.assertEqual(cfg['base'],'https://fixture.invalid/relay/v2')
+            for endpoint in ('messages','chat/completions'):
+                cfg=self.config(suite,base='https://fixture.invalid/relay/'+endpoint)
+                plan=server.acceptance_plan(cfg)
+                suffix='messages' if suite in ('ccmax','claude') else 'chat/completions'
+                self.assertEqual({r['url'] for r in plan['requests']},{'https://fixture.invalid/relay/'+suffix})
+
 
 if __name__=='__main__':unittest.main()
