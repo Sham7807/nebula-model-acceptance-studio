@@ -1,0 +1,91 @@
+/* Desktop presentation only. The distributable web application is unchanged. */
+:root.nebula-desktop {
+  color-scheme: light dark;
+  --bg:#f5f5f7; --surface:#fff; --panel:#fff; --ink:#202124; --text:#202124;
+  --muted:#777b84; --faint:#8b8f98; --line:#e4e5e9; --border:#e4e5e9; --border2:#d9dce2;
+  --teal:#1475e4; --teal-dark:#0862c8; --teal-soft:#edf4ff;
+  --accent:#1475e4; --accent-soft:#edf4ff; --accent2:#236ac2; --soft:#f7f8fa;
+  --shadow:0 2px 10px #20212404;
+}
+.nebula-desktop body { background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",sans-serif;font-size:13px; }
+.nebula-desktop .topbar,.nebula-desktop .intro,.nebula-desktop .kind-tabs,.nebula-desktop footer,.nebula-desktop .legacy-bar { display:none!important; }
+.nebula-desktop main { max-width:1500px;padding:22px 24px 28px; }
+.nebula-desktop .workspace { grid-template-columns:minmax(320px,390px) minmax(0,1fr);gap:20px;margin-top:16px;align-items:start; }
+.nebula-desktop .panel,.nebula-desktop .acceptance-panel,.nebula-desktop .history-panel,.nebula-desktop .wrap { background:var(--surface);border-color:var(--line);border-radius:14px;box-shadow:var(--shadow); }
+.nebula-desktop .config-panel { padding:22px; }
+.nebula-desktop .section-heading h2,.nebula-desktop h2 { font-size:15px;font-weight:600;color:var(--text); }
+.nebula-desktop .section-heading h2>span,.nebula-desktop .micro,.nebula-desktop .form-section-title>span { display:none; }
+.nebula-desktop .form-section-title,.nebula-desktop label,.nebula-desktop .field label { color:var(--text);font-size:12px; }
+.nebula-desktop input:not([type=checkbox]):not([type=radio]):not([type=file]),.nebula-desktop select,.nebula-desktop textarea { background:var(--surface);color:var(--text);border-color:var(--border2);border-radius:7px;font-size:12px; }
+.nebula-desktop input:focus,.nebula-desktop textarea:focus,.nebula-desktop select:focus { border-color:var(--accent);box-shadow:0 0 0 3px #1475e419; }
+.nebula-desktop input[type=checkbox],.nebula-desktop input[type=radio] {accent-color:var(--accent)}
+.nebula-desktop button { border-radius:7px; }
+.nebula-desktop .primary,.nebula-desktop .btn:not(.ghost) { background:var(--accent);color:white;border-color:var(--accent);box-shadow:0 1px 3px #1475e420; }
+.nebula-desktop .primary:hover,.nebula-desktop .btn:not(.ghost):hover {background:var(--teal-dark)}
+.nebula-desktop .secondary,.nebula-desktop .btn.ghost {background:var(--surface);color:var(--text);border-color:var(--border2)}
+.nebula-desktop .text-button,.nebula-desktop a {color:var(--accent)}
+.nebula-desktop .coverage-panel,.nebula-desktop .prompt-library,.nebula-desktop .protocol-note,.nebula-desktop .upload-area,.nebula-desktop .mode-plan,.nebula-desktop .protocol-settings,.nebula-desktop .coverage-strip {background:var(--soft);border-color:var(--line)}
+.nebula-desktop .prompt-library p,.nebula-desktop .prompt-library small,.nebula-desktop small,.nebula-desktop .field small {color:var(--muted)}
+.nebula-desktop .acceptance-intro {padding:22px 24px;background:var(--surface);border-color:var(--line)}
+.nebula-desktop .eyebrow {color:var(--accent);font-family:inherit;font-size:9px}
+.nebula-desktop .acceptance-grid,.nebula-desktop .general-grid {grid-template-columns:minmax(300px,350px) minmax(0,1fr)}
+.nebula-desktop .acceptance-config,.nebula-desktop .general-config {background:var(--surface);border-color:var(--line);padding:22px}
+.nebula-desktop .acceptance-output {background:var(--surface);padding:22px}
+.nebula-desktop .acceptance-module-card,.nebula-desktop .mode-card {background:var(--surface);border-color:var(--border2);color:var(--text);border-radius:10px}
+.nebula-desktop .acceptance-module-card:has(input:checked),.nebula-desktop .mode-card:has(input:checked) {background:var(--teal-soft);border-color:#1475e460}
+.nebula-desktop .acceptance-module-card p,.nebula-desktop .mode-card .d {color:var(--muted)}
+.nebula-desktop .acceptance-badge,.nebula-desktop .coverage-pill {background:var(--teal-soft);color:var(--accent);border-color:#1475e425}
+.nebula-desktop #legacyView {margin-top:0}
+.nebula-desktop #legacyFrame {border-radius:14px;background:var(--surface)}
+.nebula-desktop .hero {background:var(--surface);padding:20px 24px;border-color:var(--line)}
+.nebula-desktop .hero h1 {font-size:18px}
+.nebula-desktop .history-intro h1 {font-size:24px}
+.nebula-desktop .history-stats>div {background:var(--surface);border-color:var(--line)}
+.nebula-desktop dialog {background:var(--surface);color:var(--text);border-color:var(--line);border-radius:14px}
+.nebula-desktop .empty-state {background:var(--surface);border-color:var(--line)}
+.nebula-desktop .empty-orbit span {color:var(--accent);background:var(--teal-soft);border-color:#1475e430}
+.nebula-desktop .model-multi-popover,.nebula-desktop .choice-picker-menu {background:var(--surface);color:var(--text);border-color:var(--line)}
+@media (max-width:900px) {
+ .nebula-desktop main {padding:18px}
+ .nebula-desktop .workspace {grid-template-columns:minmax(290px,340px) minmax(0,1fr);gap:14px}
+ .nebula-desktop .acceptance-grid,.nebula-desktop .general-grid {grid-template-columns:290px minmax(0,1fr)}
+ .nebula-desktop .config-panel,.nebula-desktop .acceptance-config,.nebula-desktop .acceptance-output {padding:18px}
+}
+@media (prefers-color-scheme:dark) {
+ :root.nebula-desktop {--bg:#202124;--surface:#292a2e;--panel:#292a2e;--ink:#eeeef0;--text:#eeeef0;--muted:#a5a7b0;--faint:#9a9ca5;--line:#3a3b41;--border:#3a3b41;--border2:#4b4d55;--teal:#72afff;--teal-dark:#1167cf;--teal-soft:#223951;--accent:#368bea;--accent-soft:#223951;--accent2:#91c0fc;--soft:#24252a}
+ .nebula-desktop .form-section,.nebula-desktop .section-heading,.nebula-desktop .advanced,.nebula-desktop .history-toolbar {border-color:var(--line)}
+ .nebula-desktop .acceptance-output-kicker,.nebula-desktop .acceptance-footnote,.nebula-desktop .log-panel,.nebula-desktop .history-row,.nebula-desktop .result-card,.nebula-desktop .run-tracker,.nebula-desktop .report-card,.nebula-desktop .request-card,.nebula-desktop .check-card {background:var(--surface);color:var(--text);border-color:var(--line)}
+ .nebula-desktop .mode-card .t,.nebula-desktop .coverage-pill strong,.nebula-desktop .acceptance-module-card strong {color:var(--text)}
+ .nebula-desktop pre {background:#1d1e22;color:#d9dfed;border-color:var(--line)}
+}
+/* Shared controls use semantic surfaces in both appearances. */
+.nebula-desktop #legacyView {background:transparent;border:0;box-shadow:none}
+.nebula-desktop .mm-picker {color:var(--text)}
+.nebula-desktop .mm-input-row,.nebula-desktop .mm-menu,.nebula-desktop .mm-picker .mm-option {background:var(--surface);border-color:var(--border2);color:var(--text)}
+.nebula-desktop .mm-picker .mm-input-row>input {background:transparent;border-radius:0}
+.nebula-desktop .mm-picker .mm-clear,.nebula-desktop .mm-picker .mm-toggle,.nebula-desktop .mm-picker .mm-text-button {color:var(--accent);border-color:var(--line)}
+.nebula-desktop .mm-picker .mm-summary,.nebula-desktop .mm-status,.nebula-desktop .mm-picker .mm-empty {color:var(--muted)}
+.nebula-desktop .mm-actions,.nebula-desktop .mm-status,.nebula-desktop .mm-picker .mm-add-custom {background:var(--soft);color:var(--accent);border-color:var(--line)}
+.nebula-desktop .mm-chip,.nebula-desktop .mm-picker .mm-option[aria-selected=true],.nebula-desktop .mm-picker .mm-option:hover {background:var(--teal-soft);color:var(--text);border-color:var(--line)}
+.nebula-desktop .mm-search-row,.nebula-desktop .module-card-meta {border-color:var(--line)}
+.nebula-desktop .acceptance-module-overview {background:var(--soft);border-color:var(--line);border-radius:12px;padding:16px}
+.nebula-desktop .acceptance-module-head strong,.nebula-desktop .acceptance-module-head h3 {color:var(--text)}
+.nebula-desktop .acceptance-module-card:has(input:checked) .module-check {background:var(--accent);color:white}
+.nebula-desktop .module-card-meta b {color:var(--accent)}
+.nebula-desktop .module-card-meta em,.nebula-desktop .acceptance-module-summary,.nebula-desktop .acceptance-plan-note,.nebula-desktop .acceptance-intro p,.nebula-desktop .hero .sub {color:var(--muted)}
+.nebula-desktop .acceptance-plan-list li,.nebula-desktop .gpt-summary,.nebula-desktop .gpt-result,.nebula-desktop .gpt-result-item,.nebula-desktop .gpt-preview-wrap details,.nebula-desktop .gpt-suite-panel details#gptRawWrap,.nebula-desktop .claude-plan-stat,.nebula-desktop .claude-plan-request {background:var(--surface);color:var(--text);border-color:var(--line)}
+.nebula-desktop .matrix-details,.nebula-desktop .acceptance-matrix-head,.nebula-desktop .claude-plan-notice,.nebula-desktop .claude-plan-limitations,.nebula-desktop .discovery-details {background:var(--soft);color:var(--text);border-color:var(--line)}
+.nebula-desktop .history-stats,.nebula-desktop .history-record,.nebula-desktop .history-detail-head,.nebula-desktop .history-detail-meta,.nebula-desktop .history-detail-text,.nebula-desktop .history-detail-raw,.nebula-desktop .history-detail-check,.nebula-desktop .history-media {background:var(--surface);color:var(--text);border-color:var(--line)}
+.nebula-desktop .history-pagination,.nebula-desktop .history-record:hover,.nebula-desktop .history-toolbar,.nebula-desktop .history-media .media-load {background:var(--soft);color:var(--text);border-color:var(--line)}
+.nebula-desktop .history-record-title b,.nebula-desktop .history-detail h2,.nebula-desktop .history-detail-section h3,.nebula-desktop .history-stats b {color:var(--text)}
+@media (prefers-color-scheme:dark) {
+ .nebula-desktop .acceptance-badge {color:#9dc6ff}
+ .nebula-desktop input::placeholder,.nebula-desktop textarea::placeholder,.nebula-desktop .form-group label>span,.nebula-desktop .acceptance-plan-list i {color:var(--muted)}
+ .nebula-desktop .acceptance-verdict {background:#223b31;color:#b5e0c5;border-color:#426f56}
+ .nebula-desktop .acceptance-verdict.failed,.nebula-desktop .history-detail-text.is-error {background:#482d2a;color:#efb6aa}
+ .nebula-desktop .acceptance-verdict.inconclusive,.nebula-desktop .discovery-details[data-state=error] {background:#433b29;color:#e6d3a4}
+ .nebula-desktop .general-main,.nebula-desktop .coverage-panel,.nebula-desktop .check-list,.nebula-desktop .general-output {background:var(--soft);border-color:var(--line)}
+}
+.nebula-desktop .acceptance-module-head>div {color:var(--text)}
+.nebula-desktop .acceptance-module-card:has(input:checked) {box-shadow:none}
+.nebula-desktop .acceptance-module-card:has(input:checked) .module-check {border-color:var(--accent)}

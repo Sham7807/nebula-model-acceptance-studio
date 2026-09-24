@@ -37,3 +37,10 @@ __pycache__/
 # Local tools and release verification outputs
 /.local-tools/
 /release-check/
+
+# macOS build products and isolated desktop QA
+/desktop/.build/
+/desktop/.build-venv/
+/desktop/.runtime-cache/
+/desktop/dist/
+/desktop/qa/

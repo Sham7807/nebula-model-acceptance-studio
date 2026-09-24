@@ -1,0 +1,16 @@
+小小宇宙无敌 · Nebula Studio
+macOS 14 或更新版本 · Apple Silicon（M1 / M2 / M3 / M4 等）
+
+将「小小宇宙无敌.app」拖入「Applications」，然后双击打开。
+应用内置检测引擎，不需要安装 Python，也不需要手动启动服务。
+
+这是本地签名构建，尚未通过 Apple 公证。如 macOS 提示开发者无法验证，
+请在确认下载来源后，到「系统设置 → 隐私与安全性」查看「仍要打开」。
+请勿关闭系统的整体安全保护。
+
+首次使用点击右上角「连接渠道」，填写渠道地址与 API Key。
+测试会调用你的渠道并可能产生渠道费用。概览与请求预览不调用模型。
+
+历史记录保存在：
+~/Library/Application Support/NebulaWorkbench/
+桌面版和服务器网页版分别保存数据。API Key 可选存入 macOS 钥匙串。

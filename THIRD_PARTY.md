@@ -16,3 +16,7 @@
 ## Playwright
 
 [Playwright](https://github.com/microsoft/playwright) 仅用于开发时的浏览器回归测试，依赖与版本记录于 `package.json` 和 `package-lock.json`，遵循其上游许可证。
+
+## macOS 桌面运行时
+
+桌面版打包 [python-build-standalone](https://github.com/astral-sh/python-build-standalone) 发行的可迁移 CPython 3.12，以及 `desktop/requirements.lock` 中锁定的依赖。Python 运行时许可证、依赖 `.dist-info` 许可证和 KVV MIT 许可证随 `.app` 资源保留。SwiftUI、AppKit 和 WebKit 使用系统框架，不嵌入第三方浏览器运行时。
