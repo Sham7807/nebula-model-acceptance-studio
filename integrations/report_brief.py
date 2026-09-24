@@ -41,7 +41,7 @@ def requests(result):
     if result.get('suite') == 'batch_acceptance':
         return [dict(r, id='model-%s-%s' % (i, r.get('id') or r.get('request_id'))) for i, child in enumerate(rows(result.get('results')), 1) for r in requests(child.get('result'))]
     matrix = obj(result.get('matrix_validation'))
-    source = rows(result.get('samples')) + rows(result.get('browser_requests')) + rows(matrix.get('samples') or matrix.get('evidence_samples')) + rows(obj(result.get('transport')).get('requests'))
+    source = rows(result.get('samples')) + rows(result.get('browser_requests')) + rows(matrix.get('samples') or matrix.get('evidence_samples')) + rows(obj(result.get('production_validation')).get('samples')) + rows(obj(result.get('transport')).get('requests'))
     seen = set(); output = []
     for index, row in enumerate(source):
         if not isinstance(row, dict): continue

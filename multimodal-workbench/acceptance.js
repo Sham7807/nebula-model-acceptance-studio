@@ -66,12 +66,55 @@ function selectedAcceptanceModels(){
  const ids=acceptanceModelPicker?.getSelected?.()||[];const typed=el('acceptanceModel').value.trim();
  return [...new Set((ids.length?ids:[typed]).map(v=>String(v||'').trim()).filter(Boolean))];
 }
+const productionDrafts=new Map();let productionDefaults;
+const productionPresets={screening:{duration_seconds:120,max_requests:60,concurrency:2,context_tokens:4096,output_tokens:2048},standard:{duration_seconds:1800,max_requests:600,concurrency:4,context_tokens:12000,output_tokens:4096},soak:{duration_seconds:21600,max_requests:2000,concurrency:4,context_tokens:16000,output_tokens:4096}};
+const workloadLabels={short:'短问答',long_output:'长输出',long_context:'长上下文',stream:'长流式',thinking:'思考模式',vision:'图片识别',tools:'工具会话',cancellation:'主动取消',custom:'自定义业务'};
+const productionFields={duration_seconds:'claudeProductionDuration',max_requests:'claudeProductionRequests',concurrency:'claudeProductionConcurrency',requests_per_minute:'claudeProductionRpm',context_tokens:'claudeProductionContext',output_tokens:'claudeProductionOutput',recovery_retries:'claudeProductionRetries',max_estimated_tokens:'claudeProductionTokenBudget'};
+const admissionFields={target_success_rate:'claudeAdmissionSuccess',min_samples:'claudeAdmissionSamples',min_observation_seconds:'claudeAdmissionObservation',max_p95_first_content_ms:'claudeAdmissionFirstContent',max_p95_latency_ms:'claudeAdmissionLatency'};
+const priceFields={input_per_million:'claudePriceInput',output_per_million:'claudePriceOutput',cache_read_per_million:'claudePriceCacheRead',cache_write_per_million:'claudePriceCacheWrite'};
+const nullableNumber=id=>el(id).value.trim()===''?null:Number(el(id).value);
+function customProductionCases(validate=false){
+ const raw=el('claudeProductionCases').value.trim();if(!raw)return [];
+ try{
+  const parsed=JSON.parse(raw),cases=Array.isArray(parsed)?parsed:parsed?.cases;
+  if(!Array.isArray(cases)||cases.length>20)throw new Error('请提供最多 20 个业务样本的 JSON 数组');
+  const hasSecret=value=>value&&typeof value==='object'&&Object.entries(value).some(([key,item])=>/^(authorization|x-api-key|api[_-]?key|secret|password|access[_-]?token)$/i.test(key)||hasSecret(item));
+  return cases.map((item,index)=>{const name=item?.name||item?.title;if(!item||typeof item!=='object'||Array.isArray(item)||typeof name!=='string'||!name.trim()||!item.body||typeof item.body!=='object'||Array.isArray(item.body))throw new Error(`第 ${index+1} 项需要 name 和 body 对象`);if(hasSecret(item))throw new Error(`第 ${index+1} 项包含凭据字段，请移除后导入`);const expected=item.expected_text??item.expect?.exact_text,contains=item.expect?.contains;if(expected!=null&&typeof expected!=='string')throw new Error(`第 ${index+1} 项 expected_text 必须为字符串`);if(!expected&&(!Array.isArray(contains)||!contains.length||contains.some(x=>typeof x!=='string'||!x)))throw new Error(`第 ${index+1} 项需要非空 expected_text 或 expect.contains 断言`);const body={...item.body};delete body.model;return {name:name.trim(),body,...(expected!=null?{expected_text:expected}:{}),...(Array.isArray(contains)?{expect:{contains}}:{})};});
+ }catch(error){if(validate)throw new Error('自定义业务样本无效：'+error.message);return [];}
+}
+function productionConfiguration(){
+ return {production:{profile:el('claudeProductionProfile').value,...Object.fromEntries(Object.entries(productionFields).map(([key,id])=>[key,nullableNumber(id)])),workloads:[...document.querySelectorAll('[data-production-workload]:checked')].map(x=>x.dataset.productionWorkload),custom_cases:customProductionCases()},admission:{...Object.fromEntries(Object.entries(admissionFields).map(([key,id])=>[key,nullableNumber(id)])),required_workloads:[...document.querySelectorAll('[data-admission-workload]:checked')].map(x=>x.dataset.admissionWorkload)},pricing:{currency:el('claudePriceCurrency').value,version:el('claudePriceVersion').value.trim()||null,...Object.fromEntries(Object.entries(priceFields).map(([key,id])=>[key,nullableNumber(id)]))}};
+}
+function validateProductionConfiguration(){
+ if(!['claude','ccmax','kimi'].includes(selected))return;
+ const fields=el('claudeProductionSettings').querySelectorAll('input[type="number"]');for(const field of fields){if(!field.disabled&&!field.checkValidity())throw new Error((document.querySelector('label[for="'+field.id+'"]')?.textContent||'配置')+'超出允许范围');}
+ const c=productionConfiguration();if(Object.values(c.admission).some(value=>value===null)||!c.admission.required_workloads.length)throw new Error('请填写完整的准入门槛，并选择必须验证的业务');if(c.production.profile==='off')return;
+ for(const [key,value] of Object.entries(c.production)){if(Object.hasOwn(productionFields,key)&&key!=='max_estimated_tokens'&&value===null)throw new Error('请填写完整的业务验证运行参数');}
+ if(!c.production.workloads.length)throw new Error('请选择至少一种业务负载');
+ const cases=customProductionCases(true);if(c.production.workloads.includes('custom')&&!cases.length)throw new Error('已选择自定义业务，请先导入业务样本');
+}
+function updateProductionSettings(){
+ const profile=el('claudeProductionProfile').value;el('claudeProductionFields').disabled=profile==='off';
+ el('claudeProductionBadge').textContent=({screening:'接入初筛',standard:'标准观察',soak:'持续观察',custom:'自定义',off:'未启用'})[profile];
+ const {production:p}=productionConfiguration();el('claudeProductionHelp').textContent=profile==='off'?'仅执行原专项与参数矩阵；没有持续业务证据时，报告会保留准入证据缺口。':`原专项与参数矩阵之外追加：最多 ${p.max_requests??'—'} 次请求（含重试），观察 ${duration(p.duration_seconds||0)}，最多 ${p.concurrency??'—'} 路并发。达到时长或预算即停止调度；初筛不等于正式准入。`;
+}
+function restoreProductionConfiguration(saved){
+ for(const [section,fields] of [['production',productionFields],['admission',admissionFields],['pricing',priceFields]]){const source=saved[section];if(!source||typeof source!=='object'||Array.isArray(source))continue;for(const [key,id] of Object.entries(fields)){const value=source[key];if(value===null)el(id).value='';else if(typeof value==='number'&&Number.isFinite(value))el(id).value=String(value);}}
+ const p=saved.production,a=saved.admission,pricing=saved.pricing;
+ if(p&&typeof p==='object'){if(['off','screening','standard','soak','custom'].includes(p.profile))el('claudeProductionProfile').value=p.profile;if(Array.isArray(p.workloads))document.querySelectorAll('[data-production-workload]').forEach(x=>x.checked=p.workloads.includes(x.dataset.productionWorkload));if(Array.isArray(p.custom_cases))el('claudeProductionCases').value=JSON.stringify(p.custom_cases,null,2);}
+ if(Array.isArray(a?.required_workloads))document.querySelectorAll('[data-admission-workload]').forEach(x=>x.checked=a.required_workloads.includes(x.dataset.admissionWorkload));
+ if(['CNY','USD'].includes(pricing?.currency))el('claudePriceCurrency').value=pricing.currency;
+ if(pricing&&Object.hasOwn(pricing,'version'))el('claudePriceVersion').value=pricing.version==null?'':String(pricing.version);
+ updateProductionSettings();updateCustomCaseStatus();
+}
+function updateCustomCaseStatus(){try{const cases=customProductionCases(true);el('claudeProductionCasesStatus').textContent=cases.length?`已就绪 ${cases.length} 个业务样本`:'未导入自定义业务样本';el('claudeProductionCasesStatus').classList.remove('error');}catch(error){el('claudeProductionCasesStatus').textContent=error.message;el('claudeProductionCasesStatus').classList.add('error');}}
 function config(){
  const isClaude=selected==='claude', requestFormat=isClaude?el('claudeFormat').value:selected==='ccmax'?el('acceptanceFormat').value:el('acceptanceThinkMode').value==='openai'?'openai':'native';
  const models=selectedAcceptanceModels();
- return {matrix_profile:el('acceptanceMatrixProfile').value,matrix_modules:[...document.querySelectorAll('[data-matrix-module]:checked')].map(x=>x.dataset.matrixModule),suite:isClaude?'claude':selected==='ccmax'?'ccmax':el('acceptanceScope').value,base:el('acceptanceBase').value.trim(),key:el('acceptanceKey').value.trim(),model:models[0]||el('acceptanceModel').value.trim(),models,timeout:Number(el('acceptanceTimeout').value),signature_samples:Number(isClaude?el('claudeSignature').value:el('acceptanceSignature').value),sse_samples:Number(isClaude?el('claudeSse').value:el('acceptanceSse').value),concurrency:isClaude?Number(el('claudeStressConcurrency').value):2,auth:requestFormat==='openai'?'bearer':isClaude?el('claudeAuth').value:el('acceptanceAuth').value,request_format:requestFormat,provider:isClaude?el('claudeProvider').value:undefined,sampling:isClaude?el('claudeSampling').value:undefined,cache_tokens:isClaude?Number(el('claudeCacheTokens').value):undefined,stress_requests:isClaude?Number(el('claudeStressRequests').value):undefined,stress_concurrency:isClaude?Number(el('claudeStressConcurrency').value):undefined,think_mode:el('acceptanceThinkMode').value,thinking:!['none','openai'].includes(el('acceptanceThinkMode').value),advanced:selected==='ccmax'||isClaude,enabled_modules:[...(enabledModules[selected]||[]) ]};
+ return {...productionConfiguration(),matrix_profile:el('acceptanceMatrixProfile').value,matrix_modules:[...document.querySelectorAll('[data-matrix-module]:checked')].map(x=>x.dataset.matrixModule),suite:isClaude?'claude':selected==='ccmax'?'ccmax':el('acceptanceScope').value,base:el('acceptanceBase').value.trim(),key:el('acceptanceKey').value.trim(),model:models[0]||el('acceptanceModel').value.trim(),models,timeout:Number(el('acceptanceTimeout').value),signature_samples:Number(isClaude?el('claudeSignature').value:el('acceptanceSignature').value),sse_samples:Number(isClaude?el('claudeSse').value:el('acceptanceSse').value),concurrency:isClaude?Number(el('claudeStressConcurrency').value):2,auth:requestFormat==='openai'?'bearer':isClaude?el('claudeAuth').value:el('acceptanceAuth').value,request_format:requestFormat,provider:isClaude?el('claudeProvider').value:undefined,sampling:isClaude?el('claudeSampling').value:undefined,cache_tokens:isClaude?Number(el('claudeCacheTokens').value):undefined,stress_requests:isClaude?Number(el('claudeStressRequests').value):undefined,stress_concurrency:isClaude?Number(el('claudeStressConcurrency').value):undefined,think_mode:el('acceptanceThinkMode').value,thinking:!['none','openai'].includes(el('acceptanceThinkMode').value),advanced:selected==='ccmax'||isClaude,enabled_modules:[...(enabledModules[selected]||[]) ]};
 }
 function updatePlan(){
+ updateProductionSettings();
  const mp=el('acceptanceMatrixProfile').value;el('acceptanceMatrixHelp').textContent=mp==='off'?'仅执行原有套件。选择标准或完整矩阵可增加多参数证据。':mp==='quick'?'长度上限 1 / 10 / 20，各独立验证；包含基础阶梯压力采样。':mp==='standard'?'长度上限 1 / 10 / 20 × 两种场景 × 流式与非流式，共 12 条长度用例；另外验证工具、图像、注入、缓存与分阶段压力。':'长度上限 1 / 10 / 20 / 64 / 128 / 256 × 三种场景 × 流式与非流式 × 两轮，共 72 条长度用例；扩大各模块样本与压力阶段。';
  const cc=selected==='ccmax',claude=selected==='claude',full=el('acceptanceScope').value==='kvvfull',openai=cc?el('acceptanceFormat').value==='openai':claude?el('claudeFormat').value==='openai':el('acceptanceThinkMode').value==='openai';
  el('acceptanceTitle').textContent=cc?'CCMax渠道验收':claude?'Claude 上游专项验收':'Kimi Vendor Verifier';
@@ -124,7 +167,7 @@ function syncDownloads(){
  document.querySelectorAll('[data-acceptance-download]').forEach(b=>b.disabled=!available);
 }
 function hideResults(){
- displayedRunId='';el('acceptanceProgress').hidden=true;el('acceptanceVerdict').hidden=true;
+ displayedRunId='';el('acceptanceProgress').hidden=true;el('acceptanceVerdict').hidden=true;el('claudeAdmissionPanel').hidden=true;
  for(const id of ['acceptanceStage','acceptanceCount','acceptanceElapsed','acceptanceEta','acceptanceSummary','acceptanceVerdict','acceptanceCases','acceptanceLog'])el(id).replaceChildren();
  el('acceptanceBar').value=0;syncDownloads();
 }
@@ -148,6 +191,7 @@ function selectSuite(value){
   return;
  }
  if(value!==selected&&selected!=='gpt')invalidateModels();
+ if(['claude','ccmax','kimi'].includes(value)){if(['claude','ccmax','kimi'].includes(selected))productionDrafts.set(selected,productionConfiguration());const draft=productionDrafts.get(value)||JSON.parse(JSON.stringify(productionDefaults));if(!productionDrafts.has(value)&&value!=='claude')draft.production.profile='off';restoreProductionConfiguration(draft);}
  selected=value;updateServiceBadge();document.querySelectorAll('[data-suite]').forEach(b=>{b.classList.toggle('active',b.dataset.suite===value);b.setAttribute('aria-selected',String(b.dataset.suite===value));});
  if(el('generalHistorySaveStatus'))el('generalHistorySaveStatus').hidden=value!=='general';
   el('legacyFrame').hidden=value!=='general';el('acceptancePanel').hidden=value==='general';el('gptPanel').hidden=true;
@@ -175,9 +219,10 @@ function latestEventCases(events){
  return [...latest.values()];
 }
 function restoreConfiguration(job){
- const saved=job.result?.configuration;
+ const saved=job.result?.configuration||job.configuration;
  if(!saved||typeof saved!=='object'||Array.isArray(saved))return;
  const suiteKey=job.suite==='ccmax'?'ccmax':job.suite==='claude'?'claude':'kimi';
+ if(saved.production||saved.admission||saved.pricing){restoreProductionConfiguration(saved);productionDrafts.set(suiteKey,productionConfiguration());}
  if(Array.isArray(saved.enabled_modules)){
   const allowed=new Set(acceptanceModules[suiteKey].map(module=>module.id));
   const restoredModules=new Set(saved.enabled_modules.map(value=>String(value)).filter(value=>allowed.has(value)));
@@ -226,6 +271,45 @@ function renderCase(item){
  return row;
 }
 function duration(seconds){return seconds>=60?`${Math.floor(seconds/60)} 分 ${Math.floor(seconds%60)} 秒`:`${Math.floor(seconds)} 秒`;}
+const metricText=value=>value==null?'未记录':typeof value==='object'?JSON.stringify(value):String(value);
+const rateText=value=>typeof value==='number'&&Number.isFinite(value)?(value*100).toFixed(2).replace(/\.00$/,'')+'%':'未记录';
+const msText=value=>typeof value==='number'&&Number.isFinite(value)?(value/1000).toFixed(2)+' 秒':'未记录';
+function metricCard(label,value,detail){const card=make('div','admission-stat');card.append(make('small','',label),make('strong','',value));if(detail)card.append(make('span','',detail));return card;}
+function renderAdmission(data,id){
+ const panel=el('claudeAdmissionPanel'),result=data.result,admission=result?.admission;
+ panel.replaceChildren();panel.hidden=!admission&&!Array.isArray(result?.results);
+ if(Array.isArray(result?.results)){
+  panel.append(make('h3','','逐模型准入结论'),make('p','admission-summary','各模型独立判断稳定性、运行范围和费用；批量结果不合并评分或账单。'));
+  const grid=make('div','admission-workload-grid');for(const child of result.results){const assessment=child.result?.admission,card=make('div','admission-workload');card.append(make('b','',child.model||'未命名模型'),make('span','',assessment?.label||'准入证据待整理'));if(assessment?.reliability)card.append(make('small','',`业务成功率 ${rateText(assessment.reliability.business_success_rate)} · ${assessment.reliability.normal_tasks??'—'} 个任务`));if(child.run_id){const open=make('button','text-button','查看独立准入与账单');open.type='button';open.disabled=data.status==='running';open.addEventListener('click',async()=>{open.disabled=true;try{const job=await(await api('/api/runs/'+encodeURIComponent(child.run_id))).json();restoreConfiguration(job);recordRun(job,child.run_id);message('已打开 '+(child.model||'该模型')+' 的独立结果，可单独核对账单和下载报告。');}catch(error){message(error.message,true);open.disabled=false;}});card.append(open);}grid.append(card);}panel.append(grid);return;
+ }
+ if(!admission)return;
+ const reliability=admission.reliability||{},cost=admission.cost||{},envelope=admission.validated_envelope||{};
+ const head=make('div','admission-head'),heading=make('div');heading.append(make('span','admission-kicker','CHANNEL READINESS'),make('h3','','渠道准入结论'));head.append(heading,make('span','admission-label '+(admission.status||'retest'),admission.label||'待评估'));
+ panel.append(head,make('p','admission-summary','准入结论与能力得分分别判断：只有已测业务、持续观察与关键门槛都满足，才建议在验证范围内接入。'));
+ const stats=make('div','admission-stats');stats.append(metricCard('首试业务成功率',rateText(reliability.first_attempt_success_rate),'客户首次请求的完成表现'),metricCard('协议完整率',rateText(reliability.protocol_success_rate),'响应结构与流式收尾'),metricCard('完整业务成功率',rateText(reliability.business_success_rate),`${metricText(reliability.business_successful)} / ${metricText(reliability.normal_tasks)} 个正常任务`),metricCard('最终成功率',rateText(reliability.eventual_success_rate),'包含允许的恢复重试'),metricCard('P95 首个有效内容',msText(reliability.first_content_p95_ms),'不把心跳和思考元数据当正文'),metricCard(result.production_validation?.metrics?.task_latency_p95_ms!=null?'P95 完整任务':'P95 请求完成',msText(reliability.latency_p95_ms),`实际观察 ${envelope.observation_seconds==null?'未记录':duration(envelope.observation_seconds)}`));panel.append(stats);
+ const latencyNote=result.production_validation?.metrics?.task_latency_population||result.production_validation?.metrics?.latency_population;if(latencyNote)panel.append(make('p','admission-footnote',latencyNote));
+ const confidence=reliability.confidence;if(confidence&&confidence.lower_percent!=null&&confidence.upper_percent!=null)panel.append(make('p','admission-confidence',`成功率 ${(confidence.level||0.95)*100}% 置信区间：${confidence.lower_percent}% – ${confidence.upper_percent}%（${confidence.method||'统计区间'}，${confidence.n??'—'} 个样本）。${confidence.note||'少量请求全部成功，不等于长期稳定性得到证明。'}`));
+ const reasons=Array.isArray(admission.reasons)?admission.reasons:[];if(reasons.length){const list=make('ul','admission-reasons');for(const reason of reasons.slice(0,6))list.append(make('li','',String(reason)));panel.append(list);}
+ const gates=make('details','admission-details');gates.open=true;gates.append(make('summary','',`准入门槛 · ${(admission.gates||[]).filter(g=>g.status==='passed').length} / ${(admission.gates||[]).length} 项满足`));const gateList=make('div','admission-gates');for(const gate of admission.gates||[]){const row=make('div','admission-gate'),title=make('div','admission-gate-title');title.append(make('b','',gate.label||gate.id),make('span','admission-gate-status '+gate.status,({passed:'已满足',failed:'需改进',inconclusive:'待验证'})[gate.status]||'待验证'));row.append(title,make('p','',`实测：${metricText(gate.observed)} · 要求：${metricText(gate.required)}`));if(gate.detail)row.append(make('small','',gate.detail));gateList.append(row);}gates.append(gateList);panel.append(gates);
+ const workloads=envelope.workloads||result.production_validation?.metrics?.workloads||{};
+ if(Object.keys(workloads).length){const section=make('details','admission-details');section.append(make('summary','','实际验证的业务范围'));const grid=make('div','admission-workload-grid');for(const [key,work] of Object.entries(workloads)){const count=work.tasks??work.normal_tasks,successful=work.business_successful??work.successful;const card=make('div','admission-workload');card.append(make('b','',workloadLabels[key]||key),make('span','',`${metricText(successful)} / ${metricText(count)} 个业务任务完成`));if(work.protocol_success_rate!=null)card.append(make('small','',`协议完整率 ${rateText(work.protocol_success_rate)}`));if(work.latency_p95_ms!=null)card.append(make('small','',`P95 ${msText(work.latency_p95_ms)}`));grid.append(card);}section.append(grid,make('p','admission-footnote',envelope.detail||'仅反映本轮实际运行的业务和负载，不把计划上限当作已经验证。'));panel.append(section);}
+ const metrics=result.production_validation?.metrics||{},buckets=Array.isArray(metrics.time_buckets)?metrics.time_buckets:[],failures=Object.entries(metrics.failure_counts||{}).filter(([,count])=>count>0);
+ if(buckets.length||failures.length||metrics.retry_attempts!=null){const stability=make('details','admission-details');stability.append(make('summary','','时段稳定性、错误与恢复'));if(metrics.retry_attempts!=null)stability.append(make('p','admission-footnote',`实际重试 ${metrics.retry_attempts} 次 · ${metrics.tasks_retried??0} 个业务任务触发重试 · ${metrics.recovered_tasks??0} 个任务恢复成功${metrics.max_content_gap_ms!=null?' · 最大有效内容间隔 '+msText(metrics.max_content_gap_ms):''}。未观察到暂态故障时，恢复能力仍需补充证据。`));if(failures.length){const labels={authentication:'鉴权或账户',rate_limited:'429 限流',upstream_5xx:'上游 5xx',parameter_or_capability:'参数或能力拒绝',timeout:'超时',response_protocol:'响应协议不完整',business_assertion:'业务断言异常'},list=make('div','admission-failure-tags');for(const [kind,count] of failures)list.append(make('span','',(labels[kind]||kind)+' · '+count+' 次'));stability.append(list);}if(buckets.length){const grid=make('div','admission-workload-grid');for(const [index,bucket] of buckets.entries()){const item=make('div','admission-workload');item.append(make('b','',`时段 ${index+1} · +${duration(bucket.offset_seconds||0)}`),make('span','',`${bucket.business_successful??'—'} / ${bucket.normal_tasks??bucket.tasks??'—'} 个业务任务`),make('small','',`业务成功率 ${rateText(bucket.business_success_rate)}`));grid.append(item);}stability.append(grid);}panel.append(stability);}
+ const costSection=make('div','admission-cost'),costHead=make('div','admission-cost-head');costHead.append(make('h4','','成功交付成本'),make('span','',cost.label||'成本待核算'));costSection.append(costHead,make('p','admission-footnote',`报价版本：${cost.price_version||'未记录'} · 币种：${cost.currency||'未配置'}`));
+ const money=value=>typeof value==='number'&&Number.isFinite(value)?value.toLocaleString('zh-CN',{maximumSignificantDigits:10})+' '+(cost.currency||''):'待核算';
+ const coverage=item=>item&&typeof item==='object'?`${item.covered??0} / ${item.total??0} 次请求`:'未提供';
+ const costStats=make('div','admission-cost-stats');costStats.append(metricCard('全部请求估算费用',money(cost.estimated_total),`usage / 报价覆盖 ${coverage(cost.estimated_coverage)}`),metricCard('全部请求实际扣费',money(cost.actual_total),`账单覆盖 ${coverage(cost.actual_coverage)}`),metricCard('每个合格业务实际成本',money(cost.production?.actual_cost_per_success),'含正常业务失败与重试的费用'));costSection.append(costStats);
+ if(cost.actual_total==null&&cost.actual_partial_total!=null)costSection.append(make('p','admission-footnote',`已核对的部分费用：${money(cost.actual_partial_total)}；其余请求账单尚缺，暂不计算全量成本。`));
+ if(cost.estimated_total==null&&cost.estimated_partial_total!=null)costSection.append(make('p','admission-footnote',`可估算的部分费用：${money(cost.estimated_partial_total)}；缺失 usage 或单价的请求未当作免费。`));
+ costSection.append(make('p','admission-footnote',cost.production?.detail||'实际扣费需导入账单；未知费用不计作 0，估算费用不等同已核对账单。'),make('p','admission-price-conclusion',(cost.comparison?.status==='lower'?'已核算成本低于可比参考：':cost.comparison?.status==='higher'?'已核算成本高于可比参考：':'价格优势待核对：')+(cost.comparison?.detail||'需要同币种、同业务配比的实际账单对照。')));
+ if(data.status!=='running'){
+  const actions=make('div','admission-ledger-actions'),download=make('button','secondary','下载账单模板'),upload=make('button','secondary','导入实际账单'),input=make('input');download.type=upload.type='button';download.dataset.costTemplate='';upload.dataset.costImport='';input.type='file';input.accept='.json,application/json';input.hidden=true;input.dataset.costFile='';const state=make('small','admission-ledger-status');state.setAttribute('role','status');state.textContent='每次导入会替换本轮对账记录；只填写已核对金额，空金额保留未核算。';
+  download.addEventListener('click',async()=>{download.disabled=true;try{const value=await(await api('/api/runs/'+encodeURIComponent(id)+'/cost-template')).json();const rows=Array.isArray(value)?value:value.rows||value.billing?.rows||[];const blob=new Blob([JSON.stringify({rows},null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=make('a');a.href=url;a.download=`账单模板-${filenamePart(data.model||result.configuration?.model)}-${reportStamp(data)}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);state.textContent='模板金额留空；只填写可核对的实际扣费。无需提供任何 API 密钥。';}catch(error){state.textContent='下载失败：'+error.message;}finally{download.disabled=false;}});
+  upload.addEventListener('click',()=>input.click());input.addEventListener('change',async()=>{const file=input.files?.[0];if(!file)return;upload.disabled=true;state.textContent='正在核对实际账单…';try{if(file.size>2*1024*1024)throw new Error('账单文件不得超过 2 MB');const source=JSON.parse(await file.text()),billing=Array.isArray(source)?{rows:source}:source.billing||source;if(!billing||!Array.isArray(billing.rows))throw new Error('账单需要 rows 数组');const seen=new Set();const rows=billing.rows.filter(row=>row?.amount!==null&&row?.amount!==''&&row?.amount!==undefined).map(row=>{if(typeof row.request_id!=='string'||!row.request_id||seen.has(row.request_id))throw new Error('请求 ID 缺失或重复');seen.add(row.request_id);if(typeof row.amount!=='number'||!Number.isFinite(row.amount)||row.amount<0||!['CNY','USD'].includes(row.currency))throw new Error('每笔费用需要非负数字 amount 与 CNY / USD 币种');return {request_id:row.request_id,amount:row.amount,currency:row.currency,...(typeof row.note==='string'?{note:row.note}:{}),...(typeof row.provider_request_id==='string'?{provider_request_id:row.provider_request_id}:{})};});if(!rows.length)throw new Error('没有已填写金额的账单行，空金额不会作为免费提交');const updated=await(await api('/api/runs/'+encodeURIComponent(id)+'/billing',{method:'POST',body:JSON.stringify({billing:{rows,...(typeof billing.note==='string'?{note:billing.note}:{})}})})).json();const next={...data,result:updated.result||{...result,admission:updated.admission||admission},history_saved:updated.history_saved??data.history_saved,history_id:updated.history_id??data.history_id};const owner=data.suite==='claude'?'claude':data.suite==='ccmax'?'ccmax':'kimi';suiteRuns.set(owner,{id,data:next});if(displayedRunId===id)render(next,id);if(next.history_saved)window.dispatchEvent(new CustomEvent('workbench:history-saved',{detail:{id:next.history_id,kind:owner}}));message(`已核对 ${rows.length} 笔实际费用，报告成本结论已更新。`);}catch(error){state.textContent='账单未更新：'+error.message;}finally{upload.disabled=false;input.value='';}});
+  actions.append(download,upload,input);costSection.append(actions,state);
+ }
+ panel.append(costSection);
+}
 function filenamePart(value){return String(value||'未命名模型').trim().replace(/[\\/:*?"<>|\u0000-\u001f]+/g,'-').replace(/\s+/g,' ').slice(0,80)||'未命名模型';}
 function reportStamp(data){const raw=Number(data?.finished_at||data?.started_at||Date.now()/1000);const date=new Date((raw<1e12?raw*1000:raw));const pad=value=>String(value).padStart(2,'0');return `${date.getFullYear()}${pad(date.getMonth()+1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;}
 function reportDownloadName(data,format){const result=data?.result||{},model=result.configuration?.model||data?.model||'未命名模型',base=`测试报告-${filenamePart(model)}-${reportStamp(data)}`;return format==='evidence.zip'?base+'-证据.zip':base+'.'+format.split('.').pop();}
@@ -245,14 +329,16 @@ function render(data,id){
  const currentModel=current?.model||'';
  const events=Array.isArray(current?.events)?current.events:(data.events||[]);
  if(currentModel)el('acceptanceSummary').textContent+=`${el('acceptanceSummary').textContent?' · ':''}当前模型：${currentModel}`;
+ const productionEvent=[...events].reverse().find(event=>event.suite==='channel_production');if(data.status==='running'&&productionEvent)el('acceptanceEta').textContent=`业务观察：${productionEvent.completed??0} / ${productionEvent.total??'—'} 次实际请求 · ${productionEvent.logical_tasks??0} 个业务任务 · 已观察 ${duration(productionEvent.elapsed_seconds||0)}`;
  const observedCases=latestEventCases(events).map(item=>currentModel?{...item,title:currentModel+' · '+(item.title||item.label||item.name||item.id||item.probe||'测试项'),model:currentModel}:item);
- const cases=result?.results?result.results.map(item=>({id:'batch-'+item.model,label:item.model+' · '+(item.status||'未完成'),status:item.status==='passed'?'passed':item.status==='failed'?'failed':'inconclusive',detail:item.result?.verdict?.detail||'该模型独立子任务已保存，可下载总报告查看逐项证据。'})):(result?[...(result.cases||result.checks||[]),...(result.matrix_validation?.cases||[])]:observedCases);
+ const cases=result?.results?result.results.map(item=>({id:'batch-'+item.model,label:item.model+' · '+(item.status||'未完成'),status:item.status==='passed'?'passed':item.status==='failed'?'failed':'inconclusive',detail:item.result?.verdict?.detail||'该模型独立子任务已保存，可下载总报告查看逐项证据。'})):(result?[...(result.cases||result.checks||[]),...(result.matrix_validation?.cases||[]),...(result.production_validation?.cases||[])]:observedCases);
  const transportCases=(result?.transport?.checks||[]).filter(x=>x.status!=='passed');
  const matrixCases=[...cases.slice(-700),...transportCases];
  const matrix=el('acceptanceCases');matrix.replaceChildren();
  if(matrixCases.length){
   const head=make('div','acceptance-matrix-head');head.append(make('span','','检测项'),make('span','','期望'),make('span','','实际结果'),make('span','','状态'));matrix.append(head,...matrixCases.map(renderCase));
  }
+ renderAdmission(data,id);
  renderHistoryState(data,id);
  el('acceptanceLog').textContent=result?.log||events.slice(-20).map(e=>(currentModel?'['+currentModel+'] ':'')+(e.message||e.case?.id||`${e.completed??''}${e.total?' / '+e.total:''}`)).join('\n');
  syncDownloads();
@@ -270,6 +356,7 @@ async function poll(){
 }
 async function start(){
  if(restoring)return;
+ try{validateProductionConfiguration();}catch(error){message(error.message,true);return;}
  const c=config();if(!c.base||!c.key||!c.model){message('请填写渠道地址、API Key，并至少勾选一个模型。',true);return;}
  if(!serviceReady){message('请先双击「启动验收工作台.command」并打开本地工作台。',true);return;}
  runningSuite=selected;setActive(true);message('');clearTimeout(pollTimer);pollGeneration++;hideResults();
@@ -300,6 +387,11 @@ async function connect(){
   }finally{restoring=false;setActive(active);}
  }
 }
+el('claudeProductionProfile').addEventListener('change',()=>{const preset=productionPresets[el('claudeProductionProfile').value];if(preset){for(const [key,value] of Object.entries(preset))el(productionFields[key]).value=value;el('claudeProductionRpm').value='0';}updateProductionSettings();});
+for(const id of Object.values(productionFields))el(id).addEventListener('input',()=>{el('claudeProductionProfile').value='custom';updateProductionSettings();});
+el('claudeProductionCases').addEventListener('input',updateCustomCaseStatus);
+el('claudeProductionImport').addEventListener('click',()=>el('claudeProductionFile').click());
+el('claudeProductionFile').addEventListener('change',async()=>{const file=el('claudeProductionFile').files?.[0];if(!file)return;try{if(file.size>1024*1024)throw new Error('业务样本文件不得超过 1 MB');const text=await file.text();el('claudeProductionCases').value=text;const cases=customProductionCases(true);el('claudeProductionCases').value=JSON.stringify(cases,null,2);document.querySelector('[data-production-workload="custom"]').checked=!!cases.length;updateCustomCaseStatus();}catch(error){el('claudeProductionCasesStatus').textContent=error.message;el('claudeProductionCasesStatus').classList.add('error');}finally{el('claudeProductionFile').value='';}});
 for(const b of document.querySelectorAll('[data-suite]'))b.addEventListener('click',()=>selectSuite(b.dataset.suite));
 el('acceptanceScope').addEventListener('change',updatePlan);
 for(const id of ['claudeProvider','claudeFormat','claudeAuth','claudeSampling','claudeSignature','claudeSse','claudeCacheTokens','claudeStressRequests','claudeStressConcurrency'])el(id)?.addEventListener('change',()=>{if(id==='claudeSampling'){const mode=el(id).value;if(mode!=='custom')el('claudeCacheTokens').value=12000;if(mode==='quick'){el('claudeSignature').value=1;el('claudeSse').value=3;el('claudeStressRequests').value=1;el('claudeStressConcurrency').value=1;}else if(mode==='professional'){el('claudeSignature').value=3;el('claudeSse').value=5;el('claudeStressRequests').value=20;el('claudeStressConcurrency').value=4;}else if(mode==='stress'){el('claudeSignature').value=2;el('claudeSse').value=10;el('claudeStressRequests').value=100;el('claudeStressConcurrency').value=10;}}updatePlan();});
@@ -308,16 +400,17 @@ el('acceptanceThinkMode').addEventListener('change',updatePlan);
 el('acceptanceFormat').addEventListener('change',()=>{if(el('acceptanceFormat').value==='openai')el('acceptanceAuth').value='bearer';invalidateModels();updatePlan();});
 el('acceptanceSampling').addEventListener('change',()=>{const mode=el('acceptanceSampling').value;if(mode!=='custom'){el('acceptanceSignature').value=mode==='batch'?5:1;el('acceptanceSse').value=mode==='batch'?50:3;}updatePlan();});
 for(const id of ['acceptanceSignature','acceptanceSse'])el(id).addEventListener('input',()=>{el('acceptanceSampling').value='custom';updatePlan();});
-async function previewClaudePlan(matrixOnly=false){
- const button=el(matrixOnly?'acceptanceMatrixPreview':'claudePlanPreview');if((!matrixOnly&&selected!=='claude')||button.disabled)return;
+async function previewClaudePlan(matrixOnly=false,sourceId=''){
+ const button=el(sourceId||(matrixOnly?'acceptanceMatrixPreview':'claudePlanPreview'));if((!matrixOnly&&selected!=='claude')||button.disabled)return;
  if(!serviceReady){message('请求预览需要验收服务。请启动或恢复当前工作台服务后重试。',true);return;}
+ try{validateProductionConfiguration();}catch(error){message(error.message,true);return;}
  const {key:discardedKey,...payload}=config();
  button.disabled=true;button.textContent='正在生成请求预览…';message('');
  try{
   const data=await(await api(matrixOnly?'/api/acceptance/plan':'/api/claude/plan',{method:'POST',body:JSON.stringify(payload)})).json();
   const requests=Array.isArray(data.requests)?data.requests:[];
   const summary=el('claudePlanSummary');summary.replaceChildren();
-  if(data.matrix_only)summary.append(make('p','','以下请求数仅为附加矩阵，不包含原专项；不会因预览产生模型调用。'));
+  if(data.matrix_only)summary.append(make('p','','以下计划不包含原专项，附加矩阵与业务验证分别列出；不会因预览产生模型调用。'));
   const tokenEstimate=data.token_estimate,tokenText=tokenEstimate&&typeof tokenEstimate==='object'?`${tokenEstimate.cache_total_target_input_tokens??'未提供'} 输入 token（缓存请求合计目标）`:tokenEstimate??'未提供';
   for(const [label,value] of [[data.request_count_is_maximum?'请求数上限':'计划请求',data.request_count??'按前置结果确定'],['Token 估算',tokenText],['当前模型',payload.model||'模板模型']]){const item=make('div','claude-plan-stat');item.append(make('small','',label),make('strong','',String(value)));summary.append(item);}
   if(tokenEstimate&&typeof tokenEstimate==='object'){
@@ -327,17 +420,20 @@ async function previewClaudePlan(matrixOnly=false){
   if(Array.isArray(data.pressure_stages)&&data.pressure_stages.length)summary.append(make('p','',`阶梯压测：${data.pressure_stages.map(x=>`并发 ${x.concurrency} × ${x.requests} 请求`).join(' → ')}；每阶段完成后再升级，不自动重试。`));
   if(data.request_count_is_maximum)summary.append(make('p','',`包含 ${data.conditional_requests??0} 个条件请求；只有前置响应提供所需工具结果或签名时才会执行，实际数量以进度和报告为准。`));
   if((payload.models||[]).length>1)summary.append(make('p','',`已选 ${payload.models.length} 个模型；以下为当前模型请求模板，批量测试会逐个替换模型 ID。`));
+  const productionPlan=data.production||data.production_plan;if(productionPlan?.enabled){const p=productionPlan.configuration||payload.production;summary.append(make('p','production-plan-highlight',`追加业务验证：${p.profile} · 请求上限 ${p.max_requests}（含重试与多轮工具）· 观察 ${duration(p.duration_seconds||0)} · 并发上限 ${p.concurrency}。与原专项、参数矩阵分开计数。`));if(productionPlan.estimated_tokens!=null)summary.append(make('p','',`业务 Token 调度估算：${metricText(productionPlan.estimated_tokens)}；估算预算并非实际账单硬上限。`));}
   const limitations=el('claudePlanLimitations');limitations.replaceChildren();
   const notes=Array.isArray(data.limitations)?data.limitations:data.limitations?[data.limitations]:[];
   limitations.hidden=!notes.length;if(notes.length){limitations.append(make('b','','执行边界'));const list=make('ul');for(const note of notes)list.append(make('li','',typeof note==='string'?note:JSON.stringify(note)));limitations.append(list);}
   const list=el('claudePlanRequests');list.replaceChildren();const groups=new Map();
   for(const request of requests){const module=String(request.module||'protocol');if(!groups.has(module))groups.set(module,[]);groups.get(module).push(request);}
   for(const [module,items] of groups){const section=make('section','claude-plan-module'),definition=acceptanceModules.claude.find(item=>item.id===module);section.append(make('h3','',({multimodal:'多模态识别与多图对照'}[module]||definition?.title||module)));for(const request of items){const details=make('details','claude-plan-request'),head=make('summary');head.append(make('strong','',request.title||request.id||'测试请求'),make('span','',`${request.method||'POST'}${request.repeat?' × '+request.repeat:''}${request.conditional?' · 条件请求':''}`));details.append(head,make('p','claude-plan-endpoint',request.url||'使用当前渠道端点'));if(request.notes){const text=Array.isArray(request.notes)?request.notes.join('；'):String(request.notes);details.append(make('p','claude-plan-request-note',text));}const code=make('pre','',JSON.stringify(request.body??{},null,2));code.setAttribute('aria-label',(request.title||request.id||'测试')+' 请求体');details.append(code);section.append(details);}list.append(section);}
+  if(productionPlan?.enabled&&Array.isArray(productionPlan.workloads)){const section=make('section','claude-plan-module');section.append(make('h3','','业务验证请求模板'));for(const workload of productionPlan.workloads){const row=make('details','claude-plan-request');row.append(make('summary','',workload.label||workloadLabels[workload.id]||workload.id),make('p','claude-plan-request-note',`每个任务包含 ${workload.requests_per_task??'按交互决定'} 次请求。${metricText(workload.expected||'按完整业务结果判断。')}`),make('pre','',JSON.stringify(workload.example_request||workload.request||workload.example||{},null,2)));section.append(row);}list.append(section);}
   if(!requests.length)list.append(make('p','','当前选择未生成可执行请求。请检查已启用模块和接口格式。'));
   el('claudePlanDialog').showModal();
- }catch(error){message('请求预览失败：'+error.message,true);}finally{button.disabled=false;button.textContent=matrixOnly?'预览矩阵请求与用量':'查看测试请求';}
+ }catch(error){message('请求预览失败：'+error.message,true);}finally{button.disabled=false;button.textContent=sourceId==='claudeProductionPreview'?'预览业务与矩阵计划':matrixOnly?'预览矩阵请求与用量':'查看测试请求';}
 }
 el('claudePlanPreview').addEventListener('click',()=>previewClaudePlan(false));
+el('claudeProductionPreview').addEventListener('click',()=>previewClaudePlan(true,'claudeProductionPreview'));
 el('acceptanceMatrixPreview').addEventListener('click',()=>previewClaudePlan(true));
 el('acceptanceMatrixProfile').addEventListener('change',updatePlan);
 el('claudePlanClose').addEventListener('click',()=>el('claudePlanDialog').close());
@@ -357,5 +453,7 @@ function invalidateModels(){modelFetchEpoch++;modelController?.abort();modelCont
 for(const id of ['acceptanceBase','acceptanceKey','acceptanceAuth','claudeAuth','claudeFormat'])el(id).addEventListener('input',invalidateModels);
 el('acceptanceModels').addEventListener('click',loadModels);
 acceptanceModelPicker=window.ModelMultiselect?.attach(el('acceptanceModel'),{label:'渠道模型',max:30,ids:{wrapper:'acceptanceModelPicker',menu:'acceptanceModelMenu',search:'acceptanceModelSearch',list:'acceptanceModelList',status:'acceptanceModelStatus',toggle:'acceptanceModelToggle',clear:'acceptanceModelClear',all:'acceptanceModelShowAll'},onChange:(ids)=>{el('acceptanceModelHint').textContent=ids.length>1?`已选 ${ids.length} 个模型，将按顺序逐个测试。`:'已选 1 个模型，可继续勾选或开始测试。';}});
+productionDefaults=productionConfiguration();
+updateProductionSettings();
 connect();
 })();

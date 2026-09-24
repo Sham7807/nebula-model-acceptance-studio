@@ -906,7 +906,7 @@ def _sample_identifiers(result):
     if result.get('suite') == 'batch_acceptance':
         return {'model-%s-%s' % (i, identity) for i,item in enumerate(_list(result.get('results')),1)
                 for identity in _sample_identifiers(_dict(item.get('result')))}
-    samples = _list(result.get('samples')) + _list(_dict(result.get('matrix_validation')).get('samples')) + _list(_dict(result.get('matrix_validation')).get('evidence_samples'))
+    samples = _list(result.get('samples')) + _list(_dict(result.get('matrix_validation')).get('samples')) + _list(_dict(result.get('matrix_validation')).get('evidence_samples')) + _list(_dict(result.get('production_validation')).get('samples'))
     requests = _list(_dict(result.get('transport')).get('requests')) + _list(result.get('browser_requests'))
     return {_text(row.get('id') or row.get('request_id')) for row in samples + requests if isinstance(row,dict) and (row.get('id') or row.get('request_id'))}
 
@@ -1101,7 +1101,30 @@ def build_report_data(result):
     from report_brief import build_summary
     data = _build_report_data(result)
     data['executive_summary'] = build_summary(_dict(result), data['checks'], data['score'])
+    from channel_admission import evaluate
+    if result.get('suite')=='batch_acceptance':
+        data['model_admissions']=[{'model':item.get('model'),'run_id':item.get('run_id'),'admission':evaluate(item['result'])}
+                                  for item in result.get('results',[]) if isinstance(item.get('result'),dict)]
+    else:
+        data['admission']=evaluate(result)
+        data['executive_summary']['admission']=data['admission']
+        grade=data['executive_summary'].get('resource_grade') or {}
+        if data['admission']['status']!='approved' and grade.get('level')!='unknown':
+            grade['provisional']=True
+            grade['note']='能力等级仅供参考；'+data['admission']['label']+'。'+str(grade.get('note') or '')
     return data
+
+def _production_checks(result):
+    production=_dict(result.get('production_validation'))
+    checks=_claude_checks({'cases':production.get('cases'),'samples':production.get('samples'),'configuration':result.get('configuration')})
+    for check in checks:
+        check['category']='生产业务验证'
+        check['metadata']['source']='production_validation'
+        # Production admission is a hard gate, not extra points to compensate
+        # for a failed capability or a second scoring of the same request.
+        check['score_applicable']=False
+        check['evidence_category']='aggregate'
+    return checks
 
 
 def _build_report_data(result):
@@ -1127,7 +1150,7 @@ def _build_report_data(result):
                 entry['id'] = 'batch-%s-%s' % (len(checks) + 1, _text(entry.get('id')))
                 entry['title'] = '%s · %s' % (model, _text(entry.get('title') or entry.get('id')))
                 entry['model'] = model
-                child_samples = _list(child.get('samples')) + _list(_dict(child.get('matrix_validation')).get('samples'))
+                child_samples = _list(child.get('samples')) + _list(_dict(child.get('matrix_validation')).get('samples')) + _list(_dict(child.get('production_validation')).get('samples'))
                 child_request_ids = {_text(sample.get('id')) for sample in child_samples if isinstance(sample, dict)}
                 child_request_ids.update(_text(r.get('request_id') or r.get('id')) for r in _list(_dict(child.get('transport')).get('requests')) if isinstance(r, dict))
                 for key in ('request_ids', 'sample_ids'):
@@ -1154,7 +1177,7 @@ def _build_report_data(result):
     claude = suite in ("claude", "claude_acceptance")
     openai = result.get('request_format')=='openai' or _dict(result.get('configuration')).get('request_format')=='openai' or (not cc and not claude and _dict(result.get('configuration')).get('think_mode')=='openai')
     checks = _cc_checks(result) if cc else _claude_checks(result) if claude else _kvv_checks(result)
-    checks = [_explain_check(check) for check in checks + _matrix_checks(result)]
+    checks = [_explain_check(check) for check in checks + _matrix_checks(result) + _production_checks(result)]
     summary = _dict(result.get("native_summary") or result.get("summary"))
     remote = [check for check in checks if not check.get("local_only")]
     local = [check for check in checks if check.get("local_only")]

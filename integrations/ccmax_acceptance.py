@@ -429,6 +429,7 @@ def _safe_proxy_error(error, proxy):
 
 def _collect_sample(spec, settings, key, transport, cancelled):
     started = time.monotonic()
+    started_at = time.time()
     proxy = _outbound_proxy()
     openai = settings.get("request_format") == "openai"
     parser = ccmax_openai.SSEAnalysis() if openai else SSEAnalysis()
@@ -444,6 +445,40 @@ def _collect_sample(spec, settings, key, transport, cancelled):
     state = {"response": None, "network_stream": None, "reason": None}
     decoder = codecs.getincrementaldecoder("utf-8")("replace")
     chunks, received = [], 0
+    evidence_limit = spec.get("max_evidence_bytes", MAX_EVIDENCE_BYTES)
+    if not isinstance(evidence_limit, int) or isinstance(evidence_limit, bool) or not 1024 <= evidence_limit <= MAX_EVIDENCE_BYTES:
+        evidence_limit = MAX_EVIDENCE_BYTES
+    # Effective output is text or tool-argument content, never an SSE heartbeat,
+    # role marker, usage update or thinking-only delta.  Production acceptance
+    # uses this separately from time to first response byte.
+    content_times = []
+    content_chars = 0
+
+    def observe_content(events):
+        nonlocal content_chars
+        for event in events:
+            data = event.get("data") or {}
+            if not isinstance(data, dict):
+                continue
+            fragments = []
+            if openai:
+                for choice in data.get("choices", []) if isinstance(data.get("choices"), list) else []:
+                    delta = choice.get("delta", {}) if isinstance(choice, dict) else {}
+                    if not isinstance(delta, dict): continue
+                    fragments.append(delta.get("content"))
+                    for call in delta.get("tool_calls", []) if isinstance(delta.get("tool_calls"), list) else []:
+                        function = call.get("function", {}) if isinstance(call, dict) else {}
+                        if isinstance(function, dict): fragments.append(function.get("arguments"))
+            else:
+                delta = data.get("delta") or {}
+                block = data.get("content_block") or {}
+                if isinstance(delta, dict) and delta.get("type") in ("text_delta", "input_json_delta"):
+                    fragments.append(delta.get("text") if delta.get("type") == "text_delta" else delta.get("partial_json"))
+                if isinstance(block, dict) and block.get("type") == "text": fragments.append(block.get("text"))
+            count = sum(len(part) for part in fragments if isinstance(part, str) and part)
+            if count:
+                content_times.append(round((time.monotonic() - started) * 1000, 3))
+                content_chars += count
 
     def watch():
         while not done.wait(0.025):
@@ -501,12 +536,17 @@ def _collect_sample(spec, settings, key, transport, cancelled):
                                 state["reason"] = state["reason"] or "cancelled"
                                 break
                             if not received: sample["evidence"]["first_byte_ms"] = round((time.monotonic() - started) * 1000)
-                            available = MAX_EVIDENCE_BYTES - received
+                            available = evidence_limit - received
                             text = decoder.decode(part[:available])
                             chunks.append(text)
                             received += len(part[:available])
                             if is_stream and response.is_success:
+                                previous_events = len(parser.events)
                                 parser.feed(text)
+                                observe_content(parser.events[previous_events:])
+                                if spec.get("cancel_after_content") and content_times and not parser.stops:
+                                    state["reason"] = "client_cancel_probe"
+                                    break
                             if len(part) > available:
                                 state["reason"] = "evidence_limit"
                                 break
@@ -526,9 +566,24 @@ def _collect_sample(spec, settings, key, transport, cancelled):
         parser.finish()
     sample["response"]["body"] = "".join(chunks)
     sample["duration_ms"] = round((time.monotonic() - started) * 1000)
+    sample["started_at"] = started_at
+    sample["finished_at"] = started_at + sample["duration_ms"] / 1000
     sample["termination"] = state["reason"] or ("network_error" if error else "eof")
     sample["evidence"]["bytes"] = received
     sample["evidence"]["truncated"] = state["reason"] == "evidence_limit"
+    sample["evidence"]["first_content_ms"] = content_times[0] if content_times else None
+    sample["evidence"]["last_content_ms"] = content_times[-1] if content_times else None
+    sample["evidence"]["content_event_count"] = len(content_times)
+    sample["evidence"]["content_chars"] = content_chars
+    sample["evidence"]["max_content_gap_ms"] = max((b - a for a, b in zip(content_times, content_times[1:])), default=None)
+    # Include a stalled tail after the final visible delta, including timeouts.
+    # This remains separate from initial first-content latency.
+    sample["evidence"]["content_tail_gap_ms"] = max(0, sample["duration_ms"] - content_times[-1]) if content_times else None
+    if content_times:
+        sample["evidence"]["max_content_gap_ms"] = max(sample["evidence"]["max_content_gap_ms"] or 0, sample["evidence"]["content_tail_gap_ms"])
+    if spec.get("cancel_after_content"):
+        sample["evidence"]["client_response_closed"] = bool(state["response"] is not None and state["response"].is_closed)
+        sample["evidence"]["upstream_cancellation_confirmed"] = False
     if error:
         sample["evidence"]["transport_error"] = error
     if parser.stop_at is not None:
