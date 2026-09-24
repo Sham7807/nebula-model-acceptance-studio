@@ -5,7 +5,6 @@ successful response, not proof of tool execution, cache hits or model identity.
 """
 from copy import deepcopy
 import json
-import time
 
 
 DIMENSIONS = [('multimodal', '多模态能力'), ('tools', '工具调用'), ('max_tokens', 'max_tokens / 长度控制'),
@@ -193,8 +192,14 @@ def normalize_browser_report(payload):
         if model not in models: models.append(model)
         if base not in bases: bases.append(base)
         configurations.append({**config, 'model': model, 'base': base})
-        created = _number(record.get('created_at'), time.time())
-        started.append(created); finished.append(created + _number(record.get('duration_ms', result.get('elapsedMs'))) / 1000)
+        from report_brief import epoch, number
+        created = epoch(record.get('started_at', record.get('created_at')))
+        end = epoch(record.get('finished_at'))
+        elapsed = number(record.get('duration_ms', result.get('elapsedMs')))
+        if end is None and created is not None and elapsed is not None:
+            end = created + elapsed / 1000
+        if created is not None and end is not None and end >= created:
+            started.append(created); finished.append(end)
         prefix = 'record-%s' % (index + 1)
         record_requests, request_sources, request_aliases = [], [], {}
         for ri, raw in enumerate(_list(result.get('requests'))):
@@ -288,7 +293,10 @@ def normalize_browser_report(payload):
             configuration[key] = values[0]
     return {'suite': 'browser_report', 'report_kind': 'general' if general else 'basic', 'status': 'completed',
             'run_id': payload.get('run_id') or 'browser-export', 'configuration': configuration,
-            'started_at': min(started), 'finished_at': max(finished), 'cases': cases, 'browser_requests': requests,
+            'started_at': min(started) if len(started) == len(records) else None,
+            'finished_at': max(finished) if len(finished) == len(records) else None,
+            'timing_source': '保存记录的完整运行区间；多条记录取最早开始至最晚结束，包含间隔，并发耗时不累加。' if len(started) == len(records) else '部分记录缺少起止时间或实际耗时；不使用导出时间补造测试耗时。',
+            'cases': cases, 'browser_requests': requests,
             'summary': {'total': len(cases), 'completed': len(cases), **counts},
             'verdict': {'status': overall, 'label': '存在失败或证据不足' if overall != 'passed' else '本轮已执行检查通过',
                         'detail': '基础请求结果只代表本轮实际观察；专项能力需查看逐项覆盖。' if overall == 'passed' else '请按模型和请求证据查看失败、取消或无法判定项。'},

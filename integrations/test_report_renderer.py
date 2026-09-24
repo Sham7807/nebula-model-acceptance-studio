@@ -4,6 +4,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from report_renderer import render_report, evidence_records
 
@@ -17,6 +18,89 @@ class Scripts(HTMLParser):
 
 
 class ReportTests(unittest.TestCase):
+    def test_all_suites_put_scores_first_and_complete_matrix_last(self):
+        from browser_reports import normalize_browser_report
+        fixtures = [
+            {'suite': suite, 'status': 'completed', 'configuration': {'model': 'layout-fixture'},
+             'summary': {'total': 1, 'completed': 1}, 'checks': [], 'cases': [], 'samples': []}
+            for suite in ('ccmax_acceptance', 'claude_acceptance', 'kvv11')
+        ]
+        fixtures.append(normalize_browser_report({'records': [{'kind': 'general', 'model': 'layout-fixture',
+            'result': {'checks': [{'name': '基本请求', 'status': 'passed', 'result': '收到响应'}]}}]}))
+        for fixture in fixtures:
+            with self.subTest(suite=fixture['suite']):
+                report = render_report(fixture).decode()
+                ids = ['overview', 'modules', 'score', 'setup', 'findings', 'checks', 'requests', 'limits', 'all-results']
+                positions = [report.index('id="'+identity+'"') for identity in ids]
+                self.assertEqual(positions, sorted(positions))
+                self.assertNotIn('<section', report[positions[-1]+len('id="all-results"'):report.index('<footer>')])
+                self.assertEqual(report.count('<div class="executive-score">'), 1)
+                self.assertNotIn('<div class="score-total">', report)
+                self.assertNotIn('<div class="module-total">', report)
+                nav = report.split('<nav class="nav">', 1)[1].split('</nav>', 1)[0]
+                self.assertLess(nav.index('href="#score"'), nav.index('href="#all-results"'))
+
+    def test_executive_brief_has_bounded_safe_points_evidence_and_wall_time(self):
+        items = [{'id':str(i), 'label':'核心能力 '+str(i), 'status':'failed',
+                  'text':'输出上限未生效 <script>unsafe()</script>', 'check_ids':['length-test', 'missing']} for i in range(8)]
+        data = {'checks':[{'id':'length-test', 'status':'failed', 'title':'限长测试'}],
+                'score':{'total':84, 'weighted_total':84},
+                'executive_summary':{'headline':'基础可用，长度限制有异常', 'detail':'按本轮请求证据判读。',
+                    'overall_score':84, 'resolution_percent':90, 'items':items,
+                    'duration':{'total_ms':91345, 'label':'1 分 31 秒',
+                        'started_at':'2026-09-24 12:00:00 +08:00', 'finished_at':'2026-09-24 12:01:31 +08:00',
+                        'request_count':12,'request_p50_ms':2000,'request_p95_ms':4000,
+                        'stages':[{'concurrency':2,'duration_label':'6 秒'}]}}}
+        with patch('report_renderer.build_report_data', return_value=data):
+            report = render_report({'suite':'claude_acceptance', 'status':'completed'}).decode()
+        overview = report.split('id="overview"',1)[1].split('</section>',1)[0]
+        self.assertEqual(overview.count('<article class="brief-item failed">'),6)
+        self.assertIn('<strong>84</strong>', overview)
+        self.assertIn('证据可判定率 <b>90%</b>', overview)
+        self.assertIn('1 分 31 秒', overview)
+        self.assertIn('2026-09-24 12:01:31 +08:00', overview)
+        self.assertIn('并发请求耗时不累加', overview)
+        self.assertIn('请求耗时 P50 <b>2.00 秒</b>', overview)
+        self.assertIn('请求耗时 P95 <b>4.00 秒</b>', overview)
+        self.assertIn('请求耗时样本 <b>12 次</b>', overview)
+        self.assertIn('并发 2 <b>6 秒</b>', overview)
+        self.assertIn('href="#check-1"', overview)
+        self.assertNotIn('href="#missing"', overview)
+        self.assertIn('&lt;script&gt;unsafe()', overview)
+        self.assertNotIn('<script>unsafe()', overview)
+
+    def test_score_card_counts_only_scored_checks_and_keeps_observations_separate(self):
+        stats = {'label':'限长', 'score':99, 'status':'failed', 'weight':10,
+                 'covered':76, 'conclusive':73, 'scored_passed':72, 'scored_failed':1,
+                 'capability_observed':73, 'pending_count':0, 'observation_count':3,
+                 'counts':{'passed':75,'failed':1,'inconclusive':0}}
+        with patch('report_renderer.build_report_data', return_value={
+                'score':{'total':99, 'modules':[stats], 'dimensions':[stats]}}):
+            report = render_report({'suite':'claude_acceptance', 'status':'completed'}).decode()
+        modules = report.split('id="modules"',1)[1].split('</section>',1)[0]
+        dimensions = report.split('id="score"',1)[1].split('</section>',1)[0]
+        for section in (modules, dimensions):
+            self.assertIn('计分 73 项：通过 72 / 失败 1', section)
+            self.assertIn('对照 / 观察 3 项', section)
+            self.assertNotIn('通过 75', section)
+
+    def test_old_or_empty_records_have_explicit_unknown_brief_score_and_duration(self):
+        with patch('report_renderer.build_report_data', return_value={'score':{'total':None}}):
+            report = render_report({'suite':'kvv11', 'status':'cancelled'}).decode()
+        overview = report.split('id="overview"',1)[1].split('</section>',1)[0]
+        self.assertIn('综合验收分</span><div><strong>—</strong>', overview)
+        self.assertIn('证据可判定率 <b>未记录</b>', overview)
+        self.assertIn('测试总耗时</span><strong>未记录</strong>', overview)
+
+    def test_observed_request_window_is_not_labeled_as_full_test_duration(self):
+        with patch('report_renderer.build_report_data', return_value={'executive_summary':{'duration':{
+                'kind':'request_window','label':'20 秒','source':'仅已采集请求的观测窗口，不代表全程耗时。'}}}):
+            report = render_report({'suite':'kvv11', 'status':'completed'}).decode()
+        overview = report.split('id="overview"',1)[1].split('</section>',1)[0]
+        self.assertIn('请求观测时段</span><strong>20 秒</strong>', overview)
+        self.assertIn('仅已采集请求的观测窗口，不代表全程耗时', overview)
+        self.assertNotIn('总耗时为本轮实际经过时间', overview)
+
     def test_vendor_text_is_escaped_and_credentials_redacted(self):
         hostile='</pre><script>alert(1)</script><img onerror="alert(2)">'
         result={'suite':'ccmax_acceptance','status':'completed','configuration':{'model':hostile,'key':'sk-'+'A'*30},

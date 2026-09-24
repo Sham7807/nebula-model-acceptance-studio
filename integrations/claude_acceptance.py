@@ -343,7 +343,7 @@ GUIDANCE = {
 }
 
 
-def _aggregate(settings,samples,cancelled,planned):
+def _aggregate(settings,samples,cancelled,planned,stress_duration_ms=None):
     baseline=next((s for s in samples if s["id"]=="baseline"),None)
     baseline_ok=baseline and baseline["status"]=="passed"
     for s in samples:
@@ -410,6 +410,7 @@ def _aggregate(settings,samples,cancelled,planned):
             durations=[s["duration_ms"] for s,_ in rows if isinstance(s.get("duration_ms"),(int,float))]; ttfb=[s["evidence"].get("first_byte_ms") for s,_ in rows if isinstance(s["evidence"].get("first_byte_ms"),(int,float))]
             check["metrics"]={"requested":settings["stress_requests"],"completed":len(rows),"concurrency":settings["stress_concurrency"],"success_rate":round(statuses.count("passed")/len(rows),4) if rows else None,"latency_p50_ms":_percentile(durations,.5),"latency_p95_ms":_percentile(durations,.95),"ttfb_p95_ms":_percentile(ttfb,.95),"http_statuses":{str(code):sum(_status(s)==code for s,_ in rows) for code in sorted({_status(s) for s,_ in rows},key=str)}}
             check['metrics']['semantic_match_rate']=round(sum(bool(s.get('evidence',{}).get('semantic_match')) for s,_ in rows)/len(rows),4) if rows else None
+            check['metrics']['duration_ms']=stress_duration_ms
             if len(rows)<settings["stress_requests"] and status=="passed": check["status"]="inconclusive"; check["detail"]+=" 未完成预定压测请求数。"
         checks.append(check)
     for check in checks:
@@ -462,13 +463,18 @@ def run(config,emit=None,cancelled=None):
                             block["signature"]=("A" if signature[0]!="A" else "B")+signature[1:];changed=True;break
                     if changed: break
                 if changed: execute({"id":"thinking-mutated","check":"signature_mutation","probe":"signature_mutation","body":mutated})
+    stress_duration_ms=None
     if "stress" in settings["enabled_modules"] and not is_cancelled():
         stress=[{"id":"stress-%03d"%(i+1),"check":"stress","probe":"stress","body":_convert(_body(settings,"Reply exactly STRESS-OK.",max_tokens=512),settings)} for i in range(settings["stress_requests"])]
         # Workers check cancellation before each request; no retries or detached jobs.
+        # Measure the whole load stage, including queued requests and worker drain.
+        # Summing individual request latencies would overcount concurrent time.
+        stress_started=time.monotonic()
         with ThreadPoolExecutor(max_workers=settings["stress_concurrency"],thread_name_prefix="claude-stress") as pool:
             futures=[pool.submit(execute,s) for s in stress]
             for f in as_completed(futures): f.result()
-    result=_aggregate(settings,samples,is_cancelled(),total)
+        stress_duration_ms=round((time.monotonic()-stress_started)*1000,2)
+    result=_aggregate(settings,samples,is_cancelled(),total,stress_duration_ms=stress_duration_ms)
     notify({"type":"result","suite":"claude_acceptance","status":result["status"],"summary":result["summary"],"total":len(samples),"completed":len(samples)})
     return result
 
