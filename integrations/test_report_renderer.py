@@ -54,7 +54,7 @@ class ReportTests(unittest.TestCase):
         with patch('report_renderer.build_report_data', return_value=data):
             report = render_report({'suite':'claude_acceptance', 'status':'completed'}).decode()
         overview = report.split('id="overview"',1)[1].split('</section>',1)[0]
-        self.assertEqual(overview.count('<article class="brief-item failed">'),6)
+        self.assertEqual(overview.count('<article class="brief-item attention">'),6)
         self.assertIn('<strong>84</strong>', overview)
         self.assertIn('证据可判定率 <b>90%</b>', overview)
         self.assertIn('1 分 31 秒', overview)
@@ -80,9 +80,72 @@ class ReportTests(unittest.TestCase):
         modules = report.split('id="modules"',1)[1].split('</section>',1)[0]
         dimensions = report.split('id="score"',1)[1].split('</section>',1)[0]
         for section in (modules, dimensions):
-            self.assertIn('计分 73 项：通过 72 / 失败 1', section)
+            self.assertIn('计分 73 项：通过 72 / 异常 1', section)
             self.assertIn('对照 / 观察 3 项', section)
             self.assertNotIn('通过 75', section)
+            self.assertIn('部分异常', section)
+            self.assertIn('tone-attention', section)
+
+    def test_summary_tones_and_grade_preserve_specific_failures(self):
+        data = {'checks':[{'id':'cap-10', 'status':'failed', 'title':'max_tokens=10',
+                           'observed':'返回 28 tokens', 'raw':{'vendor_message':'未通过：保留原始日志'}}],
+                'score':{'total':84},
+                'executive_summary':{'headline':'基础可用，输出上限需要核查', 'overall_score':84,
+                    'resource_grade':{'label':'中等资源', 'level':'medium', 'provisional':True,
+                        'note':'本轮评分 84 / 100；仍有检查等待补充证据。',
+                        'criteria':['90–100：优质资源','70–89：中等资源','0–69：低等级资源']},
+                    'items':[{'label':'基础协议','status':'failed','status_label':'部分异常','tone':'attention',
+                              'text':'8 项符合预期，1 项存在异常。','check_ids':['cap-10']},
+                             {'label':'输出限长','status':'failed','status_label':'观察到超限','tone':'risk',
+                              'text':'max_tokens=10，返回 28 tokens。','check_ids':['cap-10']},
+                             {'label':'缓存复用','status':'inconclusive','status_label':'待补充证据','tone':'neutral',
+                              'text':'缺少有效暖请求计数。'}]}}
+        with patch('report_renderer.build_report_data', return_value=data):
+            report=render_report({'suite':'claude_acceptance','status':'completed'}).decode()
+        overview=report.split('id="overview"',1)[1].split('</section>',1)[0]
+        self.assertIn('resource-grade grade-medium',overview)
+        self.assertIn('中等资源',overview)
+        self.assertIn('暂定 · 证据待完善',overview)
+        self.assertIn('90–100：优质资源',overview)
+        self.assertIn('<strong>84</strong>',overview)
+        self.assertIn('class="brief-item attention"',overview)
+        self.assertIn('class="badge attention">部分异常',overview)
+        self.assertIn('class="brief-item risk"',overview)
+        self.assertIn('class="brief-item neutral"',overview)
+        self.assertNotIn('未通过',overview)
+        self.assertIn('max_tokens=10，返回 28 tokens',overview)
+        self.assertIn('class="badge failed">本项异常',report)
+        self.assertIn('data-status="failed"',report)
+        self.assertIn('未通过：保留原始日志',report)
+
+    def test_no_decisive_score_and_all_anomalies_have_distinct_aggregate_labels(self):
+        stats=[{'label':'全部异常','status':'failed','covered':2,'conclusive':2,'score':0,
+                'scored_passed':0,'scored_failed':2},
+               {'label':'仅观察','status':'inconclusive','covered':2,'conclusive':0,'score':None,
+                'scored_passed':0,'scored_failed':0,'observation_count':2}]
+        with patch('report_renderer.build_report_data', return_value={'score':{'modules':stats,'dimensions':stats}}):
+            report=render_report({'suite':'kvv11','status':'completed'}).decode()
+        for identity in ('modules','score'):
+            section=report.split('id="'+identity+'"',1)[1].split('</section>',1)[0]
+            self.assertIn('需重点核查',section)
+            self.assertIn('待补充证据',section)
+            self.assertIn('tone-risk',section)
+            self.assertIn('tone-neutral',section)
+            self.assertNotIn('未通过',section)
+
+    def test_grade_and_custom_status_are_escaped_and_css_tone_is_allowlisted(self):
+        hostile='"><img src=x onerror=alert(1)>'
+        data={'executive_summary':{'resource_grade':{'label':hostile,'level':hostile,
+                'note':hostile,'criteria':hostile}, 'items':[{'label':'样例','status':'failed',
+                'status_label':hostile,'tone':hostile,'text':'局部异常'}]}}
+        with patch('report_renderer.build_report_data', return_value=data):
+            report=render_report({'suite':'kvv11','status':'completed'}).decode()
+        parser=Scripts();parser.feed(report)
+        self.assertEqual(parser.event_attributes,[])
+        self.assertEqual(parser.scripts,1)
+        self.assertIn('resource-grade grade-unknown',report)
+        self.assertIn('brief-item attention',report)
+        self.assertIn('&lt;img',report)
 
     def test_old_or_empty_records_have_explicit_unknown_brief_score_and_duration(self):
         with patch('report_renderer.build_report_data', return_value={'score':{'total':None}}):
@@ -173,7 +236,7 @@ class GPTReportTests(unittest.TestCase):
         from browser_reports import normalize_browser_report
         html = render_report(normalize_browser_report(payload)).decode()
         self.assertIn('输入 tokens</th><td>未记录', html)
-        self.assertIn('SVG 输出</th><td><span class="badge failed">未通过', html)
+        self.assertIn('SVG 输出</th><td><span class="badge failed">本项异常', html)
 
     def test_gpt_derived_or_inapplicable_total_is_not_verified(self):
         from browser_reports import normalize_browser_report

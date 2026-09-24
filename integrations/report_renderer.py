@@ -11,7 +11,7 @@ import statistics
 from acceptance_results import decorate
 from report_content import build_report_data, _request_parameters, REASON_CODE_LABELS
 
-STATUS = {'passed':'通过', 'failed':'未通过', 'inconclusive':'无法判定', 'skipped':'已跳过',
+STATUS = {'passed':'符合预期', 'failed':'本项异常', 'inconclusive':'待补充证据', 'skipped':'已跳过',
           'not_covered':'未覆盖', 'cancelled':'已取消', 'completed':'已完成', 'error':'运行错误', 'running':'运行中'}
 TERMINATIONS = {'eof':'响应已正常结束', 'done':'收到 [DONE]', 'connection_grace_exceeded':'收尾事件后响应仍未结束',
                 'timeout':'请求超时', 'total_timeout':'超过总时限', 'idle_timeout':'读取等待超时',
@@ -45,9 +45,26 @@ def prose(value):
     return esc(value or '未记录').replace('\n','<br>')
 
 
-def badge(status):
-    style=status if status in STATUS else 'inconclusive'
-    return '<span class="badge '+style+'">'+esc(STATUS.get(status,status or '未记录'))+'</span>'
+def badge(status, label=None, tone=None):
+    style=tone if tone in ('passed','attention','risk','neutral') else status if status in STATUS else 'inconclusive'
+    return '<span class="badge '+style+'">'+esc(label or STATUS.get(status,status or '未记录'))+'</span>'
+
+
+def aggregate_presentation(stats):
+    """Describe mixed evidence without turning one exception into a blanket verdict."""
+    passed=stats.get('scored_passed') or 0
+    failed=stats.get('scored_failed') or 0
+    if failed:
+        return ('部分异常','attention') if passed else ('需重点核查','risk')
+    if passed:
+        pending=stats.get('status') in ('inconclusive','cancelled') or stats.get('capability_observed',0)>stats.get('conclusive',0)
+        return '已测项符合预期','attention' if pending else 'passed'
+    status=stats.get('status')
+    if status == 'passed':
+        return '已测项符合预期','passed'
+    if status == 'failed':
+        return '需核查','attention'
+    return {'not_covered':'本轮未覆盖','skipped':'本轮已跳过','cancelled':'测试已取消'}.get(status,'待补充证据'),'neutral'
 
 
 def seconds(ms):
@@ -288,8 +305,8 @@ def render_report(result, directory=None):
                     matched[identity_id]=request_by_id[identity_id]
         failed=sum(row.get('status') in ('failed','error') for row in matched.values())
         evidence=('<span class="result-stat">'+str(len(matched))+' 次 / '+str(failed)+' 次</span>' if matched else '<span class="result-unlinked">未记录关联</span>')
-        result_rows.append('<tr><td><span class="result-number">'+f'{index:02d}'+'</span><a class="result-name" href="#check-'+str(index)+'">'+esc(check.get('title') or check.get('id'))+'</a></td><td>'+excerpt(check.get('method'))+'</td><td><div class="result-observation"><b>预期</b><br>'+excerpt(check.get('expected'))+'</div><div class="result-observation"><b>实际</b><br>'+excerpt(check.get('observed_summary') or check.get('observed'))+'</div></td><td>'+evidence+'<small>请求 / 标为失败</small></td><td class="result-status">'+badge(check.get('status'))+('</td></tr>'))
-    all_results_html='<section id="all-results" class="all-results"><div class="section-head"><div><span class="index">RESULTS / COMPLETE MATRIX</span><h2>全项测试结果（'+str(len(checks))+' 项）</h2></div></div><p class="all-results-note">请求数来自已保存且与该项明确关联的证据；同一请求可支撑多项检查，不能逐行相加当作总请求数。“标为失败”保留请求记录的状态，参数拒绝等负向用例请结合预期判读。</p><div class="results-scroll"><table class="results-table"><thead><tr><th>测试项</th><th>测试方法</th><th>预期 / 实际结果</th><th>证据次数</th><th>检查状态</th></tr></thead><tbody>'+''.join(result_rows)+'</tbody></table></div></section>'
+        result_rows.append('<tr><td><span class="result-number">'+f'{index:02d}'+'</span><a class="result-name" href="#check-'+str(index)+'">'+esc(check.get('title') or check.get('id'))+'</a></td><td>'+excerpt(check.get('method'))+'</td><td><div class="result-observation"><b>预期</b><br>'+excerpt(check.get('expected'))+'</div><div class="result-observation"><b>实际</b><br>'+excerpt(check.get('observed_summary') or check.get('observed'))+'</div></td><td>'+evidence+'<small>请求 / 异常记录</small></td><td class="result-status">'+badge(check.get('status'))+('</td></tr>'))
+    all_results_html='<section id="all-results" class="all-results"><div class="section-head"><div><span class="index">RESULTS / COMPLETE MATRIX</span><h2>全项测试结果（'+str(len(checks))+' 项）</h2></div></div><p class="all-results-note">请求数来自已保存且与该项明确关联的证据；同一请求可支撑多项检查，不能逐行相加当作总请求数。“异常记录”对应请求原始 failed/error 状态，参数拒绝等负向用例请结合预期判读。</p><div class="results-scroll"><table class="results-table"><thead><tr><th>测试项</th><th>测试方法</th><th>预期 / 实际结果</th><th>证据次数</th><th>检查状态</th></tr></thead><tbody>'+''.join(result_rows)+'</tbody></table></div></section>'
     toc_items=[('overview','01 · 结论总览'),('modules','02 · 验收模块'),('score','03 · 能力评分'),('setup','04 · 范围与配置'),('findings','05 · 问题、影响与建议'),('checks','06 · 逐项验收说明'),('requests','07 · 请求明细与证据')]
     if result.get('original_results'): toc_items.append(('original-results','08 · 原始评分、批量与日志'))
     toc_items.append(('limits','判读说明与原始数据'))
@@ -306,9 +323,18 @@ def render_report(result, directory=None):
     executive_items=[]
     for item in (executive.get('items') or [])[:6]:
         item_status=item.get('status') if item.get('status') in STATUS else 'inconclusive'
+        item_tone=item.get('tone') if item.get('tone') in ('passed','attention','risk','neutral') else ('passed' if item_status=='passed' else 'attention' if item_status in ('failed','error') else 'neutral')
+        item_label=item.get('status_label') or ('需核查' if item_status in ('failed','error') else STATUS.get(item_status))
         anchors=[check_anchors[identity] for identity in dict.fromkeys(item.get('check_ids') or []) if identity in check_anchors]
         item_links='<div class="brief-links">'+''.join('<a href="#'+anchor+'" aria-label="'+esc(str(item.get('label') or '结论')+' · 证据 '+str(index+1))+'">'+('查看证据' if len(anchors)==1 else '证据 '+str(index+1))+' ↗</a>' for index,anchor in enumerate(anchors[:3]))+'</div>' if anchors else ''
-        executive_items.append('<article class="brief-item '+item_status+'"><div class="brief-item-head"><h3>'+esc(item.get('label') or '本轮观察')+'</h3>'+badge(item_status)+'</div><p>'+prose(item.get('text'))+'</p>'+item_links+'</article>')
+        executive_items.append('<article class="brief-item '+item_tone+'"><div class="brief-item-head"><h3>'+esc(item.get('label') or '本轮观察')+'</h3>'+badge(item_status,item_label,item_tone)+'</div><p>'+prose(item.get('text'))+'</p>'+item_links+'</article>')
+    grade=executive.get('resource_grade') or {}
+    grade_level=grade.get('level') if grade.get('level') in ('high','medium','low','unknown') else 'unknown'
+    grade_label=grade.get('label') or '待评估'
+    grade_html='<div class="resource-grade grade-'+grade_level+'"><span class="grade-label">本轮资源评级</span><b class="grade-status">'+esc(grade_label)+'</b>'+('<small>暂定 · 证据待完善</small>' if grade.get('provisional') else '')+'</div>'
+    grade_note=grade.get('note') or '评级以本轮已判定检查为依据；未取得评分时不推定资源等级。'
+    grade_criteria=grade.get('criteria')
+    grade_html+='<p class="grade-note grade-detail">'+prose(grade_note)+'</p>'+('<details class="grade-criteria"><summary>查看评级标准与适用范围</summary><div>'+prose(grade_criteria)+'</div></details>' if grade_criteria else '')
     duration=executive.get('duration') or {}
     duration_title=duration.get('title') or ('请求观测时段' if duration.get('kind')=='request_window' else '测试总耗时')
     duration_note=duration.get('source') or ('总耗时为本轮实际经过时间；并发请求耗时不累加。' if duration.get('total_ms') is not None else '没有保存可确认的全程耗时；不使用请求耗时累加估算。')
@@ -324,10 +350,9 @@ def render_report(result, directory=None):
         stage_chips.append('<span>'+esc(label)+' <b>'+esc(stage.get('duration_label') or '未记录')+'</b></span>')
     duration_stages_html='<div class="executive-stage-times"><span class="field-label">各压测阶段耗时</span><div>'+''.join(stage_chips)+'</div></div>' if stage_chips else ''
     duration_html='<div class="executive-timing"><div><span>'+esc(duration_title)+'</span><strong>'+esc(duration.get('label') or '未记录')+'</strong></div><div><span>测试时间</span><p>'+esc(duration.get('started_at') or '未记录')+(' → '+esc(duration['finished_at']) if duration.get('finished_at') else '')+'</p><small>'+esc(duration_note)+'</small></div>'+duration_stats_html+duration_stages_html+'</div>'
-    executive_html='<div class="executive-panel"><div class="executive-top"><div class="executive-verdict"><span class="index">VERDICT / 本轮结论</span><h2>'+esc(executive.get('headline') or verdict.get('label') or '等待可判定证据')+'</h2><p>'+prose(executive.get('detail') or verdict.get('detail') or '本轮结果未包含足够的结论证据。')+'</p></div><div class="executive-score"><span>综合验收分</span><div><strong>'+esc(overall_score_text)+'</strong><small> / 100</small></div><p>证据可判定率 <b>'+esc(resolution_text)+'</b></p><small>按验收模块权重汇总</small></div></div>'+duration_html+('<div class="executive-grid">'+''.join(executive_items)+'</div>' if executive_items else '')+'<p class="executive-note">分数反映本轮已判定检查的通过表现；证据覆盖和失败项需同时看。缓存命中率单独按实际 token 统计，不等于缓存模块得分。</p></div>'
+    executive_html='<div class="executive-panel"><div class="executive-top"><div class="executive-verdict"><span class="index">VERDICT / 本轮结论</span>'+grade_html+'<h2>'+esc(executive.get('headline') or '等待可判定证据')+'</h2><p>'+prose(executive.get('detail') or verdict.get('detail') or '本轮结果未包含足够的结论证据。')+'</p></div><div class="executive-score"><span>综合验收分</span><div><strong>'+esc(overall_score_text)+'</strong><small> / 100</small></div><p>证据可判定率 <b>'+esc(resolution_text)+'</b></p><small>按验收模块权重汇总</small></div></div>'+duration_html+('<div class="executive-grid">'+''.join(executive_items)+'</div>' if executive_items else '')+'<p class="executive-note">分数反映本轮已判定检查的通过表现；证据覆盖和异常项需同时看。缓存命中率单独按实际 token 统计，不等于缓存模块得分。</p></div>'
     check_titles={c.get('id'): c.get('title') or c.get('id') for c in checks}
-    status_labels={'passed':'已覆盖 / 通过','failed':'存在失败','inconclusive':'无法判定','not_covered':'本轮未覆盖','skipped':'含跳过项','cancelled':'已取消'}
-    count_labels={'passed':'通过','failed':'失败','inconclusive':'无法判定','skipped':'跳过','not_covered':'未覆盖','cancelled':'取消'}
+    count_labels={'passed':'通过','failed':'异常','inconclusive':'待补充证据','skipped':'跳过','not_covered':'未覆盖','cancelled':'取消'}
     def sampling_note(d):
         if d.get('observational'):
             return '<p class="sampling-note observation">仅有对照、汇总或来源观察，不参与能力评分。</p>'
@@ -353,12 +378,13 @@ def render_report(result, directory=None):
         return '<small>'+esc(summary)+'</small>'+sampling_note(d)+evidence
     def score_card(d):
         status=d.get('status','not_covered');covered=int(d.get('covered') or 0);value='—' if d.get('score') is None else str(d['score']);width=max(0,min(100,int(d.get('score') or 0)))
-        return '<article class="score-dimension '+esc(status)+'"><div class="score-dimension-head"><span>'+esc(d.get('label'))+'</span><b>'+value+'<small>'+('' if value=='—' else '/100')+'</small></b></div><small class="score-scale">已判定检查通过率</small><div class="bar"><i style="width:'+str(width)+'%"></i></div><div class="score-status">'+esc(status_labels.get(status,status))+'</div>'+score_evidence(d)+'</article>'
+        status_label,tone=aggregate_presentation(d)
+        return '<article class="score-dimension '+esc(status)+' tone-'+tone+'"><div class="score-dimension-head"><span>'+esc(d.get('label'))+'</span><b>'+value+'<small>'+('' if value=='—' else '/100')+'</small></b></div><small class="score-scale">已判定检查通过率</small><div class="bar"><i style="width:'+str(width)+'%"></i></div><div class="score-status">'+badge(status,status_label,tone)+'</div>'+score_evidence(d)+'</article>'
     def score_count_text(d):
         counts=d.get('counts') or {}
         conclusive=d.get('conclusive',0)
         pending=d.get('pending_count',max(0,d.get('capability_observed',0)-conclusive))
-        text='计分 %s 项：通过 %s / 失败 %s · 待判定 %s 项' % (conclusive,d.get('scored_passed',0),d.get('scored_failed',0),pending)
+        text='计分 %s 项：通过 %s / 异常 %s · 待判定 %s 项' % (conclusive,d.get('scored_passed',0),d.get('scored_failed',0),pending)
         if d.get('observation_count'): text+=' · 对照 / 观察 %s 项' % d['observation_count']
         if counts.get('not_covered'): text+=' · 未覆盖 %s 项' % counts['not_covered']
         return text
@@ -370,9 +396,10 @@ def render_report(result, directory=None):
         module_value='—' if module.get('score') is None else str(module['score'])
         module_width=max(0,min(100,int(module.get('score') or 0)))
         counts=module.get('counts') or {}
-        module_cards.append('<article class="module-card '+esc(module_status)+'"><div class="module-weight">权重 '+esc(module.get('weight',0))+'%</div><h3>'+esc(module.get('label'))+'</h3><div class="module-score"><strong>'+esc(module_value)+'</strong><small>'+('' if module_value=='—' else '/100')+'</small></div><small class="score-scale">已判定检查通过率</small><div class="module-bar"><i style="width:'+str(module_width)+'%"></i></div><p class="module-desc">'+prose(module.get('description'))+'</p><div class="module-meta">'+esc(score_count_text(module))+'</div>'+sampling_note(module)+'</article>')
+        module_label,module_tone=aggregate_presentation(module)
+        module_cards.append('<article class="module-card '+esc(module_status)+' tone-'+module_tone+'"><div class="module-weight">权重 '+esc(module.get('weight',0))+'%</div><h3>'+esc(module.get('label'))+'</h3><div class="module-score"><strong>'+esc(module_value)+'</strong><small>'+('' if module_value=='—' else '/100')+'</small></div><small class="score-scale">已判定检查通过率</small><div class="module-bar"><i style="width:'+str(module_width)+'%"></i></div><div class="score-status">'+badge(module_status,module_label,module_tone)+'</div><p class="module-desc">'+prose(module.get('description'))+'</p><div class="module-meta">'+esc(score_count_text(module))+'</div>'+sampling_note(module)+'</article>')
     module_covered=score.get('weight_covered',0);module_weight_total=score.get('weight_total',0)
-    module_html='<section class="module-panel" id="modules"><div class="module-head"><div><span class="index">MODULES / WEIGHTED SCORE</span><h2>验收模块总览</h2><p class="score-note">模块分 = 通过 ÷（通过 + 失败）× 100；总分按模块权重汇总。无法判定、对照与来源观察不计分。可评分权重 '+esc(module_covered)+'% / '+esc(module_weight_total)+'%。</p></div></div><div class="module-grid">'+''.join(module_cards)+'</div><details class="module-calculation"><summary>查看模块权重与计分明细</summary><div class="results-scroll"><table class="module-table"><thead><tr><th>模块</th><th>权重</th><th>本轮结论</th><th>计分说明</th></tr></thead><tbody>'+''.join('<tr><td><b>'+esc(m.get('label'))+'</b><br><small>'+prose(m.get('description'))+'</small></td><td class="weight">'+esc(m.get('weight'))+'%</td><td>'+badge(m.get('status'))+'<br><small>得分 '+esc('—' if m.get('score') is None else m['score'])+'</small></td><td><small>'+esc(score_count_text(m))+'</small></td></tr>' for m in (score.get('modules') or []))+'</tbody></table></div></details></section>'
+    module_html='<section class="module-panel" id="modules"><div class="module-head"><div><span class="index">MODULES / WEIGHTED SCORE</span><h2>验收模块总览</h2><p class="score-note">模块分 = 通过 ÷（通过 + 异常）× 100；总分按模块权重汇总。待补充证据、对照与来源观察不计分。可评分权重 '+esc(module_covered)+'% / '+esc(module_weight_total)+'%。</p></div></div><div class="module-grid">'+''.join(module_cards)+'</div><details class="module-calculation"><summary>查看模块权重与计分明细</summary><div class="results-scroll"><table class="module-table"><thead><tr><th>模块</th><th>权重</th><th>本轮结论</th><th>计分说明</th></tr></thead><tbody>'+''.join('<tr><td><b>'+esc(m.get('label'))+'</b><br><small>'+prose(m.get('description'))+'</small></td><td class="weight">'+esc(m.get('weight'))+'%</td><td>'+badge(m.get('status'),*aggregate_presentation(m))+'<br><small>得分 '+esc('—' if m.get('score') is None else m['score'])+'</small></td><td><small>'+esc(score_count_text(m))+'</small></td></tr>' for m in (score.get('modules') or []))+'</tbody></table></div></details></section>'
     score_html=module_html+'<section class="score-panel" id="score"><div class="score-head"><div><span class="index">SCORE / DIMENSIONS</span><h2>能力评分与覆盖明细</h2><p class="score-note">'+esc(score.get('method',''))+' · '+esc(score_total_note)+'</p></div></div><div class="score-grid">'+score_cards+'</div><ul class="recommendations">'+''.join('<li>'+prose(x)+'</li>' for x in (score.get('recommendations') or []))+'</ul></section>'
     # Optional GPT degradation / HTML-SVG generation panel.  It is populated
     # only when the browser client persisted raw.gpt_evaluation; absent fields
@@ -383,8 +410,8 @@ def render_report(result, directory=None):
         if isinstance(value, bool): return '是' if value else '否'
         return str(value)
     def gpt_badge(value):
-        if value is True: return '<span class="badge passed">通过</span>'
-        if value is False: return '<span class="badge failed">未通过</span>'
+        if value is True: return badge('passed')
+        if value is False: return badge('failed')
         return '<span class="badge inconclusive">未记录</span>'
     gpt_cards=[]
     for item in gpt_rows:
@@ -413,8 +440,8 @@ def render_report(result, directory=None):
     elapsed_text=seconds(elapsed*1000) if elapsed>0 else '未记录'
     metric_items=[('请求样本' if cc else '实际 API 请求',request_count,'请求数与验收项数分别统计'),
         ('检查通过',status_counts['passed'],'含 '+str(local_count)+' 项本地检查' if local_count else '只统计本次已完成检查'),
-        ('检查未通过',status_counts['failed'],'明确观察到不符合预期的结果'),
-        ('无法判定 / 未覆盖',status_counts['inconclusive']+status_counts['not_covered'],f'另有 {status_counts["skipped"]} 项跳过')]
+        ('异常检查项',status_counts['failed'],'明确观察到不符合预期的结果'),
+        ('待补证 / 未覆盖',status_counts['inconclusive']+status_counts['not_covered'],f'另有 {status_counts["skipped"]} 项跳过')]
     metrics=''.join('<div class="metric"><span>'+esc(label)+'</span><b>'+esc(value)+'</b><small>'+esc(note)+'</small></div>' for label,value,note in metric_items)
     total=max(1,len(checks));distribution=''.join('<span class="'+s+'" style="width:'+str(n/total*100)+'%"></span>' for s,n in status_counts.items() if s in STATUS)
     runtime_info=[('渠道地址',config.get('base') or '未记录'),('模型 ID',config.get('model') or '未记录'),('检测程序',data.get('engine') or '未记录'),
@@ -456,7 +483,7 @@ def render_report(result, directory=None):
             +'<p><span class="field-label">实际观察</span>'+prose(f.get('observation_summary') or f.get('observation'))+'</p><p><span class="field-label">影响</span>'+prose(f.get('impact'))+'</p>'
             +'<p><span class="field-label">建议排查</span>'+prose(f.get('recommendation'))+'</p><div class="evidence-links">'
             +('<a href="#'+anchor+'">查看检查项 →</a>' if anchor else '')+links(f.get('evidence_ids',[]))+'</div></article>')
-    finding_html='<div class="findings">'+''.join(findings)+'</div>' if findings else '<div class="empty">本轮未记录明确失败项。请同时核对无法判定、跳过、未覆盖和执行进度，不能仅凭这一行认定全部通过。</div>'
+    finding_html='<div class="findings">'+''.join(findings)+'</div>' if findings else '<div class="empty">本轮未记录明确异常项。请同时核对待补充证据、跳过、未覆盖和执行进度，不能仅凭这一行认定全部符合预期。</div>'
     def parameter_facts(check):
         metadata = check.get('metadata') or {}
         params = check.get('parameters', metadata.get('parameters'))
@@ -548,7 +575,7 @@ def render_report(result, directory=None):
     wire=(result.get('transport') or {}).get('checks',[])
     wire_counts=Counter(x.get('status') for x in wire)
     wire_items=''.join('<div class="transport-item">'+badge(x.get('status'))+' <b>'+esc(x.get('label') or x.get('id'))+'</b> · '+links([x.get('request_id','')])+'<p>'+prose(x.get('detail') or x.get('details'))+'</p></div>' for x in wire if x.get('status')!='passed')
-    wire_html='<section class="section"><div class="section-head"><div><span class="index">TRANSPORT</span><h2>附加传输检查</h2><p>与官方用例结果分开统计：通过 '+str(wire_counts['passed'])+'，失败 '+str(wire_counts['failed'])+'，无法判定 '+str(wire_counts['inconclusive'])+'。</p></div></div><div class="transport-list">'+wire_items+'</div></section>' if wire else ''
+    wire_html='<section class="section"><div class="section-head"><div><span class="index">TRANSPORT</span><h2>附加传输检查</h2><p>与官方用例结果分开统计：通过 '+str(wire_counts['passed'])+'，异常 '+str(wire_counts['failed'])+'，待补充证据 '+str(wire_counts['inconclusive'])+'。</p></div></div><div class="transport-list">'+wire_items+'</div></section>' if wire else ''
     limitations=list(data.get('limitations',[]))+['HTTP 成功不等于验收通过；报告中的模型名称为请求或响应字段，不能单独作为真实模型身份证明。',
         '原始字段按段展示，超长字段可展开全部已采集内容。被采集器截断或未读完的响应不声称完整；统计不假设请求相互独立。']
     notes=result.get('classification_notes') or []
@@ -560,11 +587,11 @@ def render_report(result, directory=None):
         +'<div class="masthead"><span class="brand">小小宇宙无敌</span><span class="eyebrow">CHANNEL ACCEPTANCE REPORT</span><button class="button no-print" id="print-report">打印 / 保存 PDF</button></div>'
         +'<header class="cover"><div class="cover-top"><span class="eyebrow">'+esc(title)+'</span>'+badge(result.get('status'))+'</div><h1>'+esc(model)+'</h1><p>'+esc(config.get('base') or '渠道地址未记录')+'</p><p class="run-id">RUN / '+esc(result.get('run_id') or '未记录')+'</p><div class="cover-meta"><span>'+esc(data.get('engine') or '渠道验收')+'</span><span>'+str(len(checks))+' 项检查</span><span>'+str(request_count)+' 次已记录请求</span><span>依据本轮实测 · 脱敏证据</span></div></header>'
         +'<nav class="nav"><a href="#overview">结论总览</a><a href="#modules">验收模块</a><a href="#score">能力评分</a>'+('<a href="#gpt-quality">GPT 质量</a>' if gpt_html else '')+'<a href="#setup">范围与配置</a><a href="#findings">发现的问题</a><a href="#checks">逐项检查</a><a href="#requests">请求证据</a>'+('<a href="#original-results">原始评分与日志</a>' if original_html else '')+'<a href="#limits">判读说明</a><a href="#all-results">全项结果</a></nav>'
-        +'<section id="overview" class="overview">'+executive_html+'<div class="metrics">'+metrics+'</div><div class="distribution" aria-hidden="true">'+distribution+'</div><p class="legend">本报告列出 '+str(len(checks))+' 个验收项 / 用例；'+('请求样本：通过 '+str(summary.get('passed',0))+'，未通过 '+str(summary.get('failed',0))+'，无法判定 '+str(summary.get('inconclusive',0))+'。' if cc else 'Claude 专项检查与真实请求数分别统计；上游来源仅为渠道声明。' if claude else '浏览器检查结果与实际 HTTP 请求数分别统计。' if browser else '官方用例、附加传输检查与真实请求数分别统计。')+'</p></section>'+score_html+toc_html+gpt_html+matrix_html
+        +'<section id="overview" class="overview">'+executive_html+'<div class="metrics">'+metrics+'</div><div class="distribution" aria-hidden="true">'+distribution+'</div><p class="legend">本报告列出 '+str(len(checks))+' 个验收项 / 用例；'+('请求样本：通过 '+str(summary.get('passed',0))+'，异常 '+str(summary.get('failed',0))+'，无法判定 '+str(summary.get('inconclusive',0))+'。' if cc else 'Claude 专项检查与真实请求数分别统计；上游来源仅为渠道声明。' if claude else '浏览器检查结果与实际 HTTP 请求数分别统计。' if browser else '官方用例、附加传输检查与真实请求数分别统计。')+'</p></section>'+score_html+toc_html+gpt_html+matrix_html
         +'<section id="setup" class="section"><div class="section-head"><div><span class="index">01 / SCOPE</span><h2>这次测了什么</h2></div></div><div class="grid-two"><div class="panel">'+info+'</div><div class="panel">'+scopes+'</div></div></section>'
         +'<section id="findings" class="section"><div class="section-head"><div><span class="index">02 / FINDINGS</span><h2>问题与影响</h2><p>依据本轮已保存的响应和断言整理；建议用于核对链路，不代替上游日志。</p></div></div>'+reason_html+finding_html+'</section>'
         +'<section id="checks" class="section"><div class="section-head"><div><span class="index">03 / CHECKS</span><h2>逐项验收说明</h2></div><small id="visible-count"></small></div><div class="filters no-print">'
-        +''.join('<button type="button" data-filter="'+state+'" class="'+('active' if state=='all' else '')+'" aria-pressed="'+str(state=='all').lower()+'">'+label+'</button>' for state,label in [('all','全部'),('failed','未通过'),('inconclusive','无法判定'),('passed','通过'),('skipped','已跳过'),('not_covered','未覆盖')])
+        +''.join('<button type="button" data-filter="'+state+'" class="'+('active' if state=='all' else '')+'" aria-pressed="'+str(state=='all').lower()+'">'+label+'</button>' for state,label in [('all','全部'),('failed','异常项'),('inconclusive','待补充证据'),('passed','通过'),('skipped','已跳过'),('not_covered','未覆盖')])
         +'<input id="check-search" type="search" aria-label="搜索检查项" placeholder="搜索项目、参数或问题…"></div>'+''.join(check_html)+'</section>'+wire_html
         +'<section id="requests" class="section"><div class="section-head"><div><span class="index">04 / EVIDENCE</span><h2>请求明细与证据</h2><p>展开样本可查看请求内容、原始响应和链路 Request ID。</p></div></div>'+perf+(''.join(request_html) if request_html else '<div class="empty">没有可展示的请求记录。请查看执行日志与 JSON 结果。</div>')+'</section>'
         +original_html+'<section id="limits" class="section"><div class="section-head"><div><span class="index">05 / READING NOTES</span><h2>如何使用这份报告</h2></div></div><div class="panel"><ul class="scope-list">'+''.join('<li>'+prose(x)+'</li>' for x in limitations)+'</ul>'+result_json+'</div>'+note_html+'</section>'
