@@ -71,7 +71,7 @@ class MatrixReportTests(unittest.TestCase):
         data=build_report_data(value)
         self.assertIsNone(data['score']['total'])
         self.assertIsNone(data['score']['weighted_total'])
-        self.assertIn('<div class="score-total">—',render_report(value).decode())
+        self.assertIn('综合验收分</span><div><strong>—</strong>',render_report(value).decode())
 
     def test_identity_observation_is_not_failure_or_free_points(self):
         value=report('claude_acceptance')

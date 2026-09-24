@@ -846,6 +846,8 @@ def _module_id_for_check(check, result):
     if explicit:
         if suite == 'browser_report' and explicit in ('injection','security'):
             return 'security'
+        if suite == 'browser_report' and explicit == 'stress':
+            return 'reliability'
         if metadata.get('source') == 'matrix_validation':
             mapping = ({'multimodal':'tools'} if suite in ('claude','claude_acceptance') else
                        {'max_tokens':'parameters','injection':'security','multimodal':'tools','stress':'protocol'} if suite in ('ccmax','ccmax_acceptance') else
@@ -939,8 +941,9 @@ def _score_stats(checks, known_samples=None):
                 if _dict(row).get('parameters'): add_variant(row['parameters'])
     passed = sum(c.get("status") == "passed" for c in scored)
     score = round(passed / len(scored) * 100) if scored else None
+    capability = [c for c in checks if not _observation_only(c) and c.get('evidence_category') not in ('control','aggregate')]
     status = ("not_covered" if not present else "failed" if any(c.get("status") == "failed" for c in scored)
-              else "inconclusive" if not scored or counts.get("inconclusive") or counts.get("not_covered") or counts.get("cancelled") or counts.get("skipped") else "passed")
+              else "inconclusive" if not scored or any(c.get('status') in ('inconclusive','not_covered','cancelled','skipped') for c in capability) else "passed")
     return {"score": score, "max_score": 100, "status": status, "covered": len(present),
             "capability_observed":len(observed), "observation_count":len(ancillary), "scored_passed":passed, "scored_failed":len(scored)-passed,
             "conclusive": len(scored), "counts": counts, "resolution_percent": round(len(scored) / len(observed) * 100) if observed else None,
@@ -1005,10 +1008,10 @@ def _report_score(checks, result):
             recommendations.append("“%s”当前只有 %s 个场景、%s 条关联请求；该分仅为已判定检查通过率，不能解释为完整能力百分比。" % (d["label"], d["scenario_count"], d["sample_count"]))
     modules = _report_modules(checks, result)
     overall = _score_stats([c for c in checks if not c.get("local_only") and c.get("applicable") is not False], _sample_identifiers(result))
-    return {"total": total, "max_total": 100, "dimensions": dimensions,
+    return {"total": modules['weighted_total'], "dimension_average": total, "max_total": 100, "dimensions": dimensions,
             "covered_dimensions": len(covered_dims), "scored_dimensions": len(scored_dims), "dimension_count": len(dimensions),
             "evidence": overall, "recommendations": recommendations, **modules,
-            "method": "维度分为已判定检查通过率：通过 ÷（通过 + 失败）；无法判定不赠分，也不作为能力失败。无可判定项显示 —。各可评分维度等权汇总；模块总览按权重汇总。覆盖量、可判定率与来源观察分别列出；少量样本通过不代表完整能力 100%。"}
+            "method": "模块与维度分为已判定检查通过率：通过 ÷（通过 + 失败）；无法判定不赠分，也不作为能力失败。无可判定项显示 —。唯一综合验收分按已取得可评分证据的模块权重汇总；对照、汇总与来源观察不重复计分。维度分用于分析，不另算第二个总分。覆盖量、可判定率分别列出；少量样本通过不代表完整能力 100%。"}
 
 
 REASON_LABELS = {"authentication": "鉴权或权限阻断", "rate_limit": "限流或额度阻断", "timeout": "超时或连接中断",
@@ -1095,6 +1098,13 @@ def _matrix_checks(result):
 
 def build_report_data(result):
     """Describe stored results without changing status or making new requests."""
+    from report_brief import build_summary
+    data = _build_report_data(result)
+    data['executive_summary'] = build_summary(_dict(result), data['checks'], data['score'])
+    return data
+
+
+def _build_report_data(result):
     result = _dict(result)
     suite = _text(result.get("suite"))
     if suite == 'batch_acceptance':

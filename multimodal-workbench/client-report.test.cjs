@@ -19,7 +19,7 @@ test('general export expands every assertion, preserves source score and exclude
   const html=await harness().WorkbenchReport.render([record()],[]);
   assert.equal((html.match(/class="check" id=/g)||[]).length,4);
   assert.equal((html.match(/class="score-dimension /g)||[]).length,6);
-  assert.match(html,/<div class="score-total">100<small>/);
+  assert.match(html,/<div class="executive-score"><span>综合验收分<\/span><div><strong>100<\/strong>/);
   assert.match(html,/原始总分：87 \/ 100/);
   for(const detail of ['发送强制 Calculator 调用','返回 Calculator tool_calls','已收到工具调用','函数名与参数匹配','增加多轮回填样本','当前协议不适用','gateway unavailable','provider-first'])assert.ok(html.includes(detail),detail);
   assert.equal((html.match(/class="request" id=/g)||[]).length,2);
@@ -71,7 +71,7 @@ test('empty general checks stay inconclusive and arbitrary output is escaped',as
 test('skipped-only capability has no score rather than a false 0 or pass',async()=>{
   const r=record();r.result.checks=r.result.checks.slice(1);
   const html=await harness().WorkbenchReport.render([r],[]);
-  assert.match(html,/<div class="score-total">—<small>/);
+  assert.match(html,/<div class="executive-score"><span>综合验收分<\/span><div><strong>—<\/strong>/);
   assert.match(html,/尚无可评分证据/);
   assert.equal((html.match(/score-dimension not_covered/g)||[]).length,6);
 });
@@ -95,7 +95,7 @@ test('derived or inapplicable token totals never display arithmetic verification
 test('unknown capability evidence earns no score and remains separate from coverage',async()=>{
   const r=record();r.result.checks=[{id:'cache-missing',name:'大上下文缓存',status:'inconclusive',dimensions:['cache'],parameters:{target_tokens:12000},scenario_id:'cache-cold',reason_code:'evidence_missing',request_ids:['one']}];
   const html=await harness().WorkbenchReport.render([r]);
-  assert.match(html,/<div class="score-total">—<small>/);
+  assert.match(html,/<div class="executive-score"><span>综合验收分<\/span><div><strong>—<\/strong>/);
   assert.match(html,/可判定率 0%/);
   assert.match(html,/有限样本/);
   assert.match(html,/返回证据不足/);
@@ -109,7 +109,7 @@ test('capability pass ratio excludes inconclusive evidence but exposes the resol
     {id:'cap-20',name:'max_tokens=20',status:'inconclusive',dimensions:['max_tokens'],parameters:{max_tokens:20},scenario_id:'enumeration'},
   ];
   const html=await harness().WorkbenchReport.render([r]);
-  assert.match(html,/<div class="score-total">50<small>/);
+  assert.match(html,/<div class="executive-score"><span>综合验收分<\/span><div><strong>50<\/strong>/);
   assert.match(html,/参数组合 3 · 关联请求 1 · 可判定率 67%/);
   assert.match(html,/有限样本 · 不代表完整能力/);
 });
@@ -118,4 +118,106 @@ test('general injection has its own capability dimension and request parameter e
   const html=await harness().WorkbenchReport.render([r]);
   assert.match(html,/注入与指令隔离/);assert.match(html,/参数组合 1/);assert.match(html,/<dt>attack<\/dt><dd>direct<\/dd>/);
   assert.match(html,/覆盖 1 \/ 7 维/);assert.equal((html.match(/score-dimension not_covered/g)||[]).length,6);
+});
+
+function overview(html){return html.split('<section id="overview"')[1].split('<section id="modules"')[0];}
+function check(id,dimensions,status='passed',extra={}){return {id,name:id,dimensions,status,...extra};}
+function summaryRecord(checks,requests=[],extra={}){return {kind:'general',model:'summary-fixture',...extra,result:{checks,requests}};}
+test('conclusion and weighted modules lead report, full matrix is the final section',async()=>{
+  const html=await harness().WorkbenchReport.render([record()]);
+  const order=['overview','modules','score','scope','findings','checks','requests','original-results','all-results'].map(id=>html.indexOf(`id="${id}"`));
+  assert.ok(order.every((value,index)=>value>=0&&(index===0||value>order[index-1])));
+  const tail=html.slice(html.indexOf('id="all-results"'));
+  assert.equal((tail.match(/<section/g)||[]).length,0);
+  assert.ok(tail.includes('<footer>'));
+  assert.equal((html.match(/class="executive-score"/g)||[]).length,1);
+  assert.doesNotMatch(html,/<div class="score-total">|各可评分维度等权汇总/);
+});
+test('single headline score uses browser module weights instead of a second dimension average',async()=>{
+  const r=summaryRecord([check('protocol',['protocol'],'failed'),check('tools',['tools'])]);
+  const html=await harness().WorkbenchReport.render([r]);
+  assert.match(overview(html),/<strong>43<\/strong>/);
+  assert.match(html,/可评分权重 35% \/ 100%/);
+  assert.match(overview(html),/基础能力存在失败/);
+});
+test('illegal max_tokens control failure cannot imply a legal cap was ignored',async()=>{
+  const r=summaryRecord([check('max_tokens=0',['max_tokens'],'failed',{parameters:{max_tokens:0}}),check('max_tokens=10',['max_tokens'],'passed',{parameters:{max_tokens:10}}),check('isolation',['security'],'failed')]);
+  const html=overview(await harness().WorkbenchReport.render([r]));
+  assert.match(html,/非法限长参数校验存在失败，不能据此判定合法限长失效/);
+  assert.match(html,/指令隔离存在异常/);
+  assert.match(html,/不能据此认定上游私自添加提示词/);
+  assert.doesNotMatch(html,/限长出现超限|长度控制未遵守|疑似偷偷/);
+});
+test('verified output cap excess produces a direct conclusion and links to evidence',async()=>{
+  const r=summaryRecord([check('base',['protocol']),check('cap',['max_tokens'],'failed',{parameters:{max_tokens:10},reason_code:'output_cap_exceeded'})]);
+  const html=overview(await harness().WorkbenchReport.render([r]));
+  assert.match(html,/基础接口可用；限长出现超限/);
+  assert.match(html,/长度控制未遵守请求/);
+  assert.match(html,/href="#record-1-check-2"/);
+});
+test('cache headline counts only explicit warm response usage, deduplicates and reports missing fields',async()=>{
+  const warm=(id,request)=>check(id,['cache'],'passed',{parameters:{round:'warm_1'},request_ids:[request]});
+  const r=summaryRecord([warm('a','warm'),warm('a-second-assertion','warm'),warm('b','missing'),check('cold',['cache'],'passed',{parameters:{round:'cold'},request_ids:['cold']})],[
+    {id:'warm',status:200,response:{usage:{prompt_tokens:1000,prompt_tokens_details:{cached_tokens:800}}}},
+    {id:'missing',status:200,request:{usage:{prompt_tokens:1000,prompt_tokens_details:{cached_tokens:1000}}},response:{usage:{prompt_tokens:1000}}},
+    {id:'cold',status:200,response:{usage:{prompt_tokens:100000,prompt_tokens_details:{cached_tokens:0}}}},
+  ]);
+  const html=overview(await harness().WorkbenchReport.render([r]));
+  assert.match(html,/已计量暖请求缓存 Token 命中率 80%/);
+  assert.match(html,/读取 800 \/ 完整输入 1,000 Token/);
+  assert.match(html,/命中请求 1\/1，字段完整 1\/2 个暖请求/);
+});
+test('native cache denominator adds read and creation, missing creation stays unknown',async()=>{
+  const r=summaryRecord([check('warm',['cache'],'passed',{parameters:{round:'warm_2'},request_ids:['warm']})],[{id:'warm',status:200,response:{usage:{input_tokens:200,cache_read_input_tokens:800}}}]);
+  let html=overview(await harness().WorkbenchReport.render([r]));
+  assert.match(html,/缓存命中率未知/);assert.doesNotMatch(html,/命中率 80%/);
+  r.result.requests[0].response.usage.cache_creation_input_tokens=0;
+  html=overview(await harness().WorkbenchReport.render([r]));
+  assert.match(html,/缓存 Token 命中率 80%/);assert.match(html,/完整输入 1,000 Token/);
+});
+test('cache score does not fabricate a hit rate or use usage from failed requests',async()=>{
+  const r=summaryRecord([check('warm',['cache'],'passed',{parameters:{round:'warm'},request_ids:['warm']})],[{id:'warm',status:500,response:{usage:{prompt_tokens:1000,prompt_tokens_details:{cached_tokens:800}}}}]);
+  const html=overview(await harness().WorkbenchReport.render([r]));
+  assert.match(html,/缓存命中率未知/);assert.doesNotMatch(html,/缓存 Token 命中率 80%/);
+});
+test('elapsed report time uses wall clock intervals, not sum of overlapping request durations',async()=>{
+  const start=1700000000;
+  const records=[summaryRecord([check('first',['protocol'])],[{id:'1',status:200,duration_ms:10000}],{created_at:start,duration_ms:10000}),summaryRecord([check('second',['protocol'])],[{id:'2',status:200,duration_ms:15000}],{created_at:start+5,duration_ms:15000})];
+  const html=overview(await harness().WorkbenchReport.render(records));
+  assert.match(html,/>测试总耗时<\/span><strong>20 秒<\/strong>/);
+  assert.match(html,/P50 <b>12.5 秒<\/b>/);assert.match(html,/P95 <b>14.8 秒<\/b>/);assert.match(html,/已保存耗时 <b>2\/2 个请求/);
+  assert.doesNotMatch(html,/<strong>25 秒<\/strong>/);
+});
+test('missing run timestamps show a labelled request window and never invent full test time',async()=>{
+  const r=summaryRecord([check('baseline',['protocol'])],[{id:'1',status:200,started_at:1700000000,duration_ms:2000},{id:'2',status:200,started_at:1700000001,duration_ms:2000}]);
+  const html=overview(await harness().WorkbenchReport.render([r]));
+  assert.match(html,/请求观测窗口（非完整测试耗时）/);assert.match(html,/<strong>3 秒<\/strong>/);
+  assert.doesNotMatch(html,/>测试总耗时<\/span>/);
+});
+test('Gemini cache uses original usageMetadata denominator',async()=>{
+  const r=summaryRecord([check('warm',['cache'],'passed',{parameters:{round:'warm_1'},request_ids:['warm']})],[{id:'warm',status:200,response:{usageMetadata:{promptTokenCount:1000,cachedContentTokenCount:800,candidatesTokenCount:5}}}]);
+  assert.match(overview(await harness().WorkbenchReport.render([r])),/缓存 Token 命中率 80%/);
+});
+test('a zero-cap assertion never becomes a legal-cap excess claim even if a legacy reason code says excess',async()=>{
+  const r=summaryRecord([check('zero',['max_tokens'],'failed',{parameters:{max_tokens:0},reason_code:'output_cap_exceeded'})]);
+  const html=overview(await harness().WorkbenchReport.render([r]));
+  assert.match(html,/非法限长参数校验存在失败/);assert.doesNotMatch(html,/合法上限样本输出超限|限长出现超限/);
+});
+test('portable score uses the same even rounding as the server at 62.5',async()=>{
+  const checks=Array.from({length:8},(_,i)=>check('tool-'+i,['tools'],i<5?'passed':'failed'));
+  const html=await harness().WorkbenchReport.render([summaryRecord(checks)]);
+  assert.match(overview(html),/<strong>62<\/strong>/);
+  assert.doesNotMatch(overview(html),/<strong>63<\/strong>/);
+});
+test('warm variant takes precedence over numeric matrix round and noninteger usage is rejected',async()=>{
+  const r=summaryRecord([check('warm',['cache'],'passed',{parameters:{variant:'warm',round:2},request_ids:['warm']})],[{id:'warm',status:200,response:{usage:{prompt_tokens:1000,prompt_tokens_details:{cached_tokens:800}}}}]);
+  assert.match(overview(await harness().WorkbenchReport.render([r])),/缓存 Token 命中率 80%/);
+  r.result.requests[0].response.usage.prompt_tokens_details.cached_tokens=800.5;
+  assert.match(overview(await harness().WorkbenchReport.render([r])),/缓存命中率未知/);
+});
+test('multiple model summaries never pool cache hits into one model capability claim',async()=>{
+  const make=(model,cached)=>({...summaryRecord([check('warm',['cache'],'passed',{parameters:{round:'warm'},request_ids:['warm']})],[{id:'warm',status:200,response:{usage:{prompt_tokens:1000,prompt_tokens_details:{cached_tokens:cached}}}}]),model});
+  const html=overview(await harness().WorkbenchReport.render([make('first',800),make('second',0)]));
+  assert.match(html,/多模型报告：各模型独立判读/);assert.match(html,/跨模型汇总不能证明单个模型能力/);
+  assert.doesNotMatch(html,/暖请求缓存 Token 命中率 40%/);
 });

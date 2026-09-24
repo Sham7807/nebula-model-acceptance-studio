@@ -6,6 +6,7 @@ import unittest
 import uuid
 import os
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import httpx
 try:
@@ -280,6 +281,36 @@ class ClaudeAcceptanceTests(unittest.TestCase):
         self.assertEqual(stress['status'],'passed')
         self.assertEqual(stress['metrics']['success_rate'],1)
         self.assertEqual(stress['metrics']['semantic_match_rate'],0)
+
+    def test_stress_duration_is_stage_wall_time_not_latency_sum_or_suite_time(self):
+        calls=[];clock=[100.0];completed=[]
+        def progress(event):
+            if event.get('phase')!='sample_complete': return
+            if event.get('sample_id')=='baseline':
+                clock[0]=190.0  # Earlier protocol work is outside the load stage.
+            elif str(event.get('sample_id','')).startswith('stress-'):
+                completed.append(event['sample_id'])
+                if len(completed)==3: clock[0]=192.5
+        # Patch only this module's clock; the HTTP sampler keeps its own real
+        # per-request timestamps. The two measurements must remain distinct.
+        with patch.object(c,'time',SimpleNamespace(monotonic=lambda:clock[0])):
+            result=c.run(self.config(enabled_modules=['stress'],transport=httpx.MockTransport(self.handler(calls))),progress)
+        check=next(x for x in result['checks'] if x['id']=='stress')
+        self.assertEqual(check['metrics']['completed'],3)
+        self.assertEqual(check['metrics']['duration_ms'],2500.0)
+        self.assertNotEqual(check['metrics']['duration_ms'],sum(s['duration_ms'] for s in result['samples'] if s['suite_probe']=='stress'))
+        self.assertEqual(next(x for x in result['cases'] if x['id']=='stress')['metrics']['duration_ms'],2500.0)
+
+    def test_cancel_before_stress_does_not_invent_stage_duration(self):
+        stopped=threading.Event();calls=[]
+        def progress(event):
+            if event.get('sample_id')=='baseline' and event.get('phase')=='sample_complete': stopped.set()
+        result=c.run(self.config(enabled_modules=['stress'],transport=httpx.MockTransport(self.handler(calls))),progress,stopped)
+        check=next(x for x in result['checks'] if x['id']=='stress')
+        self.assertEqual(result['status'],'cancelled')
+        self.assertEqual(check['metrics']['completed'],0)
+        self.assertIsNone(check['metrics']['duration_ms'])
+        self.assertEqual(len(result['samples']),1)
 
     def test_signature_tamper_only_runs_after_original_roundtrip(self):
         calls=[]
