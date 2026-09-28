@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -12,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 WINDOWS = ROOT / "desktop" / "windows"
 BUILD = WINDOWS / "build"
 DIST = WINDOWS / "dist"
+VERSION = json.loads((ROOT / "desktop" / "version.json").read_text(encoding="utf-8"))
 
 
 def run(*args: str) -> None:
@@ -46,7 +48,7 @@ def main() -> None:
             shutil.copy2(source, target)
     shutil.rmtree(worker)
     (package / "版本说明.txt").write_text(
-        "渠道测试系统 · Windows 版\n\n"
+        f"渠道测试系统 · Windows 版 {VERSION['version']} (build {VERSION['build']})\n\n"
         "双击 Channel-Test-System-Windows.exe 启动。\n"
         "需要 Windows 10/11 与 Microsoft WebView2 Runtime。\n"
         "如果系统没有 WebView2，程序会自动使用默认浏览器打开本地工作台。\n"
