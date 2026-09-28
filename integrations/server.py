@@ -53,9 +53,10 @@ MODULES = {
         'reliability': {'label': '稳定性与性能', 'weight': 0},
     },
     'ccmax': {
-        'protocol': {'label': 'Claude 协议与错误', 'weight': 35},
+        'protocol': {'label': 'Claude 协议与错误', 'weight': 30},
         'parameters': {'label': '参数与错误', 'weight': 15},
-        'tools': {'label': '工具调用', 'weight': 20},
+        'tools': {'label': '工具调用', 'weight': 15},
+        'multimodal': {'label': '真实媒体输入', 'weight': 10},
         'cache': {'label': 'usage 与缓存', 'weight': 15},
         'security': {'label': '安全与一致性', 'weight': 15},
         'max_tokens': {'label': '参数边界', 'weight': 0},
@@ -86,7 +87,7 @@ def _case_modules(entry, suite):
     out = set()
     if any(x in ident for x in ('tool', 'schema', 'function', 'calculator')): out.add('tools')
     if any(x in ident for x in ('cache', 'usage', 'prompt_token', 'token')): out.add('cache')
-    if any(x in ident for x in ('video', 'image', 'multimodal', 'vision')): out.add('multimodal')
+    if any(x in ident for x in ('video', 'audio', 'image', 'multimodal', 'vision')): out.add('multimodal')
     if any(x in ident for x in ('max_token', 'max-completion', 'length')): out.add('max_tokens')
     if any(x in ident for x in ('signature', 'message_', 'error', 'protocol', 'json')): out.add('protocol')
     if any(x in ident for x in ('stream', 'connection', 'reliab', 'sse')): out.add('reliability')
@@ -278,9 +279,17 @@ def validate(data, *, require_key=True):
     if c['auth'] not in ('anthropic','bearer'): raise ValueError('验收鉴权方式无效')
     if c['request_format']=='openai': c['auth']='bearer'
     c['thinking'] = bool(data.get('thinking',True))
+    c['resource_source'] = data.get('resource_source', 'unknown')
+    if c['resource_source'] not in ('unknown', 'official', 'official_relay', 'reverse'):
+        raise ValueError('资源来源标注无效')
     advanced = data.get('advanced', c['suite'] in ('ccmax','claude'))
     if not isinstance(advanced, bool): raise ValueError('高级探针开关必须为布尔值')
     c['advanced'] = advanced
+    # The native CCMax media probes are controlled independently of the matrix
+    # and must obey the corresponding module checkbox.
+    multimodal = data.get('multimodal', False)
+    if not isinstance(multimodal, bool): raise ValueError('多模态探针开关必须为布尔值')
+    c['multimodal'] = multimodal
     # Legacy API callers retain their old request volume; the workbench sends
     # an explicit standard matrix profile for every new acceptance run.
     c['matrix_profile']=data.get('matrix_profile','off')
@@ -322,6 +331,8 @@ def validate(data, *, require_key=True):
         if not selected_modules:
             raise ValueError('至少启用一个检测模块')
         c['enabled_modules'] = selected_modules
+    if c['suite'] == 'ccmax':
+        c['multimodal'] = c['multimodal'] and 'multimodal' in c['enabled_modules']
     from channel_production import configuration as production_config
     from channel_admission import configuration as admission_config, pricing_configuration
     c['production'] = production_config(production_config_for({**c, 'production':data.get('production', {})}))
@@ -1147,6 +1158,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(payload,dict): raise ValueError('代理请求必须是 JSON 对象')
                 streaming=payload.get('stream',False)
                 if not isinstance(streaming,bool):raise ValueError('stream 必须是布尔值')
+                media_fetch=payload.get('media_fetch',False)
+                if not isinstance(media_fetch,bool):raise ValueError('media_fetch 必须是布尔值')
                 target=str(payload.get('url','')).strip(); method=str(payload.get('method','POST')).upper()
                 parsed=urlsplit(target)
                 if parsed.scheme not in ('http','https') or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
@@ -1160,6 +1173,11 @@ class Handler(BaseHTTPRequestHandler):
                 # through because the browser already supplied it to this
                 # authenticated workbench request.
                 upstream_headers={str(k):str(v) for k,v in headers.items() if str(k).lower() not in ('host','content-length','connection')}
+                if media_fetch:
+                    if method!='GET' or streaming or payload.get('body') is not None or payload.get('form') is not None:
+                        raise ValueError('媒体下载代理只支持无请求体的 GET')
+                    if any(str(k).lower() in ('authorization','proxy-authorization','cookie','x-api-key','x-goog-api-key','x-workbench-token') for k in upstream_headers):
+                        raise ValueError('媒体下载代理不允许转发鉴权或 Cookie')
                 timeout=float(payload.get('timeout',120) or 120); timeout=max(.5,min(timeout,600))
                 body=None; files=None; data=None
                 form=payload.get('form')
@@ -1194,12 +1212,14 @@ class Handler(BaseHTTPRequestHandler):
                         if proxy_url.scheme not in ('http','https') or not proxy_url.hostname or proxy_url.query or proxy_url.fragment or re.search(r'[\x00-\x20\\]',proxy):raise ValueError()
                         _=proxy_url.port
                     except ValueError:raise ValueError('服务器出站代理配置无效，请检查 WORKBENCH_OUTBOUND_PROXY。')
-                with httpx.Client(timeout=timeout,follow_redirects=False,trust_env=False,proxy=proxy) as client:
+                with httpx.Client(timeout=timeout,follow_redirects=media_fetch, max_redirects=3 if media_fetch else 20, trust_env=False,proxy=proxy) as client:
                     if streaming:
                         with client.stream(method,target,headers=upstream_headers,content=body,data=data,files=files) as response:
                             stream_started=True
                             return self.stream_proxy_response(response,method)
                     response=client.request(method,target,headers=upstream_headers,content=body,data=data,files=files)
+                if media_fetch and len(response.content)>50*1024*1024:
+                    raise ValueError('媒体文件超过 50 MB，无法转换为 Base64')
                 ctype=response.headers.get('content-type','application/octet-stream')
                 is_text=('text/' in ctype.lower() or 'json' in ctype.lower() or 'javascript' in ctype.lower() or 'xml' in ctype.lower() or 'event-stream' in ctype.lower())
                 envelope={'status':response.status_code,'url':str(response.url),'content_type':ctype,'headers':{k:v for k,v in response.headers.items() if k.lower() in ('content-type','x-request-id','request-id','retry-after','content-length')}}

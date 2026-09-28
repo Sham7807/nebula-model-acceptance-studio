@@ -5,7 +5,8 @@ let lastPresetId=null,modelAdvice=null;
 let kind='text',records=[],logs=[],controller=null,busy=false,timer=null,inputUrls=[],drafts={},fileDrafts={},referenceFiles=[],legacyLoaded=false;
 let progressState=null;
 const secrets=new Set(),localMediaUrls=new Set(),historyTasks=new Map();
-const draftIds=['preset','model','prompt','size','duration','resolution','voice','format','speed','language','path','auth','timeout','pollInterval','pollPath','contentPath','pollTimeout','extra','batch','imageMode','imageUrls'];
+const draftIds=['preset','model','prompt','size','duration','resolution','voice','format','speed','language','path','auth','timeout','pollInterval','pollPath','contentPath','pollTimeout','extra','batch','imageMode','imageUrls','videoUrls','audioUrls','mediaInputMode'];
+const MEDIA_SAMPLES={image:'https://picsum.photos/id/237/800/600',video:'https://download.samplelib.com/mp4/sample-5s.mp4',audio:'https://download.samplelib.com/mp3/sample-3s.mp3'};
 const initialFieldValues=Object.fromEntries(draftIds.map(id=>[id,$(id).value]));
 const E=window.MediaEngine;
 let modelCatalog=[],modelCatalogLoaded=false,modelFetchState='idle',modelFetchError='',modelFetchEpoch=0,modelFetchController=null;
@@ -295,11 +296,22 @@ function updateFields(){
   $('resolutionHint').textContent=/seedance/i.test($('model').value)?'部分 Seedance 渠道要求此项；请选择渠道支持的值，如 720p 或 1080p。':'独立于画面尺寸；可填写渠道支持的自定义值。';
   document.querySelectorAll('.video-only').forEach(el=>el.hidden=kind!=='video');
   $('fileGroup').hidden=!acceptsReferenceFiles();
-  const urlMode=kind==='image';$('imageUrlGroup').hidden=!urlMode;
-  $('imageUrlGroup').querySelector('label').firstChild.textContent=p.id==='relay-image-json'?'参考图片 URL ':'图片 URL（JSON 参考图协议） ';
-  $('imageUrlGroup').querySelector('small').innerHTML=p.id==='relay-image-json'?'每行一个公开的 http(s) 图片地址；会按顺序写入请求体的 <code>image</code> 字段，可与本地上传图片混合使用。':'当前协议主要使用本地上传；如渠道支持 URL 参考图，请切换到「中转站 · 参考图生成（JSON）」后再粘贴地址。';
+  const imageCapableText=(kind==='text'&&['openai-chat','openai-responses','anthropic','gemini'].includes(p.id))||(kind==='video'&&['openai-video','relay-video-json','doubao-video','custom-video'].includes(p.id));
+  const urlMode=kind==='image'||imageCapableText;$('imageUrlGroup').hidden=!urlMode;
+  const videoCapableText=kind==='text'&&['openai-chat','openai-responses','gemini'].includes(p.id);
+  const videoUrlMode=kind==='video'||videoCapableText;$('videoUrlGroup').hidden=!videoUrlMode;
+  const audioCapableText=kind==='text'&&['openai-chat','openai-responses','gemini'].includes(p.id);
+  const audioUrlMode=(kind==='audio'&&['openai-audio-chat','openai-transcription','openai-translation'].includes(p.id))||audioCapableText;$('audioUrlGroup').hidden=!audioUrlMode;
+  $('mediaSourceGroup').hidden=!(urlMode||videoUrlMode||audioUrlMode);
+  $('imageUrlGroup').querySelector('label').firstChild.textContent=p.id==='relay-image-json'?'参考图片 URL ':kind==='text'?'视觉图片 URL ':'参考图片 URL ';
+  $('imageUrlGroup').querySelector('small').innerHTML=p.id==='relay-image-json'?'每行一个公开的 http(s) 图片地址；会按顺序写入请求体的 <code>image</code> 字段，可与本地上传图片混合使用。':'OpenAI Chat、Responses、Anthropic 会按协议发送 <code>image_url</code> / URL；Gemini、multipart 和只接受 Base64 的模型会按当前输入方式转换。';
+  $('mediaInputHint').innerHTML=videoUrlMode
+    ? (['openai-video'].includes(p.id)?'OpenAI Videos 原生 multipart 不接受远程 URL；工作台会下载公开视频后作为上传文件发送。':'JSON 视频协议会按渠道约定写入 <code>video_url</code>；选择 Base64 时写入 Data URL。')
+    : audioUrlMode
+      ? '音频转写与音频对话通常要求 Base64 / multipart；自动模式会先下载样例并转换，渠道不支持时会给出明确错误。'
+      : 'OpenAI Chat、Responses、Anthropic 可直接发送图片 URL；Gemini 与只接受 Base64 的渠道会按协议转换。';
   const supportsImages=['openai-image-edit','relay-image-json','gemini-image','openai-chat','openai-responses','anthropic','gemini','doubao-video'].includes(p.id);
-  $('files').accept=audioChat?'.wav,.mp3,audio/wav,audio/mpeg':transcribe?'audio/*,video/mp4,video/webm':'image/*';$('files').multiple=kind==='text'||supportsImages;
+  $('files').accept=audioChat?'.wav,.mp3,audio/wav,audio/mpeg':transcribe?'audio/*,video/mp4,video/webm':kind==='video'?'image/*,video/*':'image/*';$('files').multiple=kind==='text'||supportsImages;
   $('fileLabel').textContent=audioChat?'音频输入（可选）':transcribe?'上传音频（必选)':edit?'原始图片（可多张）':kind==='video'?'参考图片（可选）':p.id==='relay-image-json'?'参考图片（可多图，也可用 URL）':'参考图片（可选）';
   $('fileHint').textContent=audioChat?'支持上传 WAV / MP3，也可只输入文本，测试模型的音频回答。':transcribe?'选择待转写 / 翻译的音频；文件大小限制由渠道决定。':supportsImages?'可继续添加图片；缩略图下方可调整顺序或移除。':'文件随本次请求上传至你配置的渠道。';
   $('promptLabel').textContent=(speech||geminiSpeech)?'朗读文本':transcribe?'转写提示词（可选）':'测试提示词';
@@ -453,22 +465,31 @@ function getModels(requireModel=true){
   const unique=[...new Set(list)];if(requireModel&&!unique.length)throw new Error('请填写模型名称，或在高级参数中填写批量模型。');
   if(unique.length>30)throw new Error('每批最多 30 个模型，请分批测试。');return unique;
 }
+function readMediaUrls(id,label){
+  const values=$(id)?.value.split(/\r?\n/).map(value=>value.trim()).filter(Boolean)||[];
+  for(const [index,value] of values.entries()){
+    let parsed;try{parsed=new URL(value);}catch{throw new Error(`第 ${index+1} 个${label} URL 无效。`);}
+    if(!/^https?:$/.test(parsed.protocol)||parsed.username||parsed.password)throw new Error(`第 ${index+1} 个${label} URL 必须是公开的 http(s) 地址。`);
+    values[index]=parsed.href;
+  }
+  return values;
+}
 function getConfig(model){
   const key=$('key').value.trim();if(key)secrets.add(key);
   let extra;try{extra=JSON.parse($('extra').value.trim()||'{}');}catch{throw new Error('附加参数不是有效 JSON，请检查逗号和引号。');}
   if(!extra||typeof extra!=='object'||Array.isArray(extra))throw new Error('附加参数必须是 JSON 对象。');
   if(Object.prototype.hasOwnProperty.call(extra,'model')&&(typeof extra.model!=='string'||!extra.model.trim()))throw new Error('附加 JSON 中的 model 必须是非空字符串。');
-  const referenceUrls=$('imageUrls').value.split(/\r?\n/).map(value=>value.trim()).filter(Boolean);
+  const referenceUrls=readMediaUrls('imageUrls','参考图片');
+  const videoUrls=readMediaUrls('videoUrls','参考视频');
+  const audioUrls=readMediaUrls('audioUrls','参考音频');
   if(referenceUrls.length){
-    if($('preset').value!=='relay-image-json')throw new Error('图片 URL 需要选择「中转站 · 参考图生成（JSON）」协议；OpenAI multipart 图片编辑请先下载后上传。');
     if(Object.prototype.hasOwnProperty.call(extra,'image'))throw new Error('已填写参考图片 URL，请移除附加 JSON 中的 image 字段，避免重复发送。');
-    for(const [index,value] of referenceUrls.entries()){let parsed;try{parsed=new URL(value);}catch{throw new Error(`第 ${index+1} 个参考图片 URL 无效。`);}if(!/^https?:$/.test(parsed.protocol)||parsed.username||parsed.password)throw new Error(`第 ${index+1} 个参考图片 URL 必须是公开的 http(s) 地址。`);referenceUrls[index]=parsed.href;}
   }
   if(!model)throw new Error('请填写模型名称。');
   if(!$('base').value.trim())throw new Error('请填写渠道地址。');
   if($('auth').value!=='none'&&!key)throw new Error('请填写 API Key。');
   const number=(id,min,max)=>{const v=Number($(id).value);if(!Number.isFinite(v)||v<min||v>max)throw new Error(`${$(id).previousElementSibling?.textContent||id}应在 ${min}–${max} 之间。`);return v;};
-  return {base:$('base').value.trim(),key,model,preset:$('preset').value,path:$('path').value.trim(),auth:$('auth').value,prompt:$('prompt').value,extra,referenceUrls,files:activeReferenceFiles(),timeout:number('timeout',5,3600),pollInterval:kind==='video'?number('pollInterval',1,120):5,pollTimeout:kind==='video'?number('pollTimeout',5,7200):600,pollPath:$('pollPath').value.trim(),contentPath:$('contentPath').value.trim(),voice:$('voice').value.trim(),format:['openai-speech','openai-audio-chat'].includes($('preset').value)?$('format').value:undefined,speed:$('preset').value==='openai-speech'?number('speed',.25,4):1,size:$('size').value.trim(),resolution:['relay-video-json','doubao-video','custom-video'].includes($('preset').value)?$('resolution').value.trim():undefined,duration:kind==='video'?number('duration',1,120):4,language:$('language').value.trim(),fetchMedia:true};
+  return {base:$('base').value.trim(),key,model,preset:$('preset').value,path:$('path').value.trim(),auth:$('auth').value,prompt:$('prompt').value,extra,referenceUrls,videoUrls,audioUrls,mediaInputMode:$('mediaInputMode').value||'auto',files:activeReferenceFiles(),timeout:number('timeout',5,3600),pollInterval:kind==='video'?number('pollInterval',1,120):5,pollTimeout:kind==='video'?number('pollTimeout',5,7200):600,pollPath:$('pollPath').value.trim(),contentPath:$('contentPath').value.trim(),voice:$('voice').value.trim(),format:['openai-speech','openai-audio-chat'].includes($('preset').value)?$('format').value:undefined,speed:$('preset').value==='openai-speech'?number('speed',.25,4):1,size:$('size').value.trim(),resolution:['relay-video-json','doubao-video','custom-video'].includes($('preset').value)?$('resolution').value.trim():undefined,duration:kind==='video'?number('duration',1,120):4,language:$('language').value.trim(),fetchMedia:true};
 }
 function safeSnapshot(c){const {key,files,...rest}=c;return scrub({...rest,files:files.map(f=>({name:f.name,type:f.type,size:f.size}))});}
 function durationLabel(seconds){
@@ -742,6 +763,12 @@ $('promptScenario').addEventListener('change',applyPromptScenario);
 $('prompt').addEventListener('input',()=>{$('promptScenario').value=promptScenarios().find(item=>item.prompt===$('prompt').value)?.id||'';updateScenarioDetails();});
 $('clearFilesBtn').addEventListener('click',()=>{if(busy)return;clearFiles();notify('已清空本次参考文件。');});
 $('sampleFilesBtn').addEventListener('click',()=>{const item=currentPromptScenario();loadSampleReferences(item?.requiresImages||1);});
+$('sampleImageUrlBtn').addEventListener('click',()=>{if(busy)return;$('imageUrls').value=MEDIA_SAMPLES.image;updateFields();notify('已填入真实图片样例 URL，可按协议直接发送或转换为 Base64。');});
+$('clearImageUrlBtn').addEventListener('click',()=>{if(busy)return;$('imageUrls').value='';});
+$('sampleVideoUrlBtn').addEventListener('click',()=>{if(busy)return;$('videoUrls').value=MEDIA_SAMPLES.video;updateFields();notify('已填入真实 5 秒视频样例 URL，可按协议发送或转换。');});
+$('clearVideoUrlBtn').addEventListener('click',()=>{if(busy)return;$('videoUrls').value='';});
+$('sampleAudioUrlBtn').addEventListener('click',()=>{if(busy)return;$('audioUrls').value=MEDIA_SAMPLES.audio;updateFields();notify('已填入真实音频样例 URL，可按协议下载并转 Base64。');});
+$('clearAudioUrlBtn').addEventListener('click',()=>{if(busy)return;$('audioUrls').value='';});
 $('applyModelAdvice').addEventListener('click',()=>{if(modelAdvice)applyRecommendation(modelAdvice);});
 ['base','key'].forEach(id=>$(id).addEventListener('input',syncModelContext));
 $('auth').addEventListener('change',syncModelContext);

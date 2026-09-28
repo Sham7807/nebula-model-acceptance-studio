@@ -89,6 +89,12 @@ class MockChannel:
             images = [part["image_url"]["url"] for part in content if part["type"]=="image_url"]
             if not images:
                 return response(completion("A sample video shows objects moving across the screen."))
+            # Public URL probes intentionally exercise URL forwarding. The
+            # mock channel cannot fetch the internet, so return a normal
+            # visual description for that transport shape rather than
+            # treating it as a Base64 decoding failure.
+            if any("," not in url for url in images):
+                return response(completion("A real public image is available to the vision model."))
             colors = []
             for url in images:
                 img = Image.open(BytesIO(base64.b64decode(url.split(",",1)[1]))).convert("RGB")

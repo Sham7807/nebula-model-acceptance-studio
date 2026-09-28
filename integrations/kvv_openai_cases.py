@@ -14,6 +14,11 @@ import uuid
 import httpx
 import pytest
 
+try:
+    from .media_fixtures import IMAGE_URL, AUDIO_URL, VIDEO_URL as PUBLIC_VIDEO_URL, data_url as fixture_data_url
+except ImportError:
+    from media_fixtures import IMAGE_URL, AUDIO_URL, VIDEO_URL as PUBLIC_VIDEO_URL, data_url as fixture_data_url
+
 PRECHECK = [
     "test_openai_chat_completion", "test_openai_stream_and_usage",
     "test_openai_max_tokens_one", "test_openai_invalid_max_tokens",
@@ -41,6 +46,11 @@ _SPECS = {
 "strict_json_schema": ("闭合对象 JSON Schema", "结构化输出", "strict=true、additionalProperties=false、所有属性必填。", "输出只包含 ready=true、整数 count=3，严格满足 Schema。", "核对 Structured Outputs 支持，以及 strict/schema 是否透传。"),
 "reasoning_effort": ("reasoning_effort 请求与证据", "推理参数", "发送 low 和 max_completion_tokens，不发送 thinking/chat_template_kwargs。", "请求成功且答案正确；有正 reasoning_tokens 才确认可观测推理活动，否则无法判定。", "核对模型 effort 枚举与 reasoning_tokens；不依赖推理文本长度或自述。"),
 "video_url_extension": ("video_url 扩展接入", "多模态扩展", "在 messages 中传公开视频 URL；明确作为兼容渠道扩展。", "成功且有描述仅确认扩展可执行，不证明画面识别准确；明确不支持时不适用。", "核对 video_url 扩展约定；标准接口可另测抽帧图片，扩展拒绝不代表模型造假。"),
+"public_image_url": ("真实图片 URL 输入", "多模态", "发送公开 Picsum 图片 URL，验证渠道是否把外部图片转发给视觉模型。", "HTTP 成功且返回非空可判读描述；明确不支持 URL 时标为不适用。", "区分 URL 抓取失败、模型无视觉能力和请求字段被网关删除。"),
+"public_image_base64": ("真实图片 Base64 输入", "多模态", "下载同一张公开图片并以 image_url Data URL 发送，验证仅支持 Base64 的渠道。", "HTTP 成功且返回非空描述；不以响应自述代替画面准确性。", "核对 Data URL MIME、大小和 Base64 解码，和 URL 轮的 Request ID 对照。"),
+"video_base64_extension": ("video_url Base64 扩展", "多模态扩展", "将公开视频转换为 video_url Data URL 后发送；这是兼容扩展探针。", "成功且有描述仅确认扩展执行；明确不支持时不适用。", "区分 video_url 扩展未实现、模型不支持视频和 Base64 大小限制。"),
+"audio_url_extension": ("audio_url 真实音频 URL", "多模态扩展", "在 messages 中传真实公开音频 URL；明确作为兼容渠道扩展。", "成功且有非空描述仅确认扩展执行；明确不支持时不适用。", "区分 audio_url 扩展未实现、模型不支持音频和上游抓取失败。"),
+"audio_base64_extension": ("input_audio 真实音频 Base64", "多模态扩展", "下载同一公开音频并用 OpenAI input_audio（format=mp3）发送。", "成功且有非空描述仅确认内联音频执行；明确不支持时不适用。", "核对 Base64 MIME、mp3 格式字段、大小限制和请求证据。"),
 "temperature_zero": ("temperature=0 接受性", "参数边界", "发送 temperature=0 的短请求。", "成功且有可见内容；明确不支持采样参数时为不适用。", "核对该模型允许的采样参数，不能强套 Kimi 的固定取值。"),
 "invalid_temperature": ("temperature 负值拒绝", "参数边界", "发送 temperature=-1。", "HTTP 400/422 且错误指向 temperature；不使用 Kimi 不可变参数基线。", "核对采样范围校验及参数名错误映射。"),
 "invalid_message_role": ("非法 message role 拒绝", "参数边界", "发送 role=workbench_invalid_role。", "HTTP 400/422 且错误指向 role/messages。", "检查协议校验，防止网关静默删除非法消息。"),
@@ -52,7 +62,7 @@ OPENAI_CASE_SPECS = {
     for name, spec in _SPECS.items()
 }
 for _name, _spec in OPENAI_CASE_SPECS.items():
-    _spec["dimensions"] = (["multimodal"] if "image" in _name or "video" in _name else
+    _spec["dimensions"] = (["multimodal"] if "image" in _name or "video" in _name or "audio" in _name else
                            ["tools"] if "tool" in _name else
                            ["max_tokens"] if "max_tokens" in _name or "max_completion_tokens" in _name else
                            ["cache"] if "cache" in _name or "usage_accounting" in _name else
@@ -81,7 +91,7 @@ def _record_observations(record_property):
 CALCULATOR = {"type":"function","function":{"name":"Calculator","description":"Calculate one arithmetic expression.","parameters":{"type":"object","properties":{"expr":{"type":"string"}},"required":["expr"]}}}
 WEATHER = {"type":"function","function":{"name":"WeatherQuery","description":"Look up weather for a city.","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}
 CALC_PROMPT = "Use Calculator to calculate 23 * 47. Do not calculate it yourself."
-VIDEO_URL = "https://sf1-cdn-tos.huoshanstatic.com/obj/media-fe/xgplayer_doc_video/mp4/xgplayer-demo-360p.mp4"
+VIDEO_URL = PUBLIC_VIDEO_URL
 
 @pytest.fixture
 def model():
@@ -215,6 +225,13 @@ def _fixture_image(order=("red","green","blue")):
     canvas.save(stream,"PNG")
     return "data:image/png;base64," + base64.b64encode(stream.getvalue()).decode("ascii")
 
+
+def _public_data_url(kind):
+    value, _fetched = fixture_data_url(kind)
+    if not value:
+        pytest.skip("公共 %s 样例无法转换为 Base64；未发送伪造媒体。" % kind)
+    return value
+
 def _colors(text):
     try:
         value = json.loads(text)
@@ -325,6 +342,26 @@ def test_openai_image_groundtruth(hclient, model):
     value = _colors(_text(_body(_post(hclient,model,[{"role":"user","content":content}]))))
     assert value == ["red","green","blue"], "图片颜色顺序与内置真值不一致"
 
+
+def test_openai_public_image_url(hclient, model):
+    response = _post(hclient, model, [{"role":"user","content":[
+        {"type":"text","text":"请用一句话描述这张真实图片中清晰可见的主体；不要臆测不可见细节。"},
+        {"type":"image_url","image_url":{"url":IMAGE_URL}},
+    ]}], max_tokens=128)
+    _optional(response, ("image_url", "image", "vision"))
+    text = _text(_body(response))
+    if any(term in text.lower() for term in ("无法读取", "无法访问", "cannot view", "unable to access")):
+        pytest.skip("能力未验证：渠道接受请求但明确表示无法读取远程图片。" + _safe(text))
+
+
+def test_openai_public_image_base64(hclient, model):
+    response = _post(hclient, model, [{"role":"user","content":[
+        {"type":"text","text":"请用一句话描述这张真实图片中清晰可见的主体；不要臆测不可见细节。"},
+        {"type":"image_url","image_url":{"url":_public_data_url("image")}},
+    ]}], max_tokens=128)
+    _optional(response, ("image_url", "image", "vision"))
+    _text(_body(response))
+
 def _cache_reads(usage):
     values = []
     details = usage.get("prompt_tokens_details")
@@ -405,6 +442,39 @@ def test_openai_video_url_extension(hclient, model):
     text = _text(_body(response))
     if any(term in text.lower() for term in ("无法读取","无法访问","无法观看","can't view","cannot view","cannot access","unable to access")):
         pytest.skip("能力未验证：请求被接受，但模型明确表示无法读取视频。" + _safe(text))
+
+
+def test_openai_video_base64_extension(hclient, model):
+    response = _post(hclient, model, [{"role":"user","content":[
+        {"type":"text","text":"请简短描述视频中的实际画面；若无法读取视频请明确说明。"},
+        {"type":"video_url","video_url":{"url":_public_data_url("video")}},
+    ]}], max_tokens=300)
+    _optional(response, ("video_url", "video", "content.type"))
+    text = _text(_body(response))
+    if any(term in text.lower() for term in ("无法读取","无法访问","无法观看","can't view","cannot view","cannot access","unable to access")):
+        pytest.skip("能力未验证：请求被接受，但模型明确表示无法读取 Base64 视频。" + _safe(text))
+
+def test_openai_audio_url_extension(hclient, model):
+    response = _post(hclient, model, [{"role":"user","content":[
+        {"type":"text","text":"请简短描述这段音频中的内容；若无法读取音频请明确说明。"},
+        {"type":"audio_url","audio_url":{"url":AUDIO_URL}},
+    ]}], max_tokens=128)
+    _optional(response, ("audio_url", "audio", "input_audio", "content.type"))
+    text = _text(_body(response))
+    if any(term in text.lower() for term in ("无法读取","无法访问","cannot hear","cannot listen","unable to access")):
+        pytest.skip("能力未验证：请求被接受，但模型明确表示无法读取远程音频。" + _safe(text))
+
+def test_openai_audio_base64_extension(hclient, model):
+    value = _public_data_url("audio")
+    prefix, encoded = value.split(",", 1)
+    response = _post(hclient, model, [{"role":"user","content":[
+        {"type":"text","text":"请简短描述这段音频中的内容；若无法读取音频请明确说明。"},
+        {"type":"input_audio","input_audio":{"data":encoded,"format":"mp3"}},
+    ]}], max_tokens=128)
+    _optional(response, ("input_audio", "audio_url", "audio", "content.type"))
+    text = _text(_body(response))
+    if any(term in text.lower() for term in ("无法读取","无法访问","cannot hear","cannot listen","unable to access")):
+        pytest.skip("能力未验证：请求被接受，但模型明确表示无法读取 Base64 音频。" + _safe(text))
 
 def test_openai_temperature_zero(hclient, model):
     response = _post(hclient,model,temperature=0)

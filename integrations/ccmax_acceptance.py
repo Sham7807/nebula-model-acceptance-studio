@@ -26,8 +26,10 @@ import httpx
 
 try:
     from . import ccmax_openai
+    from .media_fixtures import variants as media_variants
 except ImportError:
     import ccmax_openai
+    from media_fixtures import variants as media_variants
 
 
 BASE_CHECKS = [
@@ -47,6 +49,9 @@ ADVANCED_CHECKS = [
     ("parameter_validation", "危险参数拒绝与错误可诊断性"),
 ]
 CHECKS = BASE_CHECKS + ADVANCED_CHECKS
+MULTIMODAL_CHECKS = [
+    ("multimodal", "真实图片/视频/音频 URL 与 Base64 输入"),
+]
 MAX_EVIDENCE_BYTES = 16 * 1024 * 1024
 _SIGNATURE_ERROR = re.compile(r"signature|签名", re.I)
 
@@ -105,6 +110,10 @@ def _configuration(config):
     if not isinstance(advanced, bool):
         raise ValueError("高级 CCMax 探针开关必须为布尔值")
     result["advanced"] = advanced
+    multimodal = config.get("multimodal", False)
+    if not isinstance(multimodal, bool):
+        raise ValueError("多模态探针开关必须为布尔值")
+    result["multimodal"] = multimodal
     return result, key
 
 
@@ -193,7 +202,43 @@ def _probe_specs(settings):
             {"id": "fingerprint-1", "probe": "fingerprint", "body": copy.deepcopy(fingerprint)},
             {"id": "fingerprint-2", "probe": "fingerprint", "body": copy.deepcopy(fingerprint)},
             {"id": "invalid-parameters-1", "probe": "invalid_parameters", "body": invalid_parameters},
-        ])
+    ])
+    if settings.get("multimodal"):
+        # Public media is tested twice: URL exercises upstream fetching while
+        # Base64 exercises inline media handling.  The URL is kept in evidence
+        # even when the local verifier has to use its bounded fallback bytes.
+        image_variants = media_variants("image", fetch=True)
+        video_variants = media_variants("video", fetch=True)
+        audio_variants = media_variants("audio", fetch=True)
+        for media_kind, variants in (("image", image_variants), ("video", video_variants), ("audio", audio_variants)):
+            for item in variants:
+                encoding = str(item["encoding"])
+                value = str(item["value"])
+                if media_kind == "image":
+                    source = {"type": "url", "url": value} if encoding == "url" else {
+                        "type": "base64", "media_type": value.split(";", 1)[0][5:], "data": value.split(",", 1)[1]
+                    }
+                    prompt = "Describe the visible subject in this image in one concise sentence. Do not invent details."
+                elif media_kind == "video":
+                    source = {"type": "url", "url": value} if encoding == "url" else {
+                        "type": "base64", "media_type": value.split(";", 1)[0][5:], "data": value.split(",", 1)[1]
+                    }
+                    prompt = "Describe the main action in this video in one concise sentence."
+                else:
+                    source = {"type": "url", "url": value} if encoding == "url" else {
+                        "type": "base64", "media_type": value.split(";", 1)[0][5:], "data": value.split(",", 1)[1]
+                    }
+                    prompt = "Briefly describe or transcribe the audible content in this audio."
+                body = {"model": model, "max_tokens": 160, "stream": False,
+                        "messages": [{"role": "user", "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": media_kind, "source": source},
+                        ]}]}
+                specs.append({"id": "%s-public-%s" % (media_kind, encoding), "probe": "multimodal",
+                              "media_kind": media_kind, "media_encoding": encoding,
+                              "media_source_url": next((x["value"] for x in variants if x["encoding"] == "url"), value),
+                              "media_remote": bool(item.get("remote")),
+                              "optional_capability": media_kind in ("video", "audio"), "body": body})
     return ccmax_openai.transform_specs(specs) if settings.get("request_format") == "openai" else specs
 
 
@@ -439,6 +484,14 @@ def _collect_sample(spec, settings, key, transport, cancelled):
               "request": {"method": "POST", "url": settings.get("endpoint") or _endpoint(settings["base"], settings.get("request_format", "anthropic")), "body": spec["body"]},
               "response": {"status": None, "headers": [], "body": ""},
               "evidence": {"request_ids": [], "message_ids": []}, "assessments": []}
+    if spec.get("media_encoding"):
+        sample["evidence"].update({
+            "media_kind": spec.get("media_kind"),
+            "media_encoding": spec.get("media_encoding"),
+            "media_source_url": spec.get("media_source_url"),
+            "media_remote": bool(spec.get("media_remote")),
+            "optional_capability": bool(spec.get("optional_capability")),
+        })
     if spec.get("canary"):
         sample["canary"] = spec["canary"]
     done = threading.Event()
@@ -641,9 +694,28 @@ def _judge(sample, parser):
         json_response = True
     except (ValueError, TypeError):
         payload = None
+    success = code is not None and 200 <= code < 300
+    if probe == "multimodal":
+        media_kind = sample.get("evidence", {}).get("media_kind", "image")
+        encoding = sample.get("evidence", {}).get("media_encoding", "unknown")
+        text = _response_text(payload)
+        sample["evidence"]["output_text"] = text[:4000]
+        label = ("图片" if media_kind == "image" else "视频" if media_kind == "video" else "音频") + "（" + encoding.upper() + "）"
+        if end == "eof" and success and text.strip():
+            rows.append(_assessment("multimodal", "passed", "%s获得非空媒体描述；仅证明本次请求被处理，不代表视觉内容事实完全正确" % label))
+            sample["status"] = "passed"
+        elif end == "eof" and code in (400, 404, 415, 422, 501) and bool(sample.get("evidence", {}).get("optional_capability")):
+            rows.append(_assessment("multimodal", "inconclusive", "%s被明确拒绝（HTTP %s）；可能是协议或模型能力不适用，不能当作渠道失败" % (label, code)))
+            sample["status"] = "inconclusive"
+        elif end == "eof" and success:
+            rows.append(_assessment("multimodal", "inconclusive", "%s返回成功但没有可见描述，无法确认媒体是否被模型读取" % label))
+            sample["status"] = "inconclusive"
+        else:
+            rows.append(_assessment("multimodal", "inconclusive", "%s未获得完整媒体响应（HTTP %s，%s）；需区分 URL 抓取、MIME、协议和模型能力" % (label, code, end)))
+            sample["status"] = "inconclusive"
+        return
     if isinstance(payload, dict) and isinstance(payload.get("id"), str):
         sample["evidence"]["message_ids"] = [payload["id"]]
-    success = code is not None and 200 <= code < 300
     if end == "cancelled":
         sample["status"] = "cancelled"
         sample["issues"] = ["用户取消"]
@@ -806,7 +878,7 @@ def _summarize(samples, total, settings, was_cancelled):
             if sample.get("status") == "passed":
                 sample["status"] = "inconclusive"
     checks = []
-    check_definitions = BASE_CHECKS + (ADVANCED_CHECKS if settings.get("advanced") else [])
+    check_definitions = BASE_CHECKS + (ADVANCED_CHECKS if settings.get("advanced") else []) + (MULTIMODAL_CHECKS if settings.get("multimodal") else [])
     for check_id, label in check_definitions:
         rows = [(sample, row) for sample in samples for row in sample["assessments"] if row["check"] == check_id]
         counts = {status: sum(row["status"] == status for _, row in rows) for status in ("passed", "failed", "inconclusive", "not_covered")}

@@ -1,0 +1,23 @@
+{
+  "image": {
+    "file": "picsum-237.jpg",
+    "url": "https://picsum.photos/id/237/800/600",
+    "mime": "image/jpeg",
+    "size": 71743,
+    "sha256": "1d1d548674a4beebdfea25bf56b532072e6892144c91c19a8c00adb87f4c45e7"
+  },
+  "video": {
+    "file": "sample-5s.mp4",
+    "url": "https://download.samplelib.com/mp4/sample-5s.mp4",
+    "mime": "video/mp4",
+    "size": 2848208,
+    "sha256": "05bd857af7f70bf51b6aac1144046973bf3325c9101a554bc27dc9607dbbd8f5"
+  },
+  "audio": {
+    "file": "sample-3s.mp3",
+    "url": "https://download.samplelib.com/mp3/sample-3s.mp3",
+    "mime": "audio/mpeg",
+    "size": 52079,
+    "sha256": "0244590f2b4bcb62352b574e78bea940e8d89cfa69823b5208ef4c43e0abcb44"
+  }
+}

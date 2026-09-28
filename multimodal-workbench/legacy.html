@@ -263,10 +263,18 @@ async function generalFetch(url,options={},stream=false){
   const sessionResponse=await fetch('/api/session',{credentials:'same-origin',cache:'no-store',signal:options.signal});
   const session=await sessionResponse.json();
   if(!sessionResponse.ok||!session.token)throw new Error(session.error||'登录会话失效，请重新登录后重试。');
-  const response=await fetch('/api/proxy',{method:'POST',credentials:'same-origin',redirect:'error',signal:options.signal,headers:{'Content-Type':'application/json','X-Workbench-Token':session.token},body:JSON.stringify({url,method:options.method||'POST',headers:options.headers,body:options.body,stream,timeout:cfg().timeout/1000})});
+  const response=await fetch('/api/proxy',{method:'POST',credentials:'same-origin',redirect:'error',signal:options.signal,headers:{'Content-Type':'application/json','X-Workbench-Token':session.token},body:JSON.stringify({url,method:options.method||'POST',headers:options.headers,body:options.body,stream,timeout:cfg().timeout/1000,...(options.media_fetch===true?{media_fetch:true}:{})})});
   if(stream)return response;
   const data=await response.json();
   if(!response.ok||data.error)throw new Error(data.error||'工作台代理请求失败：HTTP '+response.status);
+  // The media proxy returns binary fixtures as body_base64.  Rehydrate the
+  // bytes before constructing Response so image/video Base64 probes use the
+  // exact downloaded content instead of an empty text body.
+  if(typeof data.body_base64==='string'){
+    const encoded=data.body_base64.replace(/\s/g,''),binary=atob(encoded),bytes=new Uint8Array(binary.length);
+    for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
+    return new Response(bytes,{status:data.status,headers:data.headers});
+  }
   return new Response([204,205,304].includes(data.status)?null:(data.text||''),{status:data.status,headers:data.headers});
 }
 
@@ -690,23 +698,26 @@ async function tCache(){
   return{hit:cached.some((v,i)=>i%4>0&&i%4<3&&v>0),cached,created,raw,fails,reported:raw.some(v=>Object.keys(v||{}).length)};
 }
 
-/* 视频输入探针：先按常见 OpenAI 多模态协议发送远程 URL；如果渠道明确要求 Base64 Data URL，
-   自动尝试把同一个公开样例转为 data: URL 重试。这样“格式不兼容”不会被误判成“模型不支持视频”。 */
-async function videoDataUrl(url){
+/* 视频/图片输入探针：先发送真实 URL；当同一样例需要 Base64 时，通过
+   /api/proxy 的 media_fetch 下载，避免部署站点的 CORS 限制。URL 与 Base64
+   作为两条独立证据保留，下载失败只记为“无法判定”，不伪造成功。 */
+async function mediaDataUrl(url,kind){
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000);
   try{
-    const response=await fetch(url,{signal:controller.signal,cache:'no-store',mode:'cors'});
-    if(!response.ok)throw new Error(`样例视频下载 HTTP ${response.status}`);
-    const blob=await response.blob();
-    const maxBytes=8*1024*1024;
-    if(blob.size>maxBytes)throw new Error(`样例视频 ${Math.ceil(blob.size/1024/1024)}MB，超过 8MB 探针上限`);
+    const response=await generalFetch(url,{method:'GET',signal:controller.signal,media_fetch:true});
+    if(!response.ok)throw new Error(`样例${kind==='video'?'视频':'图片'}下载 HTTP ${response.status}`);
+    const blob=await response.blob(),maxBytes=kind==='video'?16*1024*1024:8*1024*1024;
+    if(blob.size>maxBytes)throw new Error(`样例${kind==='video'?'视频':'图片'} ${Math.ceil(blob.size/1024/1024)}MB，超过 ${maxBytes/1024/1024}MB 探针上限`);
+    const fallbackMime=kind==='video'?'video/mp4':'image/jpeg',mime=blob.type&&new RegExp('^'+kind+'\\/','i').test(blob.type)?blob.type:fallbackMime;
     const bytes=new Uint8Array(await blob.arrayBuffer()),parts=[];
     for(let i=0;i<bytes.length;i+=0x8000)parts.push(String.fromCharCode(...bytes.subarray(i,i+0x8000)));
-    return `data:${blob.type||'video/mp4'};base64,${btoa(parts.join(''))}`;
+    return `data:${mime};base64,${btoa(parts.join(''))}`;
   }finally{clearTimeout(timer);}
 }
+async function videoDataUrl(url){return mediaDataUrl(url,'video');}
+async function imageDataUrl(url){return mediaDataUrl(url,'image');}
 async function tVideoInput(){
-  const sample='https://sf1-cdn-tos.huoshanstatic.com/obj/media-fe/xgplayer_doc_video/mp4/xgplayer-demo-360p.mp4';
+  const sample='https://download.samplelib.com/mp4/sample-5s.mp4';
   const basePayload={model:cfg().model,stream:false,max_tokens:300,messages:[{role:'user',content:[
     {type:'text',text:'请描述一下这个视频的内容，并指出一个象征意义。'},
     {type:'video_url',video_url:{url:sample}}
@@ -718,8 +729,12 @@ async function tVideoInput(){
   attempts.push({kind:'remote_url',status:firstStatus,text:firstText.slice(0,240),error:firstError});
   const formatRequired=!acceptedFirst&&/base64\s*(?:data\s*)?url|data\s*url|must be.*base64/i.test(firstError);
   let fallback=null,fallbackError='';
-  if(!acceptedFirst&&formatRequired){
-    log('视频输入: 渠道要求 Base64 Data URL，正在转换同一样例并重试…','mid');
+  // Always run the same-media Base64 control. A successful URL request alone
+  // cannot prove that an inline-only channel works, and a URL failure can be
+  // a fetch/protocol issue rather than a model capability failure.
+  const retryBase64=true;
+  if(retryBase64){
+    log(`视频输入: ${acceptedFirst?'URL 已完成，继续':'URL 未完成，正在'}转换同一样例并执行 Base64 对照…`,'mid');
     try{
       const dataUrl=await videoDataUrl(sample);
       const fallbackPayload={...basePayload,messages:[{role:'user',content:[
@@ -729,19 +744,24 @@ async function tVideoInput(){
       fallback=await postSmart(fallbackPayload);
       const fallbackText=content(fallback),fallbackStatus=Number(fallback.status)||0;
       attempts.push({kind:'base64_data_url',status:fallbackStatus,text:fallbackText.slice(0,240),error:String(fallback.err||fallback.body?.error?.message||'')});
-      if(valid(fallback)&&fallbackText.trim()){r=fallback;}
+      if(!acceptedFirst&&valid(fallback)&&fallbackText.trim()){r=fallback;}
     }catch(error){fallbackError=error?.message||'Base64 转换失败';attempts.push({kind:'base64_data_url',status:0,text:'',error:fallbackError});}
   }
+  const fallbackText=content(fallback),acceptedFallback=!!fallback&&valid(fallback)&&fallbackText.trim().length>0;
   const text=content(r),status=Number(r.status)||0,accepted=valid(r)&&text.trim().length>0;
   const errorText=String(r.err||r.body?.error?.message||firstError);
   const explicitUnsupported=!accepted&&!formatRequired&&(/unsupported|not support|does not support|视频.*不支持|video.*not available/i.test(errorText)||[404,415,422].includes(status));
   const unsupported=explicitUnsupported;
-  const cls=accepted?'ok':formatRequired?'mid':unsupported?'mid':'bad';
-  const resultText=accepted?text.slice(0,180):formatRequired?`远程 URL：HTTP ${firstStatus||'网络'} ${firstError.slice(0,100)}；${fallback?`Base64 重试：HTTP ${Number(fallback.status)||'网络'}${fallbackError?'（'+fallbackError+'）':''}`:fallbackError||'未能完成 Base64 重试'}`:`HTTP ${status||'网络'} ${errorText.slice(0,130)}`;
-  const judge=accepted?'✅ 视频已被模型处理（已区分 URL / Base64 格式）':formatRequired?'⚠️ 渠道要求 Base64 Data URL；当前结果只能说明 URL 格式不兼容，不能判定模型不支持视频':unsupported?'⚠️ 渠道明确拒绝视频输入':'❌ 请求失败或响应异常';
-  detail('视频输入（video_url）',resultText,cls,judge);
-  log(`视频输入: ${accepted?'已识别':formatRequired?'URL 格式受限 / 已尝试 Base64':unsupported?'明确不支持':'请求异常'}${status?` HTTP ${status}`:''}`,cls);
-  return{accepted,unsupported,formatRequired,status,text:text.slice(0,240),attempts};
+  const cls=accepted&&acceptedFallback?'ok':'mid';
+  const fallbackSummary=acceptedFallback?`Base64 对照成功：${fallbackText.slice(0,100)}`:fallback?`Base64 对照未通过：HTTP ${Number(fallback.status)||'网络'}${fallbackError?'（'+fallbackError+'）':fallbackText?'（无可判读描述）':''}`:fallbackError||'未能完成 Base64 对照';
+  const resultText=`URL ${accepted?'成功':'未完成'}：${accepted?text.slice(0,100):`HTTP ${firstStatus||'网络'} ${firstError.slice(0,100)}`}；${fallbackSummary}`;
+  const judge=accepted&&acceptedFallback?'✅ URL 与 Base64 均获得视频描述':accepted||acceptedFallback?'⚠️ 仅一种编码获得响应，另一种无法判定':'⚠️ URL / Base64 均未获得可判读视频描述';
+  const urlAttempt=attempts.find(item=>item.kind==='remote_url')||{},baseAttempt=attempts.find(item=>item.kind==='base64_data_url')||{};
+  detail('视频输入 · URL',accepted?urlAttempt.text||'已返回非空描述':`HTTP ${urlAttempt.status||'网络'} ${urlAttempt.error||'未返回可判读描述'}`,accepted?'ok':'mid',accepted?'✅ URL 输入已获得描述':'⚠️ URL 输入无法判定',{id:'video_public_url',dimensions:['multimodal'],parameters:{fixture:'samplelib-5s',encoding:'url',source_url:sample},method:'发送公开视频 URL，检查渠道是否能抓取并把视频交给模型。',expected:'成功返回非空描述；抓取失败、协议拒绝和模型无能力分开记录。',observed:urlAttempt.text||urlAttempt.error||'',reason_code:accepted?'assertion_passed':'media_url_not_readable',score_applicable:accepted,evidence_category:'measured'});
+  detail('视频输入 · Base64',acceptedFallback?baseAttempt.text||'已返回非空描述':`HTTP ${baseAttempt.status||'网络'} ${baseAttempt.error||fallbackError||'未返回可判读描述'}`,acceptedFallback?'ok':'mid',acceptedFallback?'✅ Base64 输入已获得描述':'⚠️ Base64 输入无法判定',{id:'video_public_base64',dimensions:['multimodal'],parameters:{fixture:'samplelib-5s',encoding:'base64',source_url:sample},method:'下载同一公开视频并转为 video_url Base64 Data URL，检查仅接受内联媒体的渠道。',expected:'成功返回非空描述；转换/大小失败不能直接归因于模型。',observed:baseAttempt.text||baseAttempt.error||fallbackError||'',reason_code:acceptedFallback?'assertion_passed':'media_base64_not_readable',score_applicable:acceptedFallback,evidence_category:'measured'});
+  detail('视频输入（URL + Base64 汇总）',resultText,cls,judge,{id:'video_public_media',dimensions:['multimodal'],parameters:{fixture:'samplelib-5s',encodings:['url','base64'],source_url:sample},method:'汇总同一视频两种编码的独立证据。',expected:'URL 与 Base64 都返回非空描述；单一编码失败只记为无法判定并区分格式、抓取和模型能力。',observed:resultText,reason_code:accepted&&acceptedFallback?'assertion_passed':'media_encoding_partial',score_applicable:false,evidence_category:'aggregate'});
+  log(`视频输入: ${accepted&&acceptedFallback?'URL + Base64 均已识别':accepted||acceptedFallback?'仅一种编码已识别':'两种编码均异常'}${status?` HTTP ${status}`:''}`,cls);
+  return{accepted:accepted||acceptedFallback,acceptedUrl:accepted,acceptedBase64:acceptedFallback,unsupported,formatRequired,retriedBase64:retryBase64,status,text:text.slice(0,240),attempts};
 }
 
 async function tVision(){
@@ -749,6 +769,16 @@ async function tVision(){
   let hits=0,malf=0;const notes=[];let contentHits=0;
   for(const k of cases){
     await matrixRequest('视觉输入 · 颜色 '+k.w,{model:cfg().model,max_tokens:1024,stream:false,messages:[{role:'user',content:[{type:'image_url',image_url:{url:makePng(...k.c)}},{type:'text',text:'这张图片的主要颜色是什么？只回答中文颜色名。'}]}]}, {id:'vision_color_'+k.w,dimensions:['multimodal'],parameters:{fixture:'solid_rgb',rgb:k.c},method:'上传实际生成的纯色PNG，分别验证红、蓝、绿。',expected:'回答包含本张图片对应的中文颜色名：'+k.w},r=>{const hit=valid(r)&&content(r).includes(k.w);if(hit)hits++;if(malformed(r))malf++;notes.push(`${k.w}→${content(r).slice(0,15)}`);return {status:hit?'passed':'failed',reason_code:hit?'assertion_passed':'visual_ground_truth_mismatch',observed:content(r),meaning:'以已知像素颜色为判定基准，单次答对不代替内容图与多图检验。'};});
+  }
+  const publicImage='https://picsum.photos/id/237/800/600';
+  await matrixRequest('视觉输入 · 真实图片 URL',{model:cfg().model,max_tokens:512,stream:false,messages:[{role:'user',content:[{type:'text',text:'请用一句话描述这张真实图片中清晰可见的主体；不要臆测不可见细节。'},{type:'image_url',image_url:{url:publicImage}}]}]}, {id:'vision_public_url',dimensions:['multimodal'],parameters:{fixture:'picsum-237',encoding:'url',source_url:publicImage},method:'向模型发送公开真实图片 URL，保存 URL 和原始响应。',expected:'成功返回非空可判读描述；URL 抓取失败或协议不支持单独记录。'},r=>{const text=content(r),ok=valid(r)&&text.trim().length>0&&!/无法读取|无法访问|cannot view|unable to access/i.test(text);return {status:ok?'passed':'inconclusive',reason_code:ok?'assertion_passed':'media_not_readable',observed:text,meaning:ok?'真实图片 URL 获得非空描述；仍需人工对照原图核验。':'请求完成但未能证明渠道读取远程图片，不能直接判定模型不支持视觉。'};});
+  try{
+    const publicBase64=await imageDataUrl(publicImage);
+    await matrixRequest('视觉输入 · 真实图片 Base64',{model:cfg().model,max_tokens:512,stream:false,messages:[{role:'user',content:[{type:'text',text:'请用一句话描述这张真实图片中清晰可见的主体；不要臆测不可见细节。'},{type:'image_url',image_url:{url:publicBase64}}]}]}, {id:'vision_public_base64',dimensions:['multimodal'],parameters:{fixture:'picsum-237',encoding:'base64',source_url:publicImage},method:'下载同一公开图片并转为 Base64 Data URL，验证仅支持内联媒体的渠道。',expected:'成功返回非空可判读描述；保留 MIME、大小和原始请求证据。'},r=>{const text=content(r),ok=valid(r)&&text.trim().length>0&&!/无法读取|无法访问|cannot view|unable to access/i.test(text);return {status:ok?'passed':'inconclusive',reason_code:ok?'assertion_passed':'media_not_readable',observed:text,meaning:ok?'同一真实图片的 Base64 输入获得非空描述；仍需人工对照原图核验。':'Base64 请求完成但未能证明渠道读取图片，不能直接判定模型不支持视觉。'};});
+  }catch(error){
+    const message='真实图片 Base64 转换失败：'+(error?.message||error);
+    notes.push(message);log(message+'；URL 样本已保留，详见日志。','mid');
+    detail('视觉输入 · 真实图片 Base64',message,'mid','⚠️ 无法判定',{id:'vision_public_base64',dimensions:['multimodal'],parameters:{fixture:'picsum-237',encoding:'base64',source_url:publicImage},method:'通过工作台媒体代理下载同一公开图片并转为 Base64 Data URL；代理/CORS/大小限制失败时保留原因。',expected:'成功返回非空可判读描述；转换失败不把模型能力判为失败。',observed:message,reason_code:'media_fetch_failed',score_applicable:false,evidence_category:'infrastructure'});
   }
   const repeat=matrixMode()==='full'?3:2;
   for(let i=0;i<repeat;i++){

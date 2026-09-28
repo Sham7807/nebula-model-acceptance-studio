@@ -28,6 +28,16 @@ test('general export expands every assertion, preserves source score and exclude
   assert.doesNotMatch(html,/渠道基础测试/);
   assert.match(html,/不参与分母/);
 });
+test('portable report shows source provenance and compact capability metrics',async()=>{
+  const r=record();r.result.config.resource_source='official_relay';
+  const html=await harness().WorkbenchReport.render([r],[]);
+  assert.match(html,/资源来源判定/);
+  assert.match(html,/官方资源转接 \/ 官转（渠道自报）/);
+  assert.match(html,/class="brief-metric"/);
+  assert.match(html,/已判定通过率 <b>100%<\/b>/);
+  assert.match(html,/class="nav-links"/);
+  assert.doesNotMatch(html,/nav-primary is-active/);
+});
 test('basic success cannot fabricate tool, cache, max_tokens or performance coverage',async()=>{
   const html=await harness().WorkbenchReport.render([{kind:'text',model:'ordinary',status:'success',config:{prompt:'talk about tools cache max_tokens'},raw:{usage:{prompt_tokens:5,completion_tokens:6,total_tokens:11}},text:'tool cache max_tokens stable'}],[]);
   assert.equal((html.match(/score-dimension not_covered/g)||[]).length,5);
@@ -311,7 +321,7 @@ test('unscorable evidence is pending assessment, never a fabricated zero grade',
 test('resource grade sits before the headline and multimodel ratings remain provisional even with sufficient evidence',async()=>{
   const first={...gradeFixture(90),model:'first'},second={...gradeFixture(90),model:'second'};
   const html=overview(await harness().WorkbenchReport.render([first,second]));
-  assert.match(html,/<div class="executive-verdict"><span class="index">VERDICT \/ 本轮结论<\/span><div class="resource-grade grade-high">/);
+  assert.match(html,/<div class="executive-verdict"><span class="index">VERDICT \/ 本轮结论<\/span><div class="resource-provenance">[\s\S]*<div class="resource-grade grade-high">/);
   assert.ok(html.indexOf('class="resource-grade')<html.indexOf('<h2>'));
   assert.doesNotMatch(html.split('<div class="executive-score">')[1],/class="resource-grade/);
   assert.match(html,/<small>暂定 · 证据待完善<\/small>/);

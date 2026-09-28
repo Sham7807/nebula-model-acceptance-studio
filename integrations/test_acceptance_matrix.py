@@ -77,6 +77,8 @@ class MatrixTests(unittest.TestCase):
                 prefixes.add(prefix)
                 return respond(text="CACHE-MATRIX-ACK", input_tokens=12000 if fmt == "openai" else 10, cache_read=read, cache_creation=12000 if read == 0 else 0)
             if "MATRIX-PRIVATE-" in str(system): return respond(text="MATRIX-SAFE-ACK")
+            if '"type": "url"' in prompt or '"fileData"' in prompt or '"video"' in prompt or '"audio"' in prompt or '"video_url"' in prompt or '"audio_url"' in prompt or '"input_audio"' in prompt:
+                return respond(text="A real public media fixture was received and is available for inspection.")
             if '"image"' in prompt or '"image_url"' in prompt:
                 if "black squares" in prompt: return respond(text="3")
                 images = next(x["content"] for x in body["messages"] if isinstance(x.get("content"), list))
@@ -92,7 +94,7 @@ class MatrixTests(unittest.TestCase):
         return handle
 
     def test_profiles_have_actual_parameter_variations_and_precise_bounds(self):
-        for profile, expected, caps in (("quick", 27, 3), ("standard", 59, 12), ("comprehensive", 160, 72)):
+        for profile, expected, caps in (("quick", 31, 3), ("standard", 63, 12), ("comprehensive", 164, 72)):
             with self.subTest(profile=profile):
                 plan = m.build_plan(self.config(matrix_profile=profile))
                 self.assertEqual(plan["request_count"], expected)
@@ -110,7 +112,10 @@ class MatrixTests(unittest.TestCase):
                 result = m.run(self.config(request_format=fmt, transport=httpx.MockTransport(self.handler(calls, fmt))))
                 failed = [(x["id"], x["observed"]) for x in result["cases"] if x["status"] != "passed"]
                 self.assertEqual(failed, [])
-                self.assertEqual(len(calls), 59)
+                # Public image URL + Base64 are always included. OpenAI
+                # compatibility additionally exercises optional video URL and
+                # inline Base64 forms.
+                self.assertEqual(len(calls), 61 + (4 if fmt == "openai" else 2))
                 self.assertEqual(result["summary"]["request_count"], len(calls))
                 self.assertEqual(result["metrics"]["stress"]["total_requests"], 16)
                 self.assertEqual(len(result["metrics"]["cache"]["rounds"]), 4)
@@ -329,7 +334,9 @@ class MatrixTests(unittest.TestCase):
         for fmt in ("anthropic", "openai"):
             calls = []
             result = m.run(self.config(request_format=fmt, matrix_profile="comprehensive", transport=httpx.MockTransport(self.handler(calls, fmt))))
-            self.assertEqual(len(calls), 160)
+            # Both formats include the two real video probes. OpenAI adds
+            # the two audio probes because it has a portable audio shape.
+            self.assertEqual(len(calls), 164 + (2 if fmt == "openai" else 0))
             self.assertEqual(len([x for x in result["cases"] if x["id"].startswith("matrix-cap-")]), 72)
             self.assertTrue(all(x["status"] == "passed" for x in result["cases"] if x["id"].startswith("matrix-cap-") or x["id"] == "matrix-tools-nested-stream"))
             self.assertEqual([s["concurrency"] for s in result["metrics"]["stress"]["stages"]], [1, 2, 4, 8])

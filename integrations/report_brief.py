@@ -181,6 +181,8 @@ def item(key, label, checks, conclusion=None, detail=''):
     pending = sum(c.get('status') in ('inconclusive', 'cancelled') or (c.get('status') in ('passed', 'failed') and not eligible(c)) for c in capability)
     missing = sum(c.get('status') in ('skipped', 'not_covered') for c in capability)
     status = 'failed' if failed else 'inconclusive' if pending or (passed and missing) else 'passed' if passed else 'not_covered'
+    denominator = passed + failed
+    rate = (passed / denominator * 100) if denominator else None
     if failed:
         status_label, tone = ('部分异常', 'attention') if passed else ('需重点核查', 'risk')
         observation = ('多数检查通过' if passed > failed else '部分检查通过') + ' · %s 项异常' % failed if passed else '%s 项检查与预期不符' % failed
@@ -190,13 +192,42 @@ def item(key, label, checks, conclusion=None, detail=''):
     else:
         status_label, tone = ('待补充证据', 'neutral') if pending else ('本轮未测', 'neutral')
         observation = '证据待补充' if pending else '本轮未覆盖'
-    conclusion = conclusion or label + '：' + observation
+    rate_label = ('通过率 %s%%' % _percent_label(rate)) if rate is not None else '通过率未记录'
+    conclusion = conclusion or label + '：' + rate_label + '（通过 %s / 异常 %s）' % (passed, failed)
     detail = detail or '已判定 %s 项：%s 项通过、%s 项异常%s%s。' % (passed+failed, passed, failed, '；另 %s 项待确认' % pending if pending else '', '；%s 项未执行' % missing if missing else '')
     evidence = sorted(source_checks, key=lambda c: {'failed':0, 'inconclusive':1, 'passed':2}.get(c.get('status'),3))
     return {'id': key, 'label': label, 'status': status, 'status_label': status_label, 'tone': tone, 'display_tone': tone,
             'counts': {'passed': passed, 'failed': failed, 'pending': pending, 'missing': missing},
+            'rate': rate,
             'conclusion': conclusion, 'detail': detail, 'text': conclusion+'。'+detail,
             'check_ids': [c['id'] for c in evidence if c.get('id')], 'request_ids': list(dict.fromkeys(x for c in evidence for x in rows(c.get('request_ids'))))}
+
+
+def resource_source(result):
+    """Return a clearly scoped provenance label without pretending to authenticate it.
+
+    A channel can claim to be official, an official relay, or a reverse/compatible
+    implementation, but an OpenAI-compatible response cannot prove that claim.
+    Keep the operator's explicit annotation separate from observed evidence.
+    """
+    config = obj(result.get('configuration'))
+    value = str(config.get('resource_source') or '').strip().lower()
+    provider = str(config.get('provider') or '').strip().lower()
+    labels = {
+        'official': ('官方资源（渠道自报）', 'operator_claim', '仅表示操作者选择了“官方直连”；本轮接口证据不能认证官方账号、权重或授权。'),
+        'official_relay': ('官方资源转接 / 官转（渠道自报）', 'operator_claim', '仅表示操作者选择了“官方资源转接”；需要上游账单、Request ID 或服务商日志进一步佐证。'),
+        'reverse': ('逆向 / 兼容实现（渠道自报）', 'operator_claim', '仅表示操作者选择了“逆向 / 兼容实现”；本轮能力结果不等同于安全审计或代码确认。'),
+    }
+    if value in labels:
+        label, kind, note = labels[value]
+    elif provider == 'anthropic':
+        label, kind, note = 'Anthropic 官方（渠道自报，未认证）', 'provider_claim', 'Claude 来源字段由操作者填写，不能单独证明直连官方资源。'
+    elif provider == 'aws':
+        label, kind, note = 'AWS Bedrock 官方云资源（渠道自报，未认证）', 'provider_claim', 'AWS 区域、账号和内部代签仍需上游日志或账单佐证。'
+    else:
+        label, kind, note = '来源未确认（官方 / 官转 / 逆向待核实）', 'unknown', '仅凭模型名、响应字段、能力表现或 Request ID，无法认证上游资源来源。'
+    return {'label': label, 'kind': kind, 'note': note, 'operator_value': value or 'unknown',
+            'provider': provider or None}
 
 
 def presentation(value, label, tone):
@@ -363,7 +394,8 @@ def cache_summary(result, checks):
 def build_summary(result, checks, score):
     selected = lambda *keys: [c for c in checks if dimensions(c).intersection(keys) and not c.get('local_only') and c.get('applicable') is not False]
     basic = item('basic', '基础协议', selected('protocol'))
-    tools = item('tools_media', '工具与多模态', selected('tools', 'multimodal'))
+    tools = item('tools', '工具调用', selected('tools'))
+    media = item('multimodal', '多模态输入', selected('multimodal'))
     caps = selected('max_tokens'); exceeded = []
     for c in caps:
         if not eligible(c) or c.get('status') != 'failed': continue
@@ -412,7 +444,7 @@ def build_summary(result, checks, score):
                 pressure['conclusion'] = '已测负载阶段表现正常'
         pressure['detail'] = text + '。各阶段耗时见上方，详细指标见下方证据；短时样本不代表长期 SLA。'
         presentation(pressure, pressure['status_label'], pressure['tone'])
-    items = [basic, tools, limit, injection, cache, pressure]
+    items = [basic, tools, media, limit, injection, cache, pressure]
     # Batch conclusions must not pretend pooled requests describe one model.
     models = rows(obj(result.get('configuration')).get('models'))
     batch = result.get('suite') == 'batch_acceptance' or len(models) > 1
@@ -420,12 +452,12 @@ def build_summary(result, checks, score):
         items = [item('batch', '多模型结果', checks, '各模型独立判读', '本报告包含多个模型，失败和缓存率请按对应模型的检查证据阅读；不以跨模型汇总证明单个模型能力。')]
     headline_items = sorted(items, key=lambda x: (0 if x['status'] == 'failed' else 1 if x.get('cache') else 2 if x['id'] == 'basic' else 3))
     headline = '；'.join(x['conclusion'] for x in headline_items if x['status'] != 'not_covered')
-    headline = '；'.join(headline.split('；')[:4]) or '本轮缺少可判定证据'
+    headline = '；'.join(headline.split('；')[:5]) or '本轮缺少可判定证据'
     overall = score.get('weighted_total', score.get('total'))
     grade = resource_grade(score)
     if batch:
         grade['provisional'] = grade['level'] != 'unknown'
         grade['note'] = '多模型汇总参考，不能代表每个模型的资源等级；请按模型单独判读。' + grade['note']
     return {'headline': headline, 'status': 'failed' if any(c.get('status') == 'failed' and eligible(c) for c in checks) else obj(score.get('evidence')).get('status', 'inconclusive'),
-            'detail': '先看本轮结论、模块得分和证据可判定率，再对照失败请求。完整测试清单位于报告末尾。',
-            'items': items, 'score': overall, 'overall_score': overall, 'resource_grade': grade, 'resolution_percent': obj(score.get('evidence')).get('resolution_percent'), 'timing': timing, 'duration': timing}
+            'detail': '通过率按已判定项计算；待判定、未覆盖和不适用不会伪装成失败或通过。完整请求证据位于报告后半段。',
+            'items': items, 'score': overall, 'overall_score': overall, 'resource_grade': grade, 'resource_source': resource_source(result), 'resolution_percent': obj(score.get('evidence')).get('resolution_percent'), 'timing': timing, 'duration': timing}

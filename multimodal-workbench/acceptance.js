@@ -19,9 +19,10 @@ const acceptanceModules={
   {id:'multimodal',title:'多模态输入',weight:15,requests:2,desc:'图片、视频 URL 与能力声明'}
  ],
  ccmax:[
-  {id:'protocol',title:'协议与流式',weight:35,requests:4,desc:'SSE 收尾、事件顺序与连接关闭'},
+  {id:'protocol',title:'协议与流式',weight:30,requests:4,desc:'SSE 收尾、事件顺序与连接关闭'},
   {id:'parameters',title:'参数与错误',weight:15,requests:3,desc:'非法参数、错误状态与诊断'},
-  {id:'tools',title:'工具调用',weight:20,requests:3,desc:'工具增量与 JSON 参数完整性'},
+  {id:'tools',title:'工具调用',weight:15,requests:3,desc:'工具增量与 JSON 参数完整性'},
+  {id:'multimodal',title:'真实媒体输入',weight:10,requests:6,desc:'图片、视频、音频 URL / Base64'},
   {id:'security',title:'安全与一致性',weight:15,requests:3,desc:'指令层级、注入与重复行为'},
   {id:'cache',title:'Usage / 缓存',weight:15,requests:2,desc:'token、缓存字段与计数'}
  ],
@@ -111,7 +112,7 @@ function updateCustomCaseStatus(){try{const cases=customProductionCases(true);el
 function config(){
  const isClaude=selected==='claude', requestFormat=isClaude?el('claudeFormat').value:selected==='ccmax'?el('acceptanceFormat').value:el('acceptanceThinkMode').value==='openai'?'openai':'native';
  const models=selectedAcceptanceModels();
- return {...productionConfiguration(),matrix_profile:el('acceptanceMatrixProfile').value,matrix_modules:[...document.querySelectorAll('[data-matrix-module]:checked')].map(x=>x.dataset.matrixModule),suite:isClaude?'claude':selected==='ccmax'?'ccmax':el('acceptanceScope').value,base:el('acceptanceBase').value.trim(),key:el('acceptanceKey').value.trim(),model:models[0]||el('acceptanceModel').value.trim(),models,timeout:Number(el('acceptanceTimeout').value),signature_samples:Number(isClaude?el('claudeSignature').value:el('acceptanceSignature').value),sse_samples:Number(isClaude?el('claudeSse').value:el('acceptanceSse').value),concurrency:isClaude?Number(el('claudeStressConcurrency').value):2,auth:requestFormat==='openai'?'bearer':isClaude?el('claudeAuth').value:el('acceptanceAuth').value,request_format:requestFormat,provider:isClaude?el('claudeProvider').value:undefined,sampling:isClaude?el('claudeSampling').value:undefined,cache_tokens:isClaude?Number(el('claudeCacheTokens').value):undefined,stress_requests:isClaude?Number(el('claudeStressRequests').value):undefined,stress_concurrency:isClaude?Number(el('claudeStressConcurrency').value):undefined,think_mode:el('acceptanceThinkMode').value,thinking:!['none','openai'].includes(el('acceptanceThinkMode').value),advanced:selected==='ccmax'||isClaude,enabled_modules:[...(enabledModules[selected]||[]) ]};
+ return {...productionConfiguration(),matrix_profile:el('acceptanceMatrixProfile').value,matrix_modules:[...document.querySelectorAll('[data-matrix-module]:checked')].map(x=>x.dataset.matrixModule),suite:isClaude?'claude':selected==='ccmax'?'ccmax':el('acceptanceScope').value,base:el('acceptanceBase').value.trim(),key:el('acceptanceKey').value.trim(),model:models[0]||el('acceptanceModel').value.trim(),models,resource_source:el('acceptanceResourceSource')?.value||'unknown',timeout:Number(el('acceptanceTimeout').value),signature_samples:Number(isClaude?el('claudeSignature').value:el('acceptanceSignature').value),sse_samples:Number(isClaude?el('claudeSse').value:el('acceptanceSse').value),concurrency:isClaude?Number(el('claudeStressConcurrency').value):2,auth:requestFormat==='openai'?'bearer':isClaude?el('claudeAuth').value:el('acceptanceAuth').value,request_format:requestFormat,provider:isClaude?el('claudeProvider').value:undefined,sampling:isClaude?el('claudeSampling').value:undefined,cache_tokens:isClaude?Number(el('claudeCacheTokens').value):undefined,stress_requests:isClaude?Number(el('claudeStressRequests').value):undefined,stress_concurrency:isClaude?Number(el('claudeStressConcurrency').value):undefined,think_mode:el('acceptanceThinkMode').value,thinking:!['none','openai'].includes(el('acceptanceThinkMode').value),advanced:selected==='ccmax'||isClaude,multimodal:selected==='ccmax'&&enabledModules.ccmax.has('multimodal'),enabled_modules:[...(enabledModules[selected]||[]) ]};
 }
 function updatePlan(){
  updateProductionSettings();
@@ -238,6 +239,7 @@ function restoreConfiguration(job){
   if(Number.isFinite(value)&&value>=min&&value<=max&&(field==='timeout'||Number.isInteger(value))){el(id).value=String(value);restored[field]=value;}
  }
  if(['anthropic','bearer'].includes(saved.auth))el('acceptanceAuth').value=saved.auth;
+ if(['unknown','official','official_relay','reverse'].includes(saved.resource_source))el('acceptanceResourceSource').value=saved.resource_source;
  if(job.suite==='claude'){
   if(['auto','anthropic','aws'].includes(saved.provider))el('claudeProvider').value=saved.provider;
   if(['anthropic','openai'].includes(saved.request_format))el('claudeFormat').value=saved.request_format;
@@ -403,6 +405,7 @@ el('claudeProductionImport').addEventListener('click',()=>el('claudeProductionFi
 el('claudeProductionFile').addEventListener('change',async()=>{const file=el('claudeProductionFile').files?.[0];if(!file)return;try{if(file.size>1024*1024)throw new Error('业务样本文件不得超过 1 MB');const text=await file.text();el('claudeProductionCases').value=text;const cases=customProductionCases(true);el('claudeProductionCases').value=JSON.stringify(cases,null,2);document.querySelector('[data-production-workload="custom"]').checked=!!cases.length;updateCustomCaseStatus();}catch(error){el('claudeProductionCasesStatus').textContent=error.message;el('claudeProductionCasesStatus').classList.add('error');}finally{el('claudeProductionFile').value='';}});
 for(const b of document.querySelectorAll('[data-suite]'))b.addEventListener('click',()=>selectSuite(b.dataset.suite));
 el('acceptanceScope').addEventListener('change',updatePlan);
+el('acceptanceResourceSource')?.addEventListener('change',updatePlan);
 for(const id of ['claudeProvider','claudeFormat','claudeAuth','claudeSampling','claudeSignature','claudeSse','claudeCacheTokens','claudeStressRequests','claudeStressConcurrency'])el(id)?.addEventListener('change',()=>{if(id==='claudeSampling'){const mode=el(id).value;if(mode!=='custom')el('claudeCacheTokens').value=12000;if(mode==='quick'){el('claudeSignature').value=1;el('claudeSse').value=3;el('claudeStressRequests').value=1;el('claudeStressConcurrency').value=1;}else if(mode==='professional'){el('claudeSignature').value=3;el('claudeSse').value=5;el('claudeStressRequests').value=20;el('claudeStressConcurrency').value=4;}else if(mode==='stress'){el('claudeSignature').value=2;el('claudeSse').value=10;el('claudeStressRequests').value=100;el('claudeStressConcurrency').value=10;}}updatePlan();});
 for(const id of ['claudeSignature','claudeSse','claudeCacheTokens','claudeStressRequests','claudeStressConcurrency'])el(id).addEventListener('input',()=>{el('claudeSampling').value='custom';updatePlan();});
 el('acceptanceThinkMode').addEventListener('change',updatePlan);

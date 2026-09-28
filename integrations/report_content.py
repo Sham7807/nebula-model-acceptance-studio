@@ -803,8 +803,9 @@ MODULE_PRESETS = {
         ("multimodal", "多模态输入探针", 15, "验证图像、视频、音频或其他内容块是否被接受并返回可判读结果。"),
     ),
     "cc": (
-        ("protocol", "协议与流式收尾", 35, "检查消息起始、增量、收尾、错误事件与响应流结束。"),
-        ("tools", "工具调用与 JSON", 20, "检查工具声明、增量 JSON、调用 ID 和参数完整性。"),
+        ("protocol", "协议与流式收尾", 30, "检查消息起始、增量、收尾、错误事件与响应流结束。"),
+        ("tools", "工具调用与 JSON", 15, "检查工具声明、增量 JSON、调用 ID 和参数完整性。"),
+        ("multimodal", "真实媒体输入", 10, "分开记录图片、视频和音频 URL / Base64 请求证据；明确不支持的可选能力不计为失败。"),
         ("cache", "缓存与 usage", 15, "检查 token/缓存字段结构并保留可核对的原始 usage 证据。"),
         ("security", "安全与一致性", 15, "提示词泄露、指令层级和重复行为仅作为风险启发式信号。"),
         ("parameters", "参数与错误映射", 15, "检查非法参数、非法模型和结构化错误是否可诊断。"),
@@ -856,7 +857,7 @@ def _module_id_for_check(check, result):
             return 'reliability'
         if metadata.get('source') == 'matrix_validation':
             mapping = ({'multimodal':'tools'} if suite in ('claude','claude_acceptance') else
-                       {'max_tokens':'parameters','injection':'security','multimodal':'tools','stress':'protocol'} if suite in ('ccmax','ccmax_acceptance') else
+                       {'max_tokens':'parameters','injection':'security','stress':'protocol'} if suite in ('ccmax','ccmax_acceptance') else
                        {'injection':'protocol','stress':'reliability'})
             return mapping.get(_text(explicit), _text(explicit))
         return _text(explicit)
@@ -881,6 +882,8 @@ def _module_id_for_check(check, result):
         if check_id in {"passthrough", "streaming", "protocol_baseline", "error_mapping", "error_format"} or "passthrough" in dims:
             return "protocol"
     if suite in ("ccmax", "ccmax_acceptance"):
+        if check_id == "multimodal" or "multimodal" in dims:
+            return "multimodal"
         if check_id in {"tool_stream"} or "tools" in dims:
             return "tools"
         if check_id in {"usage_cache"} or "cache" in dims:

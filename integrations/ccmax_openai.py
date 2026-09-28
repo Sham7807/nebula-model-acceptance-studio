@@ -46,6 +46,26 @@ def transform_specs(specs):
                 for block in message["content"]:
                     if isinstance(block, dict):
                         block.pop("cache_control", None)
+                        if block.get("type") == "image":
+                            source = block.get("source") or {}
+                            if source.get("type") == "url":
+                                block.clear(); block.update(type="image_url", image_url={"url": source.get("url", "")})
+                            elif source.get("type") == "base64":
+                                block.clear(); block.update(type="image_url", image_url={"url": "data:%s;base64,%s" % (source.get("media_type", "image/png"), source.get("data", ""))})
+                        elif block.get("type") == "video":
+                            source = block.get("source") or {}
+                            value = source.get("url") or "data:%s;base64,%s" % (source.get("media_type", "video/mp4"), source.get("data", ""))
+                            block.clear(); block.update(type="video_url", video_url={"url": value})
+                        elif block.get("type") == "audio":
+                            source = block.get("source") or {}
+                            if source.get("url"):
+                                block.clear(); block.update(type="audio_url", audio_url={"url": source["url"]})
+                            else:
+                                mime = source.get("media_type", "audio/mpeg")
+                                audio_format = mime.split("/", 1)[-1]
+                                if audio_format == "mpeg":
+                                    audio_format = "mp3"
+                                block.clear(); block.update(type="input_audio", input_audio={"data": source.get("data", ""), "format": audio_format})
         if "tools" in body:
             body["tools"] = [{"type": "function", "function": {"name": tool["name"], "description": tool.get("description", ""), "parameters": tool["input_schema"]}} for tool in body["tools"]]
         if body.get("tool_choice"):
@@ -311,6 +331,25 @@ def judge(sample, parser):
         sample["evidence"]["message_ids"] = [payload["id"]]
     if end == "cancelled":
         sample["status"], sample["issues"] = "cancelled", ["用户取消"]
+        return
+    if probe == "multimodal":
+        media_kind = sample.get("evidence", {}).get("media_kind", "image")
+        encoding = sample.get("evidence", {}).get("media_encoding", "unknown")
+        text = _visible_text(payload)
+        sample["evidence"]["output_text"] = text[:4000]
+        label = ("图片" if media_kind == "image" else "视频" if media_kind == "video" else "音频") + "（" + encoding.upper() + "）"
+        if end == "eof" and success and text.strip():
+            rows.append(_assessment("multimodal", "passed", "%s获得非空媒体描述；仅证明本次请求被处理，不代表媒体内容事实完全正确" % label))
+            sample["status"] = "passed"
+        elif end == "eof" and code in (400, 404, 415, 422, 501) and sample.get("evidence", {}).get("optional_capability"):
+            rows.append(_assessment("multimodal", "inconclusive", "%s被明确拒绝（HTTP %s）；可能是协议或模型能力不适用，不能当作渠道失败" % (label, code)))
+            sample["status"] = "inconclusive"
+        elif end == "eof" and success:
+            rows.append(_assessment("multimodal", "inconclusive", "%s返回成功但没有可见描述，无法确认模型是否读取媒体" % label))
+            sample["status"] = "inconclusive"
+        else:
+            rows.append(_assessment("multimodal", "inconclusive", "%s未获得完整媒体响应（HTTP %s，%s）；需区分 URL 抓取、MIME、协议和模型能力" % (label, code, end)))
+            sample["status"] = "inconclusive"
         return
     if probe in ("prompt_injection", "instruction_hierarchy", "fingerprint"):
         text = _visible_text(payload)

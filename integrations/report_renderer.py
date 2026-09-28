@@ -196,7 +196,20 @@ SCRIPT = r'''
 (()=>{'use strict';let filter='all';const search=document.getElementById('check-search');const cards=[...document.querySelectorAll('.check')];
 function apply(){const q=search.value.trim().toLowerCase();let count=0;for(const card of cards){const ok=(filter==='all'||card.dataset.status===filter)&&(q===''||card.textContent.toLowerCase().includes(q));card.hidden=!ok;if(ok)count++;}document.getElementById('visible-count').textContent='显示 '+count+' / '+cards.length+' 项';}
 document.querySelectorAll('[data-filter]').forEach(button=>button.addEventListener('click',()=>{filter=button.dataset.filter;document.querySelectorAll('[data-filter]').forEach(b=>{b.classList.toggle('active',b===button);b.setAttribute('aria-pressed',String(b===button));});apply();}));search.addEventListener('input',apply);
-document.querySelectorAll('a[href^="#"]').forEach(a=>a.addEventListener('click',()=>{const target=document.getElementById(a.getAttribute('href').slice(1));if(!target)return;if(target.matches('details'))target.open=true;if(target.matches('.check')&&target.hidden){filter='all';search.value='';document.querySelector('[data-filter="all"]').click();} }));
+/* Keep the left rail's active state synchronized with the section in view. The
+   old report left a permanent blue marker on 能力评分, which made every
+   click look as if it had landed on the first section. */
+const navLinks=[...document.querySelectorAll('.nav-links a[href^="#"]')];
+const navTargets=navLinks.map(link=>document.getElementById(link.getAttribute('href').slice(1))).filter(Boolean);
+let navTimer=0;
+function setActiveNav(id){navLinks.forEach(link=>{const active=link.getAttribute('href')==='#'+id;link.classList.toggle('is-active',active);link.classList.remove('nav-primary');if(active)link.setAttribute('aria-current','location');else link.removeAttribute('aria-current');});}
+function focusTarget(target){if(!target)return;target.setAttribute('tabindex','-1');try{target.focus({preventScroll:true});}catch(_){target.focus();}}
+navLinks.forEach(link=>link.addEventListener('click',event=>{const target=document.getElementById(link.getAttribute('href').slice(1));if(!target)return;event.preventDefault();if(target.matches('details'))target.open=true;if(target.matches('.check')&&target.hidden){filter='all';search.value='';document.querySelector('[data-filter="all"]')?.click();}setActiveNav(target.id);history.pushState(null,'','#'+target.id);target.scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'});window.clearTimeout(navTimer);navTimer=window.setTimeout(()=>focusTarget(target),180);}));
+if('IntersectionObserver' in window){const navState=new Map();const observer=new IntersectionObserver(entries=>{entries.forEach(entry=>navState.set(entry.target,entry));const visible=[...navState.values()].filter(entry=>entry.isIntersecting),atTop=visible.filter(entry=>entry.boundingClientRect.top>=60).sort((a,b)=>a.boundingClientRect.top-b.boundingClientRect.top),candidate=atTop[0]||visible.sort((a,b)=>b.intersectionRatio-a.intersectionRatio)[0];if(candidate)setActiveNav(candidate.target.id);},{rootMargin:'-60px 0px -55% 0px',threshold:[0,.01,.1]});navTargets.forEach(target=>observer.observe(target));}
+window.addEventListener('hashchange',()=>{const id=window.location.hash.slice(1);const target=document.getElementById(id);if(target){setActiveNav(id);target.setAttribute('tabindex','-1');}});
+window.addEventListener('popstate',()=>{const id=window.location.hash.slice(1);const target=document.getElementById(id);if(target){setActiveNav(id);target.setAttribute('tabindex','-1');}});
+setActiveNav(window.location.hash.slice(1)||navTargets[0]?.id);
+document.querySelectorAll('a[href^="#"]').forEach(a=>{if(navLinks.includes(a))return;a.addEventListener('click',()=>{const target=document.getElementById(a.getAttribute('href').slice(1));if(!target)return;if(target.matches('details'))target.open=true;if(target.matches('.check')&&target.hidden){filter='all';search.value='';document.querySelector('[data-filter="all"]').click();}window.setTimeout(()=>{setActiveNav(target.closest('section[id]')?.id||target.id);focusTarget(target);},180);});});
 document.getElementById('print-report').addEventListener('click',()=>window.print());let closed=[];window.addEventListener('beforeprint',()=>{closed=[...document.querySelectorAll('details:not([open])')];closed.forEach(d=>d.open=true);});window.addEventListener('afterprint',()=>closed.forEach(d=>d.open=false));apply();})();
 '''
 
@@ -326,13 +339,24 @@ def render_report(result, directory=None):
     resolution=executive.get('resolution_percent')
     resolution_text='未记录' if resolution is None else str(resolution)+'%'
     executive_items=[]
-    for item in (executive.get('items') or [])[:6]:
+    for item in (executive.get('items') or [])[:8]:
         item_status=item.get('status') if item.get('status') in STATUS else 'inconclusive'
         item_tone=item.get('tone') if item.get('tone') in ('passed','attention','risk','neutral') else ('passed' if item_status=='passed' else 'attention' if item_status in ('failed','error') else 'neutral')
         item_label=item.get('status_label') or ('需核查' if item_status in ('failed','error') else STATUS.get(item_status))
         anchors=[check_anchors[identity] for identity in dict.fromkeys(item.get('check_ids') or []) if identity in check_anchors]
         item_links='<div class="brief-links">'+''.join('<a href="#'+anchor+'" aria-label="'+esc(str(item.get('label') or '结论')+' · 证据 '+str(index+1))+'">'+('查看证据' if len(anchors)==1 else '证据 '+str(index+1))+' ↗</a>' for index,anchor in enumerate(anchors[:3]))+'</div>' if anchors else ''
-        executive_items.append('<article class="brief-item '+item_tone+'"><div class="brief-item-head"><h3>'+esc(item.get('label') or '本轮观察')+'</h3>'+badge(item_status,item_label,item_tone)+'</div><p>'+prose(item.get('text'))+'</p>'+item_links+'</article>')
+        cache_metric = (item.get('cache') or {}).get('percent')
+        if cache_metric is not None:
+            metric_label = '缓存复用率'
+            metric_value = '<0.01%' if cache_metric > 0 and cache_metric < 0.01 else ('%g%%' % cache_metric)
+        elif item.get('rate') is not None:
+            metric_label = '已判定通过率'
+            metric_value = '%g%%' % item.get('rate')
+        else:
+            metric_label = ''
+            metric_value = ''
+        metric_html = '<span class="brief-metric">'+esc(metric_label)+' <b>'+esc(metric_value)+'</b></span>' if metric_label else ''
+        executive_items.append('<article class="brief-item '+item_tone+'"><div class="brief-item-head"><h3>'+esc(item.get('label') or '本轮观察')+'</h3>'+badge(item_status,item_label,item_tone)+'</div>'+metric_html+'<p>'+prose(item.get('text'))+'</p>'+item_links+'</article>')
     grade=executive.get('resource_grade') or {}
     grade_level=grade.get('level') if grade.get('level') in ('high','medium','low','unknown') else 'unknown'
     grade_label=grade.get('label') or '待评估'
@@ -340,6 +364,10 @@ def render_report(result, directory=None):
     grade_note=grade.get('note') or '评级以本轮已判定检查为依据；未取得评分时不推定资源等级。'
     grade_criteria=grade.get('criteria')
     grade_html+='<p class="grade-note grade-detail">'+prose(grade_note)+'</p>'+('<details class="grade-criteria"><summary>查看评级标准与适用范围</summary><div>'+prose(grade_criteria)+'</div></details>' if grade_criteria else '')
+    source = executive.get('resource_source') or {'label':'来源未确认（官方 / 官转 / 逆向待核实）','note':'仅凭接口响应无法认证上游资源来源。'}
+    source_label = source.get('label') or '来源未确认（官方 / 官转 / 逆向待核实）'
+    source_note = source.get('note') or '仅凭接口响应无法认证上游资源来源。'
+    source_html = '<div class="resource-provenance"><div><span class="grade-label">资源来源判定</span><b>'+esc(source_label)+'</b></div><p>'+prose(source_note)+'</p></div>'
     duration=executive.get('duration') or {}
     duration_title=duration.get('title') or ('请求观测时段' if duration.get('kind')=='request_window' else '测试总耗时')
     duration_note=duration.get('source') or ('总耗时为本轮实际经过时间；并发请求耗时不累加。' if duration.get('total_ms') is not None else '没有保存可确认的全程耗时；不使用请求耗时累加估算。')
@@ -361,7 +389,7 @@ def render_report(result, directory=None):
     # distinguishes an assertion failure from missing evidence and scope that
     # was not applicable or not selected.
     verdict_rules_html='<section class="verdict-rules" aria-label="异常判定标准"><div class="verdict-rules-head"><span class="index">READING / 判定口径</span><h3>“本项异常”只代表对应测试项未满足断言</h3><p>单项异常不会自动推导整条渠道或模型不可用，请先看异常项的预期、实际结果和关联请求。</p></div><div class="verdict-rules-grid"><div><b class="rule-pass">✓ 通过</b><span>请求完成且实际响应满足该项独立断言，计入分子。</span></div><div><b class="rule-fail">! 本项异常</b><span>有完整证据且明确违反该项断言，计入分母并扣除本项。</span></div><div><b class="rule-pending">? 待补充证据</b><span>超时、网络中断、字段缺失或响应不完整，暂不计分，也不等于失败。</span></div><div><b class="rule-skip">– 跳过 / 未覆盖</b><span>协议不适用或本轮没有执行，不进入分母，不能据此判断不支持。</span></div></div><p class="verdict-rules-formula">评分口径：通过 ÷（通过 + 本项异常）；综合分再按已覆盖模块权重汇总。没有可判定项时显示“—”，不会用 0 代替。</p></section>'
-    executive_html='<div class="executive-panel"><div class="executive-top"><div class="executive-verdict"><span class="index">VERDICT / 本轮结论</span>'+grade_html+'<h2>'+esc(executive.get('headline') or '等待可判定证据')+'</h2><p>'+prose(executive.get('detail') or verdict.get('detail') or '本轮结果未包含足够的结论证据。')+'</p></div><div class="executive-score"><span>综合验收分</span><div><strong>'+esc(overall_score_text)+'</strong><small> / 100</small></div><p>证据可判定率 <b>'+esc(resolution_text)+'</b></p><small>按验收模块权重汇总</small></div></div>'+duration_html+('<div class="executive-grid">'+''.join(executive_items)+'</div>' if executive_items else '')+'<p class="executive-note">分数反映本轮已判定检查的通过表现；证据覆盖和异常项需同时看。缓存命中率单独按实际 token 统计，不等于缓存模块得分。</p>'+verdict_rules_html+'</div>'
+    executive_html='<div class="executive-panel"><div class="executive-top"><div class="executive-verdict"><span class="index">VERDICT / 本轮结论</span>'+source_html+grade_html+'<h2>'+esc(executive.get('headline') or '等待可判定证据')+'</h2><p>'+prose(executive.get('detail') or verdict.get('detail') or '本轮结果未包含足够的结论证据。')+'</p></div><div class="executive-score"><span>综合验收分</span><div><strong>'+esc(overall_score_text)+'</strong><small> / 100</small></div><p>证据可判定率 <b>'+esc(resolution_text)+'</b></p><small>按验收模块权重汇总</small></div></div>'+duration_html+('<div class="executive-grid">'+''.join(executive_items)+'</div>' if executive_items else '')+'<p class="executive-note">分数反映本轮已判定检查的通过表现；证据覆盖和异常项需同时看。缓存命中率单独按实际 token 统计，不等于缓存模块得分。</p>'+verdict_rules_html+'</div>'
     check_titles={c.get('id'): c.get('title') or c.get('id') for c in checks}
     count_labels={'passed':'通过','failed':'异常','inconclusive':'待补充证据','skipped':'跳过','not_covered':'未覆盖','cancelled':'取消'}
     def sampling_note(d):
@@ -608,7 +636,7 @@ def render_report(result, directory=None):
     if original_html: nav_items.append(('original-results','原始评分与日志','页面原始记录'))
     if matrix_html: nav_items.append(('parameter-matrix','参数矩阵与压测','负载与缓存明细'))
     nav_items.extend([('limits','判读说明','边界与原始数据'),('all-results','全项结果','完整测试矩阵')])
-    nav_html='<nav class="nav"><div class="nav-heading"><span class="nav-heading-mark">☷</span><span><b>报告导航</b><small>按模块查看证据</small></span></div><div class="nav-links">'+''.join('<a href="#'+target+'" class="'+('nav-primary' if target=='score' else '')+'"><span class="nav-link-index">'+str(index).zfill(2)+'</span><span><b>'+label+'</b><small>'+description+'</small></span></a>' for index,(target,label,description) in enumerate(nav_items,1))+'</div></nav>'
+    nav_html='<nav class="nav"><div class="nav-heading"><span class="nav-heading-mark">☷</span><span><b>报告导航</b><small>按模块查看证据</small></span></div><div class="nav-links">'+''.join('<a href="#'+target+'" data-target="'+target+'" class="'+('is-active' if index==1 else '')+'"'+(' aria-current="location"' if index==1 else '')+'><span class="nav-link-index">'+str(index).zfill(2)+'</span><span><b>'+label+'</b><small>'+description+'</small></span></a>' for index,(target,label,description) in enumerate(nav_items,1))+'</div></nav>'
     return ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>'+esc(model+' · '+title)+'</title><style>'+STYLE+'</style></head><body><main>'
         +'<div class="masthead"><span class="brand">小小宇宙无敌</span><span class="eyebrow">CHANNEL ACCEPTANCE REPORT</span><button class="button no-print" id="print-report">打印 / 保存 PDF</button></div>'
         +'<header class="cover"><div class="cover-top"><span class="eyebrow">'+esc(title)+'</span>'+badge(result.get('status'))+'</div><h1>'+esc(model)+'</h1><p>'+esc(config.get('base') or '渠道地址未记录')+'</p><p class="run-id">RUN / '+esc(result.get('run_id') or '未记录')+'</p><div class="cover-meta"><span>'+esc(data.get('engine') or '渠道验收')+'</span><span>'+str(len(checks))+' 项检查</span><span>'+str(request_count)+' 次已记录请求</span><span>依据本轮实测 · 脱敏证据</span></div></header>'

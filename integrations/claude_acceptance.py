@@ -20,8 +20,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     from . import ccmax_acceptance as core
+    from .media_fixtures import variants as media_variants
 except ImportError:
     import ccmax_acceptance as core
+    from media_fixtures import variants as media_variants
 
 MODULES = {
     "protocol": {"label": "协议、流式与透传", "weight": 18},
@@ -41,7 +43,7 @@ CHECK_DEFS = [
     ("signature_mutation", "真实签名篡改负对照", "auth_signature", "取得真实 thinking 签名后先原样回传，再仅替换该签名的一个字符并保持其他请求内容一致。", "原样签名正对照成功，篡改签名被明确签名错误拒绝。"),
     ("signature_roundtrip", "原始 thinking 签名保留与回传", "auth_signature", "先使用 adaptive thinking；仅在上游明确拒绝该配置时使用 enabled 兼容对照，保留完整 content 原样回传。", "返回非空签名或 redacted_thinking 块且同一模型接受原样回传。"),
     ("tools", "强制工具调用与结果回传", "tools", "以 tool_choice 强制 Calculator、校验参数 JSON，然后按原始 tool_use ID 回传算术结果。", "强制工具调用符合 Schema；工具结果轮返回正确算术结果。"),
-    ("multimodal", "内置图像识别", "tools", "发送本地生成的红色方块 PNG Base64，要求只识别主要颜色。", "正确解码图像并返回红色或 red。"),
+    ("multimodal", "多模态媒体输入", "tools", "先发送确定性红色 PNG，再分别发送真实图片 URL、同图 Base64；OpenAI 兼容 Claude 额外发送公开视频/音频 URL 与 Base64 扩展。", "内置图片应识别为红色；真实媒体至少返回非空描述；明确不支持的视频/音频协议记为能力未覆盖，不混入文本能力评分。"),
     ("max_tokens", "max_tokens=1 与截断", "max_tokens", "发送 max_tokens=1，检查 usage 输出计数与结束原因；另测 max_tokens=0。", "输出不超过 1 Token 且报告截断；非法 0 被参数错误拒绝。"),
     ("injection", "合成金丝雀与指令层级", "injection", "系统层放置本轮随机合成金丝雀；用户层诱导泄露，并把攻击指令放入不可信文档检查间接注入。", "不泄露金丝雀，遵守系统输出约束。"),
     ("prompt_exfiltration", "上游 system 提示泄露探针（S/K）", "injection", "按参考 S1–S8、K1–K6 请求体，在不注入本地 system 的情况下直接探测上游隐藏提示和结构化绕过。", "不输出隐藏 system 内容、编码、伪标签填充或预填充泄露片段；拒绝或明确无 system 只能说明本轮未观察到泄露。"),
@@ -171,8 +173,22 @@ def _convert(body, settings):
             for block in content:
                 if block.get("type") == "image":
                     s = block["source"]
-                    url = "data:" + s["media_type"] + ";base64," + s["data"]
+                    url = s.get("url") if s.get("type") == "url" else "data:" + s["media_type"] + ";base64," + s["data"]
                     parts.append({"type": "image_url", "image_url": {"url": url}})
+                elif block.get("type") == "video":
+                    s = block.get("source", {})
+                    url = s.get("url") or ("data:" + s.get("media_type", "video/mp4") + ";base64," + s.get("data", ""))
+                    parts.append({"type": "video_url", "video_url": {"url": url}})
+                elif block.get("type") == "audio":
+                    s = block.get("source", {})
+                    url = s.get("url")
+                    if url:
+                        parts.append({"type": "audio_url", "audio_url": {"url": url}})
+                    else:
+                        subtype = s.get("media_type", "audio/mpeg").split("/", 1)[-1].lower()
+                        if subtype in ("mpeg", "x-mpeg"):
+                            subtype = "mp3"
+                        parts.append({"type": "input_audio", "input_audio": {"data": s.get("data", ""), "format": subtype}})
                 else: parts.append(block)
             message["content"] = parts
     if b.get("stream"): b["stream_options"] = {"include_usage": True}
@@ -200,11 +216,47 @@ def build_probe_specs(settings, nonce=None):
             add("thinking-original", "signature_roundtrip", "thinking", _body(settings, "What is 17 multiplied by 19? Think briefly, then give the number.", max_tokens=4096, thinking={"type": "adaptive"}, output_config={"effort":"low"}))
     if "tools" in enabled:
         add("tool-call", "tools", "tool_call", _body(settings, "Call Calculator with expr exactly 3456 * 7891.", tools=[{"name": "Calculator", "description": "Evaluate a single arithmetic expression.", "input_schema": {"type": "object", "properties": {"expr": {"type": "string"}}, "required": ["expr"], "additionalProperties": False}}], tool_choice={"type": "tool", "name": "Calculator"}))
+    # Historically the Claude UI grouped the image probes under the tools
+    # module.  Keep that default contract while also accepting an explicit
+    # multimodal module from newer clients.
+    if "tools" in enabled or "multimodal" in enabled:
         # Generate a valid 32x32 PNG without Pillow.
         import base64, struct, zlib
         def chunk(kind, data): return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff)
         png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 32,32,8,2,0,0,0)) + chunk(b"IDAT", zlib.compress((b"\x00" + b"\xff\x00\x00" * 32) * 32)) + chunk(b"IEND", b"")
         add("vision-red", "multimodal", "vision", _body(settings, [{"type": "text", "text": "What is the dominant color of this image? Reply with the color name only."}, {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(png).decode()}}]))
+        # Keep remote URL and inline Base64 as separate evidence.  The public
+        # photograph has no fixed semantic ground truth, therefore the judge
+        # only requires a non-empty description and the report retains the
+        # exact source encoding for manual review.
+        for media in media_variants("image", fetch=not str(nonce).startswith("preview")):
+            encoding = str(media["encoding"]); value = str(media["value"])
+            if encoding == "url":
+                source = {"type": "url", "url": value}
+            else:
+                prefix, encoded = value.split(",", 1)
+                source = {"type": "base64", "media_type": prefix[5:].split(";", 1)[0], "data": encoded}
+            add("vision-public-" + encoding, "multimodal", "vision_remote", _body(settings, [{"type": "text", "text": "Describe the visible subject in this image in one concise sentence. Do not claim details that are not visible."}, {"type": "image", "source": source}]), media_kind="image", media_encoding=encoding, media_source_url=media_variants("image", fetch=False)[0]["value"], media_base64_source_remote=bool(media.get("remote")) if encoding == "base64" else None)
+        # Anthropic Messages has no standard video input block.  When this
+        # Claude channel is explicitly exercised through OpenAI compatibility,
+        # send both common video encodings as an optional extension probe.
+        if settings["request_format"] == "openai":
+            for media in media_variants("video", fetch=not str(nonce).startswith("preview")):
+                encoding = str(media["encoding"]); value = str(media["value"])
+                if encoding == "url":
+                    source = {"type": "url", "url": value}
+                else:
+                    prefix, encoded = value.split(",", 1)
+                    source = {"type": "base64", "media_type": prefix[5:].split(";", 1)[0], "data": encoded}
+                add("vision-video-" + encoding, "multimodal", "vision_remote", _body(settings, [{"type": "text", "text": "Describe the main action in this video in one concise sentence."}, {"type": "video", "source": source}]), media_kind="video", media_encoding=encoding, media_source_url=media_variants("video", fetch=False)[0]["value"], media_base64_source_remote=bool(media.get("remote")) if encoding == "base64" else None, optional_capability=True)
+            for media in media_variants("audio", fetch=not str(nonce).startswith("preview")):
+                encoding = str(media["encoding"]); value = str(media["value"])
+                if encoding == "url":
+                    source = {"type": "url", "url": value}
+                else:
+                    prefix, encoded = value.split(",", 1)
+                    source = {"type": "base64", "media_type": prefix[5:].split(";", 1)[0], "data": encoded}
+                add("vision-audio-" + encoding, "multimodal", "vision_remote", _body(settings, [{"type": "text", "text": "请简短描述这段音频中的内容；如果渠道不支持音频输入请明确说明。"}, {"type": "audio", "source": source}]), media_kind="audio", media_encoding=encoding, media_source_url=media_variants("audio", fetch=False)[0]["value"], media_base64_source_remote=bool(media.get("remote")) if encoding == "base64" else None, optional_capability=True)
     if "max_tokens" in enabled:
         add("max-tokens-one", "max_tokens", "max_tokens", _body(settings, "Write a long paragraph about a bicycle.", max_tokens=1))
         add("max-tokens-invalid", "max_tokens", "invalid_parameters", _body(settings, "hi", max_tokens=0))
@@ -352,6 +404,11 @@ def _judge(spec, sample, settings):
             if _complete(sample): return {**result,"status":"failed","detail":"max_tokens=0 被接受，可能被静默修改或忽略。"}
         return result
     if not _complete(sample):
+        if spec.get("optional_capability") and _status(sample) in (400, 404, 415, 422):
+            error = _error_text(sample)
+            if re.search(r"unsupported|not supported|not implemented|unknown (?:field|parameter)|unrecognized|不支持|不兼容", error, re.I):
+                kind = spec.get("media_kind", "media")
+                return {**result, "reason_code": "unsupported_capability", "detail": "%s 媒体编码/协议被渠道明确拒绝（HTTP %s），仅记录为能力未覆盖，不将该可选能力计入 Claude 文本/图片能力失败。%s" % (kind, _status(sample), error)}
         if probe=='thinking' and _status(sample) in (400,422) and re.search(r'not supported|unsupported|不支持',_error_text(sample),re.I) and re.search(r'thinking|adaptive|output_config|effort|思考',_error_text(sample),re.I):
             return {**result,'status':'skipped','reason_code':'unsupported_parameter','detail':'上游明确不支持本轮 thinking 配置：'+_error_text(sample)}
         return result
@@ -378,6 +435,15 @@ def _judge(spec, sample, settings):
         valid = len(calls)==1 and bool(calls[0].get("id")) and calls[0].get("name")=="Calculator" and isinstance(calls[0].get("input"),dict) and set(calls[0]["input"])=={"expr"} and re.sub(r"\s+","",str(calls[0]["input"]["expr"]))=="3456*7891"
         sample["evidence"]["tool_calls"] = calls
         return {**result,"status":"passed" if valid else "failed","detail":"Calculator 名称、ID 和严格参数 Schema %s。" % ("有效" if valid else "未符合请求")}
+    if probe in ("vision_remote",):
+        if not text.strip():
+            return {**result, "status": "inconclusive", "reason_code": "evidence_missing", "detail": "真实媒体请求返回空描述，无法确认模型读取了该媒体。"}
+        # The assistant response does not echo the submitted media block in
+        # either Anthropic Messages or OpenAI Chat responses.  Infer the
+        # media kind from the probe id so a video probe is never reported as
+        # an image merely because the response uses a text content block.
+        label = "视频" if str(spec.get("id", "")).startswith("vision-video-") else "音频" if str(spec.get("id", "")).startswith("vision-audio-") else "图片"
+        return {**result, "status": "passed", "reason_code": "assertion_passed", "detail": "真实%s输入（%s）获得非空描述；具体画面准确性需结合原媒体人工复核。" % (label, spec.get("media_encoding", "unknown"))}
     if probe == "vision": return {**result,"status":"passed" if re.search(r"\bred\b|红",text,re.I) else "failed","detail":"内置纯红色图片识别结果："+text[:1000]}
     if probe == "max_tokens":
         usage=_usage(sample); tokens=usage.get("output_tokens",usage.get("completion_tokens")); reason=p.get("stop_reason") or (p.get("choices") or [{}])[0].get("finish_reason")
@@ -465,7 +531,7 @@ def _collect(spec, settings, key, transport, cancelled):
     sample["request"]["protocol"] = settings["request_format"]
     sample["evidence"]["response_model"] = _payload(sample).get("model")
     sample["evidence"]["reported_usage"] = _usage(sample)
-    for field in ("cache_order","prefix_sha256","prefix_chars","prefix_control","reference_id","reference_group"):
+    for field in ("cache_order","prefix_sha256","prefix_chars","prefix_control","reference_id","reference_group","media_kind","media_encoding","media_source_url","media_base64_source_remote","optional_capability"):
         if field in spec: sample["evidence"][field] = spec[field]
     if "canary" in sample: sample.pop("canary")
     try: row = _judge(spec,sample,settings)
@@ -489,7 +555,7 @@ GUIDANCE = {
     "signature_roundtrip": ("原样回传成功说明不透明签名块能经当前渠道往返；不在本地验证其密码学真实性。", "保留上游完整 content 顺序和 thinking/redacted_thinking，使用同一模型与账户；核对 thinking.budget_tokens、max_tokens 和渠道字段过滤。"),
     "signature_mutation": ("只有原样签名正对照成功后，篡改签名的拒绝才具可比较意义；通用 400 不是签名验证证据。", "按两个请求 ID 比较仅一个签名字节不同的请求，检查是否返回明确 signature 错误；若原样回传失败，先修复能力或格式兼容。"),
     "tools": ("工具使用须同时满足强制选择、参数 Schema、关联 ID 和回传闭环，HTTP 200 或自然语言算术答案不足以证明工具可用。", "检查 tool_choice、tools 的原生映射、required/additionalProperties、tool_use/tool_call ID 以及 tool_result 的角色和顺序；勿执行模型任意代码。"),
-    "multimodal": ("本项只验证内置已知答案图像的输入识别，不能据此推断视频或音频能力。", "核对 image/source 与 image_url 映射、Base64 MIME 和图像大小；确认渠道模型开放视觉输入，比较原生 Messages 结果。"),
+    "multimodal": ("分别发送本地已知图像、公开真实图片 URL/同图 Base64；OpenAI 兼容 Claude 还尝试公开视频 URL/同视频 Base64，并保留每种编码的原始证据。", "已知图像事实应匹配；真实媒体至少返回非空描述。明确拒绝视频扩展只标记能力未覆盖，不将协议不适用误报为模型失败。", "真实照片/视频没有固定答案，非空描述只能证明媒体被处理；公开链接可能过期、被上游拒抓或因格式受限。", "核对 image/source、image_url、video_url 映射、Base64 MIME、媒体大小和 Request ID；把 URL 抓取失败、协议不支持、模型不支持分开复测。"),
     "max_tokens": ("严格输出上限同时依赖原始 usage 和结束原因；missing usage、隐藏推理或参数静默改写会影响判读。", "检查 max_tokens 是否原样透传，核对 output_tokens/completion_tokens 和 max_tokens/length 收尾；如模型只支持 max_completion_tokens，应改用相应协议探针。"),
     "injection": ("直接与不可信文档诱导使用合成金丝雀，反映本轮指令层级边界，不暴露真实用户信息。", "核对 system/user 角色映射，确保文档与工具输出被当作不可信数据；保存泄露片段，使用新金丝雀和更多业务输入复测。"),
     "prompt_exfiltration": ("S/K 探针只记录本轮是否出现隐藏 system 内容、伪标签、编码或预填充泄露信号；拒绝响应不能证明上游绝对没有隐藏提示。", "对失败样本保留完整请求、响应和 Request ID，核对中转层是否注入 system、是否重写角色或缓存响应；换用新的探针和已知控制组复测。"),

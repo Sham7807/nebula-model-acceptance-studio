@@ -54,7 +54,7 @@ class ReportTests(unittest.TestCase):
         with patch('report_renderer.build_report_data', return_value=data):
             report = render_report({'suite':'claude_acceptance', 'status':'completed'}).decode()
         overview = report.split('id="overview"',1)[1].split('</section>',1)[0]
-        self.assertEqual(overview.count('<article class="brief-item attention">'),6)
+        self.assertEqual(overview.count('<article class="brief-item attention">'),8)
         self.assertIn('<strong>84</strong>', overview)
         self.assertIn('证据可判定率 <b>90%</b>', overview)
         self.assertIn('1 分 31 秒', overview)
@@ -68,6 +68,23 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn('href="#missing"', overview)
         self.assertIn('&lt;script&gt;unsafe()', overview)
         self.assertNotIn('<script>unsafe()', overview)
+
+    def test_brief_exposes_metrics_provenance_and_dynamic_nav_script(self):
+        data = {'checks':[{'id':'tool-1', 'status':'passed', 'title':'工具调用'}],
+                'score':{'total':96, 'weighted_total':96},
+                'executive_summary':{'headline':'工具调用可用', 'detail':'本轮已完成。',
+                    'items':[{'id':'tools','label':'工具调用','status':'passed','status_label':'已验证',
+                              'tone':'passed','rate':100,'text':'通过率 100%（通过 1 / 异常 0）。'}],
+                    'resource_source':{'label':'官方资源转接 / 官转（渠道自报）','kind':'operator_claim',
+                                       'note':'需要上游账单或服务商日志佐证。'}}}
+        with patch('report_renderer.build_report_data', return_value=data):
+            report = render_report({'suite':'general','status':'completed'}).decode()
+        self.assertIn('class="resource-provenance"', report)
+        self.assertIn('官方资源转接 / 官转', report)
+        self.assertIn('class="brief-metric"', report)
+        self.assertIn('setActiveNav', report)
+        self.assertIn("classList.remove('nav-primary')", report)
+        self.assertIn("addEventListener('popstate'", report)
 
     def test_score_card_counts_only_scored_checks_and_keeps_observations_separate(self):
         stats = {'label':'限长', 'score':99, 'status':'failed', 'weight':10,

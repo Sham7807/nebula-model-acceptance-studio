@@ -1,7 +1,7 @@
 """Offline regression for executive conclusions and observed timing."""
 from copy import deepcopy
 import unittest
-from report_brief import build_summary, build_timing, cache_summary, usage_pair, resource_grade
+from report_brief import build_summary, build_timing, cache_summary, usage_pair, resource_grade, resource_source
 from report_content import _report_score, _score_stats, build_report_data
 from browser_reports import normalize_browser_report
 
@@ -11,6 +11,33 @@ def check(identity, dimension, status='passed', **extra):
 
 
 class BriefTests(unittest.TestCase):
+    def test_tools_and_multimodal_are_separate_summary_items_with_rates(self):
+        checks = [
+            check('tool-ok', 'tools'),
+            check('tool-fail', 'tools', 'failed'),
+            check('vision-ok', 'multimodal'),
+            check('video-ok', 'multimodal'),
+        ]
+        summary = build_summary({}, checks, {})
+        tools = next(value for value in summary['items'] if value['id'] == 'tools')
+        media = next(value for value in summary['items'] if value['id'] == 'multimodal')
+        self.assertEqual(tools['counts']['passed'], 1)
+        self.assertEqual(tools['counts']['failed'], 1)
+        self.assertEqual(tools['rate'], 50)
+        self.assertEqual(media['rate'], 100)
+        self.assertIn('通过率 50%', tools['conclusion'])
+        self.assertIn('通过率 100%', media['conclusion'])
+
+    def test_resource_source_is_an_explicit_operator_annotation(self):
+        unknown = resource_source({'configuration': {'model': 'claude-fable-5'}})
+        self.assertEqual(unknown['kind'], 'unknown')
+        self.assertIn('来源未确认', unknown['label'])
+        relay = resource_source({'configuration': {'resource_source': 'official_relay'}})
+        self.assertEqual(relay['kind'], 'operator_claim')
+        self.assertIn('官转', relay['label'])
+        anthropic = resource_source({'configuration': {'provider': 'anthropic'}})
+        self.assertEqual(anthropic['kind'], 'provider_claim')
+        self.assertIn('未认证', anthropic['label'])
     def test_one_overall_score_uses_module_weights(self):
         checks = [check('p','protocol'), check('t','tools','failed')]
         score = _report_score(checks, {'suite': 'browser_report'})
@@ -148,7 +175,7 @@ class BriefTests(unittest.TestCase):
         summary=build_summary({},checks,score)
         basic=next(x for x in summary['items'] if x['id']=='basic')
         self.assertEqual((basic['status'],basic['status_label'],basic['tone']),('failed','部分异常','attention'))
-        self.assertIn('多数检查通过 · 1 项异常',basic['conclusion'])
+        self.assertIn('通过率 88.888889%',basic['conclusion'])
         self.assertIn('8 项通过、1 项异常；另 2 项待确认',basic['detail'])
         self.assertEqual(score,before)
 

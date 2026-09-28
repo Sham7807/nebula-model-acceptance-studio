@@ -13,7 +13,7 @@
 | 视频 | 创建任务、实时进度、轮询、继续查询、播放与下载 | 中转站 Videos JSON、OpenAI Videos、豆包 / Seedance 原生任务、自定义 JSON |
 | 音频 | 语音生成、音频对话、转写、翻译、页面播放与下载 | OpenAI Speech、Chat Completions 音频、Gemini TTS、Transcriptions / Translations |
 
-每种模态都提供代表性测试场景。选择场景后提示词会直接填入，可继续编辑；图像任务支持上传本地参考图、逐行填写图片 URL，或使用附加 JSON 自定义 `image`、`model`、`aspect_ratio`、`size` 等字段。
+每种模态都提供代表性测试场景。选择场景后提示词会直接填入，可继续编辑；图像、视频和音频区域都支持上传本地文件或填入公开 URL，并可选择「自动适配」「仅 URL」或「转换为 Base64 Data URL」。工作台会按协议分别生成 `image_url`、`video_url`、`audio_url`、inline Base64 或 multipart 文件；原生 multipart 接口的远程媒体由同源服务下载后再上传。内置真实样例包括图片 `https://picsum.photos/id/237/800/600`、视频 `https://download.samplelib.com/mp4/sample-5s.mp4` 和音频 `https://download.samplelib.com/mp3/sample-3s.mp3`。图像任务仍支持使用附加 JSON 自定义 `image`、`model`、`aspect_ratio`、`size` 等字段。
 
 模型 ID 可以手动填写，也可以获取后搜索、多选。基础、通用、CCMax、Claude、KVV、GPT 专项共用登录会话保护的 `/api/models`，由服务器访问渠道，避免浏览器 CORS 导致入口之间结果不一致。地址会保留 `/api/v1`、`/openai/v1`、`/compatible-mode/v1` 等前缀和显式版本，也接受完整模型列表或对话接口地址；未填写版本时会有限尝试常见路径。
 

@@ -47,7 +47,10 @@ function nativeResponse(request){
  return {format,json,stream};
 }
 async function launchService(temp){
- const child=spawn(path.join(root,'Kimi-Vendor-Verifier/.venv/bin/python'),['integrations/server.py','--port','0'],{cwd:root,env:{...process.env,WORKBENCH_DB:path.join(temp,'workbench.sqlite3'),WORKBENCH_REPORTS:path.join(temp,'reports'),WORKBENCH_AUTH_FILE:''},stdio:['ignore','pipe','pipe']});
+ const candidates=[process.env.WORKBENCH_PYTHON,path.join(root,'Kimi-Vendor-Verifier/.venv/bin/python'),path.join(root,'desktop/.build-venv/bin/python'),process.env.PYTHON||'python3'].filter(Boolean);
+ let python=candidates.at(-1);
+ for(const candidate of candidates){try{await fs.access(candidate);python=candidate;break;}catch{}}
+ const child=spawn(python,['integrations/server.py','--port','0'],{cwd:root,env:{...process.env,WORKBENCH_DB:path.join(temp,'workbench.sqlite3'),WORKBENCH_REPORTS:path.join(temp,'reports'),WORKBENCH_AUTH_FILE:''},stdio:['ignore','pipe','pipe']});
  let output='';child.stdout.on('data',chunk=>output+=chunk);child.stderr.on('data',chunk=>output+=chunk);
  const deadline=Date.now()+20000;
  while(Date.now()<deadline){const match=output.match(/http:\/\/127\.0\.0\.1:(\d+)/);if(match)return {child,origin:'http://127.0.0.1:'+match[1]};if(child.exitCode!==null)throw new Error('Local service stopped: '+output);await new Promise(resolve=>setTimeout(resolve,50));}
@@ -61,6 +64,12 @@ async function fixture(browser,origin,variant){
  await page.route('**/*',async route=>{
   const request=route.request(),url=new URL(request.url());
   if(!/^https?:$/.test(url.protocol))return route.continue();
+  // Keep the browser regression offline while exercising the workbench's
+  // public fixture URL -> Base64 conversion branch.
+  if(url.origin==='https://picsum.photos'&&url.pathname==='/id/237/800/600'){
+   const tinyPng=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=','base64');
+   return route.fulfill({status:200,contentType:'image/png',body:tinyPng});
+  }
   if(url.origin!==origin){
    if(variant!=='file'||url.origin!=='https://relay.test'){state.unexpected.push(url.href);return route.abort();}
    if(url.pathname.endsWith('/models'))return route.fulfill({contentType:'application/json',headers:{'Access-Control-Allow-Origin':'*'},body:JSON.stringify({data:[{id:model}]})});
@@ -70,7 +79,13 @@ async function fixture(browser,origin,variant){
   }
   if(url.pathname==='/api/models'){state.models.push(JSON.parse(request.postData()));return route.fulfill({contentType:'application/json',body:JSON.stringify({models:[model],total:1})});}
   if(url.pathname==='/api/proxy'){
-   const requestBody=JSON.parse(request.postData());assert.ok(request.headers()['x-workbench-token']);const call={...requestBody,body:JSON.parse(requestBody.body)};state.calls.push(call);const response=nativeResponse(call);state.inFlight++;state.peak=Math.max(state.peak,state.inFlight);
+   const requestBody=JSON.parse(request.postData());assert.ok(request.headers()['x-workbench-token']);
+   if(requestBody.media_fetch===true){
+    const tinyPng=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=','base64');
+    const isVideo=/\.mp4(?:$|[?#])/i.test(requestBody.url||''),bytes=isVideo?Buffer.from('fixture-video') : tinyPng;
+    return route.fulfill({contentType:'application/json',body:JSON.stringify({status:200,url:requestBody.url,content_type:isVideo?'video/mp4':'image/png',headers:{'content-type':isVideo?'video/mp4':'image/png'},body_base64:bytes.toString('base64')})});
+   }
+   const call={...requestBody,body:JSON.parse(requestBody.body)};state.calls.push(call);const response=nativeResponse(call);state.inFlight++;state.peak=Math.max(state.peak,state.inFlight);
    try{await new Promise(resolve=>setTimeout(resolve,12));if(requestBody.stream)return await route.fulfill({contentType:'text/event-stream',body:response.stream});
    return await route.fulfill({contentType:'application/json',body:JSON.stringify({status:200,headers:{'content-type':'application/json'},text:JSON.stringify(response.json)})});}finally{state.inFlight--;}
   }
@@ -124,7 +139,7 @@ async function runStandard(f,format,temp){
  const capChecks=result.checks.filter(row=>row.id?.startsWith('cap_'));assert.equal(capChecks.length,12,format+' has the full standard parameter cross-product');
  assert.ok(capChecks.every(row=>row.status==='passed'),format+' preserves actual native cap and finish evidence for JSON and SSE');
  for(const row of capChecks){assert.equal(row.request_ids.length,1);assert.ok([1,10,20].includes(row.parameters.max_tokens));assert.ok(row.method&&row.expected&&row.observed&&row.reason_code);}
- assert.equal(result.checks.filter(row=>row.id?.startsWith('vision_')).length,6,format+' has independent actual-image fixtures');
+ assert.equal(result.checks.filter(row=>row.id?.startsWith('vision_')).length,8,format+' has independent actual-image fixtures');
  assert.equal(result.checks.filter(row=>row.id?.startsWith('cache_')).length,4,format+' has cold/warm/changed-prefix controls');
  const loads=result.checks.filter(row=>row.id?.startsWith('load_'));assert.equal(loads.length,3);assert.ok(loads.every(row=>row.metrics.passed===row.metrics.requests));assert.equal(loads.reduce((n,row)=>n+row.metrics.requests,0),16);
  assert.ok(f.state.peak>=3&&f.state.peak<=5,format+' pressure really overlaps requests within configured bounds');
