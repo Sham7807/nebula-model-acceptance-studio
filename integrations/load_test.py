@@ -476,6 +476,14 @@ def run(config, emit=None, cancelled=None):
         'usage_requests': usage_requests,
         'usage_missing_requests': completed - usage_requests,
     }
+    # Keep provider-neutral names above and familiar OpenAI names here for
+    # existing desktop/report consumers.
+    token_report.update({
+        'prompt_tokens': token_report['input'],
+        'completion_tokens': token_report['output'],
+        'total_tokens': token_report['total'],
+        'cached_tokens': token_report['cached'],
+    })
     if token_report['total'] is None and token_report['input'] is not None and token_report['output'] is not None:
         token_report['total'] = token_report['input'] + token_report['output']
         token_report['total_derived'] = True
@@ -498,6 +506,8 @@ def run(config, emit=None, cancelled=None):
             # labels without recomputing from rounded values.
             'rpm': round(completed / elapsed * 60, 2),
             'tpm': token_report['tokens_per_minute'],
+            'requests_per_minute': round(completed / elapsed * 60, 2),
+            'tokens_per_minute': token_report['tokens_per_minute'],
             'input_tpm': token_report['input_per_minute'],
             'output_tpm': token_report['output_per_minute'],
             'bytes_per_second': round(total_bytes / elapsed, 1),
