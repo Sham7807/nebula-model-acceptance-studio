@@ -230,12 +230,14 @@ def validate_config(data):
     # not already provide an explicit authentication header.  The secret is
     # kept in memory for this run and removed by the server worker finally
     # block; redacted_config never persists it.
-    api_key = str(data.get('api_key') or data.get('key') or '').strip()
-    if any(c in api_key for c in ('\r', '\n')):
-        raise ValueError('API Key 不能包含换行。')
     auth = str(data.get('auth') or 'bearer').lower().strip()
     if auth not in {'bearer', 'anthropic', 'gemini', 'none'}:
         raise ValueError('鉴权方式必须是 bearer、anthropic、gemini 或 none。')
+    api_key = str(data.get('api_key') or data.get('key') or '').strip()
+    if auth == 'bearer' and api_key.lower().startswith('bearer '):
+        api_key = api_key[7:].strip()
+    if any(c in api_key for c in ('\r', '\n')):
+        raise ValueError('API Key 不能包含换行。')
     header_names = {key.lower() for key in normalized_headers}
     if api_key and auth != 'none' and not header_names.intersection({'authorization', 'x-api-key', 'x-goog-api-key'}):
         if auth == 'anthropic':
