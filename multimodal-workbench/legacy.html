@@ -120,8 +120,13 @@
   #log .ts{color:#9eaa91;margin-right:8px}
   #log .ok{color:#447745}#log .bad{color:#b4473f}#log .mid{color:#92713b}#log .inf{color:#55745d}#log .dim{color:#97a28e}
   #log .phase{color:#45633c;font-weight:600;border-top:1px dashed #dce5d1;margin-top:10px;padding-top:10px}
-  .report-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
-  .report-actions .btn{padding:7px 11px;font-size:10px}
+  .report-actions{display:flex;gap:9px;flex-wrap:wrap;align-items:center;margin-top:16px;padding-top:13px;border-top:1px solid #e6ece2}
+  .report-actions .btn{padding:10px 15px;font-size:11px}
+  .report-actions #btnDl{display:inline-flex;align-items:center;gap:7px;background:#256b52;border-color:#256b52;color:#fff;font-weight:650;box-shadow:0 4px 12px #256b5230}
+  .report-actions #btnDl::before{content:'↓';font-size:15px;line-height:1}
+  .report-actions #btnDl:hover:not(:disabled){background:#18553f;border-color:#18553f;transform:translateY(-1px);box-shadow:0 6px 16px #256b5240}
+  .report-actions #btnDl:disabled{background:#9eb5a7;border-color:#9eb5a7;color:#fff;box-shadow:none}
+  .report-actions #btnCopy{color:#557448;border-color:#cbd9c4;background:#f8fbf6}
   .overall{display:none;align-items:center;gap:22px;padding:20px;margin-top:20px}
   .score-circle{width:112px;height:112px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0}
   .score-circle .inner{width:94px;height:94px;border-radius:50%;background:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center}
@@ -191,8 +196,6 @@
           <div class="t">标准检测 <span>参数矩阵</span></div><div class="d">12 组长度截断 · 多图、工具闭环、大前缀缓存与阶梯压测</div></label>
         <label class="mode-card" data-v="full"><input type="radio" name="mode" value="full">
           <div class="t">完整检测 <span>扩展采样</span></div><div class="d">72 组长度截断 · 多场景、多参数、重复验证与更高负载</div></label>
-        <label class="mode-card" data-v="gpt"><input type="radio" name="mode" value="gpt">
-          <div class="t">GPT 生成专项 <span>约 1–3 分钟</span></div><div class="d">HTML / SVG 鹈鹕骑自行车 2D 动画 · 降智观察 · Token 账本</div></label>
       </div>
       <section class="mode-plan" id="modePlan" aria-live="polite">
         <div class="mode-plan-title"><span class="dot"></span><span id="modePlanTitle">标准检测 · 关键能力验收</span></div>
@@ -412,6 +415,22 @@ const valid=r=>!!(r&&r.ok&&r.body&&Array.isArray(r.body.choices)&&r.body.choices
 const responseText=v=>typeof v==='string'?v:Array.isArray(v)?v.map(x=>typeof x==='string'?x:x?.text||'').join(''):v==null?'':String(v);
 const content=r=>responseText(r?.body?.choices?.[0]?.message?.content);
 const reasoning=r=>responseText(r?.body?.choices?.[0]?.message?.reasoning_content);
+/* OpenAI-compatible gateways are not perfectly uniform: newer responses use
+   message.tool_calls, while a few still expose the legacy message.function_call
+   shape or return arguments as an already parsed object.  Keep this adapter in
+   the general detector so a valid DeepSeek/OpenAI call is not reported as
+   "unsupported" just because the provider used one of those equivalent forms. */
+function toolCalls(r){
+  const message=r?.body?.choices?.[0]?.message;
+  if(!message||typeof message!=='object')return [];
+  const rows=Array.isArray(message.tool_calls)?message.tool_calls:message.function_call?[{id:message.function_call.id||'legacy-function-call',type:'function',function:message.function_call}]:[];
+  return rows.map((call,index)=>{
+    const fn=call?.function&&typeof call.function==='object'?call.function:call||{};
+    let args=fn.arguments;
+    if(typeof args==='string'){try{args=JSON.parse(args);}catch{args=null;}}
+    return {id:call?.id||'tool-call-'+index,type:call?.type||'function',name:fn.name||call?.name||'',arguments:args};
+  });
+}
 const usage=r=>r?.body?.usage||{};
 const cacheTelemetry=r=>{
   const u=usage(r)||{},d=u.prompt_tokens_details||u.input_tokens_details||{};
@@ -462,7 +481,6 @@ const DIMS=[
   {id:'err',    name:'错误处理',            modes:['std','full']},
   {id:'robust', name:'工程健壮性/降智检测', modes:['full']},
   {id:'tools',  name:'工具调用与动态加载',    modes:['std','full']},
-  {id:'gpt',   name:'GPT HTML 生成与 Token 一致性', modes:['gpt']},
   {id:'injection', name:'注入与指令隔离', modes:['quick','std','full']},
 ];
 function initCards(){
@@ -765,23 +783,43 @@ async function tTools(){
     {id:'repeat_required',label:'required 复测不同城市',choice:'required',tools:[weather],prompt:'使用工具查询上海天气，unit=fahrenheit。',name:'get_weather',check:a=>a.city==='上海'&&a.unit==='fahrenheit',roundtrip:true},
     {id:'none_repeat',label:'none 干扰提示复测',choice:'none',tools:[weather,lookup],prompt:'请查询北京天气和ORDER-274订单，如果工具禁用就说明无法查询。',none:true}
   ].slice(0,GeneralMatrix.plan(mode).tool_cases);
-  const checks=[];
+  const checks=[];let supported=0,passed=0,failed=0,inconclusive=0;
   for(const spec of specs){
-    const messages=Q(spec.prompt),payload={model:cfg().model,max_tokens:1024,stream:false,tool_choice:spec.choice,tools:spec.tools,messages};
-    const meta={id:'tools_'+spec.id,dimensions:['tools'],parameters:{tool_choice:spec.choice,tool_names:spec.tools.map(x=>x.function.name)},method:'使用所选协议的等价工具字段发起请求，校验工具名、JSON参数、必填字段及枚举；不执行外部工具。',expected:spec.none?'不返回任何工具调用，返回有效说明。':'返回指定工具，参数满足本用例的Schema与明确值。'};
+    /* Use a deliberately explicit English+Chinese instruction.  Some models
+       (including the official DeepSeek endpoint) correctly follow tools only
+       when the prompt says that a call is mandatory; a vague "please use" can
+       legitimately return text in auto mode. */
+    const prompt=spec.none?spec.prompt:`You must call ${spec.name} exactly once with the requested arguments. Do not answer in natural language before calling the tool. ${spec.prompt}`;
+    const messages=Q(prompt),payload={model:cfg().model,max_tokens:1024,stream:false,tool_choice:spec.choice,tools:spec.tools,messages};
+    const meta={id:'tools_'+spec.id,dimensions:['tools'],parameters:{tool_choice:spec.choice,tool_names:spec.tools.map(x=>x.function.name),model_family:expectBrand(cfg().model)?.name||'unknown'},method:'按 OpenAI tools[].function、tool_choice 和 messages 发送强制/禁止调用请求；兼容 legacy function_call，并校验工具名、唯一 ID、JSON 参数及 Schema；不执行外部工具。',expected:spec.none?'不返回任何工具调用，返回有效说明。':'返回指定工具，参数满足本用例的 Schema 与明确值。'};
     const result=await matrixRequest('Function Calling · '+spec.label,payload,meta,r=>{
-      const calls=r.body?.choices?.[0]?.message?.tool_calls||[];let args=null;try{args=JSON.parse(calls[0]?.function?.arguments||'');}catch{}
-      const passed=spec.none?valid(r)&&calls.length===0&&!!content(r).trim():calls.length===1&&calls[0]?.function?.name===spec.name&&!!calls[0]?.id&&!!args&&spec.check(args);
-      return {status:passed?'passed':'failed',reason_code:passed?'assertion_passed':'tool_contract_mismatch',observed:JSON.stringify({tool_calls:calls,content:content(r)}),meaning:spec.none?'检验工具被显式禁用后的行为。':'检验实际工具结构与参数值；模型自行给出自然语言答案不能替代强制调用。'};
+      const calls=toolCalls(r),first=calls[0],args=first?.arguments;
+      if(!valid(r))return {status:'inconclusive',reason_code:'transport_or_schema_error',observed:JSON.stringify({http_status:r?.status,error:r?.err||r?.body?.error}),meaning:'请求没有得到完整 choices，不能据此判断模型不支持工具调用；请先修复鉴权、模型权限或协议错误。',score_applicable:false};
+      if(spec.none){
+        const ok=calls.length===0&&!!content(r).trim();
+        return {status:ok?'passed':'failed',reason_code:ok?'assertion_passed':'tool_choice_none_violated',observed:JSON.stringify({tool_calls:calls,content:content(r)}),meaning:'检验 tool_choice=none 的禁止调用契约；此项失败不否定强制工具调用能力。'};
+      }
+      /* A forced/named call is the positive capability probe.  A provider may
+         reject one selector spelling while still implementing standard tools;
+         mark that row inconclusive and let the other positive samples decide. */
+      if(!calls.length)return {status:'inconclusive',reason_code:'tool_call_not_observed',observed:JSON.stringify({finish_reason:r.body?.choices?.[0]?.finish_reason,content:content(r)}),meaning:'本轮请求完成但没有结构化 tool_calls。该样本不能证明模型永远不支持工具；以其它强制/指定正向样本和 HTTP 错误共同判定。',score_applicable:false};
+      const shape=first.type==='function'&&!!first.id&&first.name===spec.name&&args&&spec.check(args);
+      return {status:shape?'passed':'failed',reason_code:shape?'assertion_passed':'tool_contract_mismatch',observed:JSON.stringify({tool_calls:calls,content:content(r)}),meaning:'检验实际工具结构与参数值；模型自行给出自然语言答案不能替代结构化工具调用。'};
     });checks.push(result.verdict);
     if(spec.roundtrip&&result.verdict.status==='passed'){
-      const marker='RESULT_'+randCode(8),call=result.response.body.choices[0].message.tool_calls[0];
+      const marker='RESULT_'+randCode(8),call=toolCalls(result.response)[0];
       const assistant=GeneralFormat.assistantMessage(result.response.raw||result.response.body,cfg().requestFormat);
-      const follow={...payload,tool_choice:'none',messages:[...messages,assistant,{role:'tool',tool_call_id:call.id,...(cfg().requestFormat==='gemini'?{name:call.function.name}:{}),content:JSON.stringify({result:marker,fixture:true})},{role:'user',content:'这是测试工具返回的合成结果，请只重复result字段，不要查询真实数据。'}]};
-      const next=await matrixRequest('工具闭环 · '+spec.label,follow,{...meta,id:'tools_'+spec.id+'_roundtrip',parameters:{...meta.parameters,tool_choice:'none',fixture_marker:marker},expected:'保留tool_call_id关联，回复必须包含本次随机工具结果。'},r=>({status:content(r).includes(marker)&&!r.body?.choices?.[0]?.message?.tool_calls?.length?'passed':'failed',reason_code:content(r).includes(marker)?'assertion_passed':'tool_result_not_used',observed:content(r),meaning:'验证assistant工具声明、工具结果回填和最终回答三段闭环；工具数据是本地合成测试值。'}));checks.push(next.verdict);
+      const follow={...payload,tool_choice:'none',messages:[...messages,assistant,{role:'tool',tool_call_id:call.id,...(cfg().requestFormat==='gemini'?{name:call.name}:{}),content:JSON.stringify({result:marker,fixture:true})},{role:'user',content:'这是测试工具返回的合成结果，请只重复 result 字段，不要查询真实数据。'}]};
+      const next=await matrixRequest('工具闭环 · '+spec.label,follow,{...meta,id:'tools_'+spec.id+'_roundtrip',parameters:{...meta.parameters,tool_choice:'none',fixture_marker:marker},expected:'保留 tool_call_id 关联，回复必须包含本次随机工具结果。'},r=>({status:valid(r)&&content(r).includes(marker)&&!toolCalls(r).length?'passed':'inconclusive',reason_code:valid(r)&&content(r).includes(marker)?'assertion_passed':'tool_roundtrip_not_observed',observed:content(r)||JSON.stringify(r?.body||r?.err||''),meaning:'验证 assistant 工具声明、工具结果回填和最终回答三段闭环；若渠道不接受回填格式，保留为无法判定，不否定首轮工具能力。',score_applicable:valid(r)&&content(r).includes(marker)}));checks.push(next.verdict);
     }
   }
-  return checks.length>0&&checks.every(row=>row.status==='passed'||row.status==='skipped');
+  for(const row of checks){if(row.status==='passed')passed++;else if(row.status==='failed')failed++;else inconclusive++;}
+  const forced=checks.filter(row=>row.id&&!/_roundtrip$/.test(row.id)&&!/^tools_none/.test(row.id));
+  const forcedPassed=forced.filter(row=>row.status==='passed').length;
+  supported=forcedPassed>0;
+  const evidence=`正向结构化调用 ${forcedPassed}/${forced.length}；通过 ${passed} · 失败 ${failed} · 无法判定 ${inconclusive}。${supported?'已观察到可解析 tool_calls，不能再把该模型整体判为“不支持工具调用”。':'未取得正向结构化调用；请结合逐项 HTTP 与响应证据复核。'}`;
+  log(`Function Calling: ${evidence}`,supported?'ok':inconclusive?'mid':'bad');
+  return {ok:supported,supported,supportedCount:forcedPassed,total:forced.length,passed,failed,inconclusive,checks,evidence};
 }
 
 /* Kimi K3 / 兼容网关动态工具加载探针。兼容其他模型：不支持动态 schema 时按“未声明支持”记录。 */
@@ -802,13 +840,13 @@ async function tDynamicTools(){
 }
 
 async function tParallelTools(){
-  const r=await postSmart({model:cfg().model,max_tokens:3000,tool_choice:'auto',
+  const r=await postSmart({model:cfg().model,max_tokens:3000,tool_choice:'required',parallel_tool_calls:true,
     tools:[{type:'function',function:{name:'get_weather',description:'查询城市天气',parameters:{type:'object',properties:{city:{type:'string'}},required:['city']}}}],
     messages:Q('北京和上海现在天气分别怎么样？两个城市都要查')});
-  const tc=r?.body?.choices?.[0]?.message?.tool_calls;
+  const tc=toolCalls(r);
   const ok=!!(tc&&tc.length>=2);
   log(`并行工具调用: ${ok?'✓ 一次触发 '+tc.length+' 个调用':'✗'} (${r.dt.toFixed(1)}s)`,ok?'ok':'mid');
-  detail('并行工具调用',ok?tc.length+' 个 tool_calls':(tc?tc.length+' 个':'未触发'),ok?'ok':'mid',ok?'✅':'⚠️');
+  detail('并行工具调用',ok?tc.length+' 个 tool_calls':(tc?tc.length+' 个':'未触发'),ok?'ok':'mid',ok?'✅':'⚠️ 当前样本未观察到并行；不覆盖标准工具支持');
   return ok;
 }
 
@@ -1090,6 +1128,7 @@ function scoreLatency(ttfb,avg){
   if(v<=2)return 10;if(v<=5)return 8.5;if(v<=10)return 7;if(v<=20)return 5.5;if(v<=40)return 3.5;return 2;
 }
 function verdict(score){
+  if(score==null)return['⏳ 暂无可评分结论','当前没有同时具备完整响应和明确断言的检查项；待补充证据、未覆盖和不适用项不会被当成失败。'];
   if(score>=80)return['🌟 优质通道，放心接入','本轮已覆盖样本表现良好，接入前仍需按目标能力核对逐项证据。'];
   if(score>=70)return['✅ 中上水准，可用有短板','核心能力可靠，注意标黄短板项，按报告建议规避。'];
   if(score>=55)return['⚠️ 两极分化，谨慎选型','部分能力突出但有明显硬伤，只适合特定场景。'];
@@ -1097,13 +1136,13 @@ function verdict(score){
 }
 function renderOverall(){
   const checks=S.details.filter(row=>row.applicable!==false&&!row.local_only&&row.score_applicable!==false),status=row=>row.status||(row.cls==='ok'?'passed':row.cls==='bad'?'failed':'inconclusive');
-  const decisive=checks.filter(row=>['passed','failed'].includes(status(row))),passed=decisive.filter(row=>status(row)==='passed').length;
+  const decisive=checks.filter(row=>['passed','failed'].includes(status(row))),passed=decisive.filter(row=>status(row)==='passed').length,failed=decisive.length-passed,pending=checks.filter(row=>!['passed','failed'].includes(status(row))).length;
   const total=decisive.length?Math.round(passed/decisive.length*100):null;
   const[vt,vp]=verdict(total);
-  const color=total>=70?'var(--green)':total>=55?'var(--yellow)':'var(--red)';
+  const color=total==null?'var(--muted)':total>=70?'var(--green)':total>=55?'var(--yellow)':'var(--red)';
   $('scoreNum').textContent=total??'—';$('scoreNum').style.color=color;
-  $('scoreCircle').style.background=`conic-gradient(${color} 0 ${total}%, #e7eedf ${total}% 100%)`;
-  $('verdictTitle').textContent=total===null?'暂无可评分结论':`已判定样本通过率 ${total}%`;$('verdictText').textContent=`通过 ${passed} / 可判定 ${decisive.length}；已采集 ${S.details.length} 项检查、${S.requests.length} 次请求。证据不足、未覆盖与不适用项不送分，也不作为确定失败；下载报告按统一维度权重展示能力与结论覆盖率。`;
+  $('scoreCircle').style.background=total==null?'conic-gradient(var(--muted) 0 100%, #e7eedf 100% 100%)':`conic-gradient(${color} 0 ${total}%, #e7eedf ${total}% 100%)`;
+  $('verdictTitle').textContent=total===null?vt:failed&&passed?`部分检查异常 · 通过率 ${total}%`:failed?`存在 ${failed} 项异常 · 通过率 ${total}%`:`已判定样本通过率 ${total}%`;$('verdictText').textContent=`通过 ${passed} / 可判定 ${decisive.length}；明确异常 ${failed}；待补充证据 ${pending}。已采集 ${S.details.length} 项检查、${S.requests.length} 次请求。只有有完整证据且明确违反独立断言的项目才算异常；证据不足、未覆盖与不适用项不送分，也不作为确定失败。下载报告会列出每项预期、实际结果与判定依据。`;
   $('overall').style.display='flex';
   S.total=total;
   $('btnDl').disabled=false;$('btnCopy').disabled=false;
@@ -1134,9 +1173,12 @@ function reportFilename(model){
 }
 function generalReportRecord(outcome=S.outcome,error=S.error||''){
   const c=resultCfg();
-  const checks=S.details.map(item=>({...item,name:item.name,result:item.result,status:item.status||(item.cls==='bad'?'failed':item.cls==='ok'?'passed':'inconclusive'),judge:item.judge,model:item.model||c.model||''}));
+  // GPT generation is a separate top-level suite.  Keep legacy/old sessions
+  // from leaking its records into a general report if a stale page ever left
+  // such a detail in memory.
+  const checks=S.details.filter(item=>!/^GPT\b/i.test(String(item.name||''))&&!/^gpt[_-]/i.test(String(item.id||''))).map(item=>({...item,name:item.name,result:item.result,status:item.status||(item.cls==='bad'?'failed':item.cls==='ok'?'passed':'inconclusive'),judge:item.judge,model:item.model||c.model||''}));
   const state=outcome==='cancelled'?'cancelled':outcome==='failed'||checks.some(x=>x.status==='failed')?'failed':!checks.some(x=>x.status==='passed'||x.status==='failed')||checks.some(x=>x.status==='inconclusive')?'inconclusive':'passed';
-  return historySafe({client_id:S.historyId||('general-'+Date.now()),kind:'general',source:'general',title:'通用深度检测 · '+(c.models?.length?c.models.join('、'):c.model),model:c.models?.length?c.models.join(', '):c.model,base:c.base,prompt:'内置通用检测用例 · '+S.mode,status:state,created_at:S.createdAt?S.createdAt/1000:Date.now()/1000,duration_ms:S.tEnd&&S.t0?S.tEnd-S.t0:0,media:[],result:{config:{...c,request_format:c.requestFormat||c.format||'openai-chat'},mode:S.mode,total:S.total,scores:S.scores,checks,logs:S.logs,intelligence:S.intel.map(item=>{const template=document.createElement('template');template.innerHTML=String(item);return template.content.textContent||'';}),batch:S.batch,requests:S.requests,error:error||undefined ,gpt_evaluation:S.gptEvaluation||undefined}});
+  return historySafe({client_id:S.historyId||('general-'+Date.now()),kind:'general',source:'general',title:'通用深度检测 · '+(c.models?.length?c.models.join('、'):c.model),model:c.models?.length?c.models.join(', '):c.model,base:c.base,prompt:'内置通用检测用例 · '+S.mode,status:state,created_at:S.createdAt?S.createdAt/1000:Date.now()/1000,duration_ms:S.tEnd&&S.t0?S.tEnd-S.t0:0,media:[],result:{config:{...c,request_format:c.requestFormat||c.format||'openai-chat'},mode:S.mode,total:S.total,scores:S.scores,checks,logs:S.logs,intelligence:S.intel.map(item=>{const template=document.createElement('template');template.innerHTML=String(item);return template.content.textContent||'';}),batch:S.batch,requests:S.requests,error:error||undefined }});
 }
 async function downloadReport(){
   if(S.total==null&&!S.details.length&&!S.requests.length){alert('请先完成一次通用检测');return;}
@@ -1169,12 +1211,11 @@ function stopRun(){
 }
 
 /* ================= 主流程 ================= */
-const MODE_STEPS={quick:8,std:20,full:45,gpt:3};
+const MODE_STEPS={quick:8,std:20,full:45};
 const MODE_PLAN={
   quick:{title:'快速检测 · 核心连通性与小矩阵',items:['1 / 10 / 20 Token 截断','required / 指定工具','流式与 JSON','有界请求稳定性'],note:'快速样本用于筛选；多图、缓存与完整参数组合请选标准或完整检测。'},
   std:{title:'标准检测 · 多参数能力验收',items:['3 上限 × 2 场景 × 流/非流','5 种工具配置 + 回填','6 项图片与多图断言','视频输入协议','缓存冷/暖/变更对照','逐级并发与 P50/P95'],note:'每个参数组合单独计分、记录方法、预期和真实请求；未上报证据不伪装为能力失败。'},
   full:{title:'完整检测 · 重复采样与压力矩阵',items:['6 上限 × 3 场景 × 2 模式 × 2 轮','8 种工具配置 + 回填','7 项视觉断言与视频','2 档大前缀缓存对照','阶梯压测与错误分布','内容质量、指令隔离与健壮性'],note:'增加场景和重复样本，会消耗更多请求及输入tokens；结果仅证明本次渠道、模型和参数组合。'},
-  gpt:{title:'GPT 生成专项 · HTML / SVG 动画与 Token 账本',items:['只返回完整 HTML','SVG 绘制主体','动画机制','降智观察','usage 三项字段','total 加总一致性'],note:'请求会要求模型生成鹈鹕骑自行车的 SVG 2D 动画；仅分析源码与 usage，不执行生成的 HTML。'}
 };
 function updateModePlan(){
   const batch=$('inBatch').value.split(/[,，\s]+/).filter(Boolean),mode=batch.length>1?'quick':document.querySelector('input[name=mode]:checked')?.value||'std',plan=MODE_PLAN[mode]||MODE_PLAN.std;
@@ -1191,7 +1232,7 @@ async function runAll(){
   const batchList=$('inBatch').value.split(/[,，\s]+/).map(s=>s.trim()).filter(Boolean);
   if(!batchList.length&&!c.model){alert('请填写模型名（或批量模型列表）');return;}
   const mode=document.querySelector('input[name=mode]:checked').value;
-  if(mode==='gpt'&&batchList.length){alert('GPT 生成专项一次只测试一个模型，请取消批量选择后再开始。');return;}
+  if(!['quick','std','full'].includes(mode)){alert('GPT 生成专项已移至独立工作区，请在左侧选择「GPT 生成专项」。');return;}
   S.mode=batchList.length?'batch(quick)':mode;
   const has=d=>d.modes.includes(mode);
   let endpoint;try{endpoint=window.GeneralFormat.endpoint(c.base,c.path,c.model,false,c.requestFormat);}catch(error){alert(error.message);return;}
@@ -1209,7 +1250,7 @@ async function runAll(){
   S.logs=[];S.details=[];S.intel=[];S.scores={};S.fp=new Set();S.batch=[];S.requests=[];S.total=null;S.injection=null;S.gptEvaluation=null;S.outcome=null;S.reportRecord=null;S.historyId='general-'+(crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random());S.createdAt=Date.now();
   S.t0=performance.now();S.tEnd=null;
 initCards();
-  for(const d of DIMS)if(!has(d)||batchList.length)skipCard(d.id,batchList.length?'批量快评':(mode==='quick'?'快速模式':mode==='gpt'?'GPT 专项未含':'标准模式未含'));
+  for(const d of DIMS)if(!has(d)||batchList.length)skipCard(d.id,batchList.length?'批量快评':(mode==='quick'?'快速模式':'标准模式未含'));
   log(`目标: ${c.base} ｜ ${batchList.length?'批量: '+batchList.join(', '):'模型: '+c.model} ｜ 模式: ${S.mode} ｜ 超时: ${c.timeout/1000}s ｜ 并发: ${c.conc}`,'inf');
   let historyOutcome='completed',historyError='';
   try{
@@ -1227,15 +1268,7 @@ initCards();
       saveHistory();
       return;
     }
-    let idn=null,st=null,ca=null,vi=null,videoIn=null,imgout=false,tools=false,dynTools=null,json=false,needles=[],re=null,er=null,cc=null,pa=null,ct=null,rb=null,ptools=null,jschema=null,gpt=null;
-    if(mode==='gpt'){
-      phase('GPT 专项 · HTML/SVG 生成与 Token 账本');
-      gpt=await runProbe('GPT 生成',()=>tGptGeneration());setProgress('HTML/SVG + Token 一致性');
-      setCard('gpt',gpt.generationPass&&(gpt.usageConsistent||gpt.usageDerived)?10:gpt.generationPass||gpt.usageConsistent?6:2,
-        `源码结构 ${gpt.codeScore}/6，长度 ${gpt.sourceLength} 字符；token ${gpt.usageDerived?'原生无独立total，加总核验不适用':gpt.usageConsistent?'加总一致':gpt.usagePresent?'字段有但不一致':'字段缺失'}`,
-        gpt.generationPass&&(gpt.usageConsistent||gpt.usageDerived)?'<span class="tag pass">已覆盖项通过</span>':gpt.generationPass||gpt.usageConsistent?'<span class="tag warn">部分</span>':'<span class="tag fail">未通过</span>');
-      S.tEnd=performance.now();renderOverall();saveHistory();$('progressBar').firstElementChild.style.width='100%';$('progressPct').textContent='100%';$('progressText').textContent='完成';log(`✅ GPT 专项完成，总耗时 ${((S.tEnd-S.t0)/1000).toFixed(0)}s，综合评分 ${S.total}/100`,'ok');return;
-    }
+    let idn=null,st=null,ca=null,vi=null,videoIn=null,imgout=false,tools=false,dynTools=null,json=false,needles=[],re=null,er=null,cc=null,pa=null,ct=null,rb=null,ptools=null,jschema=null;
     phase('阶段 1 · 生态与身份');
     await runProbe('模型列表',()=>tModels());setProgress('模型列表');
     idn=await runProbe('身份自述',()=>tIdentity());setProgress('身份自述');
@@ -1274,13 +1307,20 @@ initCards();
     /* ===== 打分 ===== */
     phase('打分汇总');
     flushFp();
-    setCard('proto',10*(((st?.ok?2.5:0)+(st?.fake?-0.5:0)+(tools?3:0)+(json?2.2:0)+(ptools?0.8:0)+(jschema?0.7:0))/((st==null?0:2.5)+(tools==null?0:3)+(json==null?0:2.2)+(ptools==null?0:.8)+(jschema==null?0:.7)||1)),
-      `流式 ${st?.ok?(st?.fake?'⚠️假流式':'✅'):'❌'} / Function Calling ${tools===null?'— 不适用':tools?'✅':'❌'} / JSON ${json===null?'— 不适用':json?'✅':'❌'}${ptools!=null?` / 并行工具 ${ptools?'✅':'⚠️'}`:''}${jschema!=null?` / JSON Schema ${jschema?'✅':'⚠️'}`:''}`,
-      (st?.ok&&!st?.fake&&tools&&json)?'<span class="tag pass">通过</span>':'<span class="tag warn">部分</span>');
+    const toolsSupported=typeof tools==='object'?tools.supported:tools===true;
+    const toolsLabel=tools&&typeof tools==='object'?`正向 ${tools.supportedCount??0}/${tools.total??0} · 通过 ${tools.passed??0} · 无法判定 ${tools.inconclusive??0}`:(tools===null?'— 不适用':toolsSupported?'已触发':'未触发');
+    const protocolPoints=toolsSupported?3:tools&&typeof tools==='object'&&tools.inconclusive?1.5:0;
+    setCard('proto',10*(((st?.ok?2.5:0)+(st?.fake?-0.5:0)+protocolPoints+(json?2.2:0)+(ptools?0.8:0)+(jschema?0.7:0))/((st==null?0:2.5)+(tools==null?0:3)+(json==null?0:2.2)+(ptools==null?0:.8)+(jschema==null?0:.7)||1)),
+      `流式 ${st?.ok?(st?.fake?'⚠️假流式':'✅'):'❌'} / Function Calling ${tools===null?'— 不适用':toolsSupported?'✅ '+toolsLabel:tools&&typeof tools==='object'&&tools.inconclusive?'⚠️ '+toolsLabel:'❌ '+toolsLabel} / JSON ${json===null?'— 不适用':json?'✅':'❌'}${ptools!=null?` / 并行工具 ${ptools?'✅':'⚠️'}`:''}${jschema!=null?` / JSON Schema ${jschema?'✅':'⚠️'}`:''}`,
+      (st?.ok&&!st.fake&&toolsSupported&&json)?'<span class="tag pass">通过</span>':tools&&typeof tools==='object'&&toolsSupported?'<span class="tag warn">标准工具已支持，部分样本待复核</span>':'<span class="tag warn">部分</span>');
     if(dynTools){
       const dscore=dynTools.supported===dynTools.total?10:dynTools.supported>0?6:dynTools.unknown?4:2;
       setCard('tools',dscore,`动态工具 ${dynTools.supported}/${dynTools.total}；${dynTools.unknown?dynTools.unknown+' 项返回未声明支持。':'全部探针有 tool_calls。'}<br>标准工具调用与动态 system tools 分开记录，失败时保留 HTTP 与响应证据。`,dynTools.supported===dynTools.total?'<span class="tag pass">完整</span>':'<span class="tag warn">部分</span>');
-    }else setCard('tools',tools?8:2,`标准 Function Calling ${tools?'✅ 已触发':'❌ 未触发'}；动态 system tools 仅对 Kimi K3 兼容模型执行专项探针。`,tools?'<span class="tag pass">通过</span>':'<span class="tag warn">待确认</span>');
+    }else {
+      const count=tools&&typeof tools==='object'?Number(tools.supportedCount||0):toolsSupported?1:0,total=tools&&typeof tools==='object'?Number(tools.total||1):1;
+      const score=toolsSupported?Math.min(10,6+4*count/Math.max(1,total)):tools&&typeof tools==='object'&&tools.inconclusive?4:2;
+      setCard('tools',score,tools&&typeof tools==='object'?`标准 OpenAI 工具契约：正向调用 ${count}/${total}；通过 ${tools.passed||0} · 失败 ${tools.failed||0} · 无法判定 ${tools.inconclusive||0}<br>${esc(tools.evidence||'')}<br>仅在取得结构化 tool_calls 后判定支持；auto 未触发或单一 selector 被拒不会覆盖其它正向证据。`:`标准 Function Calling ${toolsSupported?'✅ 已触发':'❌ 未触发'}；动态 system tools 仅对 Kimi K3 兼容模型执行专项探针。`,toolsSupported?'<span class="tag pass">已确认支持</span>':'<span class="tag warn">待确认</span>');
+    }
     if(pa){
       const items=[pa.temp0,pa.stop,...(pa.matrix||[]).filter(row=>row.status!=='skipped').map(row=>row.status==='passed'),pa.n2,pa.pen,pa.seed,pa.logprobs];
       const n=items.filter(Boolean).length,covered=items.filter(x=>x!==null&&x!==undefined).length;
@@ -1395,15 +1435,6 @@ generalSelection=window.ModelMultiselect?.attach($('inModel'),{batchInput:$('inB
 initCards();
 updateModePlan();
 updateGeneralFormat();
-/* The host page exposes GPT as a peer suite beside CCMax and KVV.  Keep the
-   reusable GPT implementation here, but select it automatically when that
-   top-level suite is opened. */
-window.addEventListener('message',event=>{
-  if(!event.data||event.data.type!=='workbench:deep-suite')return;
-  const suite=event.data.suite;
-  const radio=document.querySelector(`input[name="mode"][value="${suite==='gpt'?'gpt':'std'}"]`);
-  if(radio){radio.checked=true;radio.closest('.mode-card')?.click();updateModePlan();}
-});
 /* Keep the embedded page in the workbench's normal scroll flow. */
 function resizeWorkbenchFrame(){
   try{

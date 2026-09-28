@@ -216,7 +216,7 @@ if __name__=='__main__':unittest.main()
 
 class GPTReportTests(unittest.TestCase):
     def test_gpt_quality_and_token_panel_is_rendered_from_saved_evidence(self):
-        payload = {'records': [{'kind': 'general', 'model': 'gpt-test', 'base': 'https://relay.invalid/v1',
+        payload = {'records': [{'kind': 'gpt', 'model': 'gpt-test', 'base': 'https://relay.invalid/v1',
             'result': {'checks': [{'name': 'GPT · HTML/SVG 降智与 Token 一致性', 'status': 'passed', 'result': '已生成'}],
                        'raw': {'gpt_evaluation': {'prompt': '生成html，内容是svg绘制鹈鹕骑自行车2D动画',
                            'html_detected': True, 'svg_detected': True, 'animation_detected': True, 'html_valid': True,
@@ -230,7 +230,7 @@ class GPTReportTests(unittest.TestCase):
         self.assertIn('gpt-quality', html)
 
     def test_gpt_missing_tokens_are_explicitly_unrecorded(self):
-        payload = {'records': [{'kind': 'general', 'model': 'gpt-test', 'result': {
+        payload = {'records': [{'kind': 'gpt', 'model': 'gpt-test', 'result': {
             'checks': [{'name': 'GPT 专项', 'status': 'inconclusive'}],
             'raw': {'gpt_evaluation': {'html_detected': True, 'svg_detected': False}}}}]}
         from browser_reports import normalize_browser_report
@@ -243,7 +243,7 @@ class GPTReportTests(unittest.TestCase):
         for flag in ({'total_derived': True}, {'total_tokens_derived': True}, {'accounting_applicable': False}):
             for consistent in (None, True):
                 with self.subTest(flag=flag, consistent=consistent):
-                    payload = {'records': [{'kind': 'general', 'model': 'old-gpt-usage', 'result': {
+                    payload = {'records': [{'kind': 'gpt', 'model': 'old-gpt-usage', 'result': {
                         'checks': [{'name': 'GPT usage', 'status': 'inconclusive'}],
                         'gpt_evaluation': {'token_usage': {'input': 10, 'output': 20, 'total': 30, 'consistent': consistent, **flag}}}}]}
                     html = render_report(normalize_browser_report(payload)).decode()

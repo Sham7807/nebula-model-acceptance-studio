@@ -355,7 +355,13 @@ def render_report(result, directory=None):
         stage_chips.append('<span>'+esc(label)+' <b>'+esc(stage.get('duration_label') or '未记录')+'</b></span>')
     duration_stages_html='<div class="executive-stage-times"><span class="field-label">各压测阶段耗时</span><div>'+''.join(stage_chips)+'</div></div>' if stage_chips else ''
     duration_html='<div class="executive-timing"><div><span>'+esc(duration_title)+'</span><strong>'+esc(duration.get('label') or '未记录')+'</strong></div><div><span>测试时间</span><p>'+esc(duration.get('started_at') or '未记录')+(' → '+esc(duration['finished_at']) if duration.get('finished_at') else '')+'</p><small>'+esc(duration_note)+'</small></div>'+duration_stats_html+duration_stages_html+'</div>'
-    executive_html='<div class="executive-panel"><div class="executive-top"><div class="executive-verdict"><span class="index">VERDICT / 本轮结论</span>'+grade_html+'<h2>'+esc(executive.get('headline') or '等待可判定证据')+'</h2><p>'+prose(executive.get('detail') or verdict.get('detail') or '本轮结果未包含足够的结论证据。')+'</p></div><div class="executive-score"><span>综合验收分</span><div><strong>'+esc(overall_score_text)+'</strong><small> / 100</small></div><p>证据可判定率 <b>'+esc(resolution_text)+'</b></p><small>按验收模块权重汇总</small></div></div>'+duration_html+('<div class="executive-grid">'+''.join(executive_items)+'</div>' if executive_items else '')+'<p class="executive-note">分数反映本轮已判定检查的通过表现；证据覆盖和异常项需同时看。缓存命中率单独按实际 token 统计，不等于缓存模块得分。</p></div>'
+    # Keep the acceptance rule visible beside the headline.  Users often read
+    # the red status as "the whole channel failed" even when only one
+    # independently scored assertion is abnormal.  The report deliberately
+    # distinguishes an assertion failure from missing evidence and scope that
+    # was not applicable or not selected.
+    verdict_rules_html='<section class="verdict-rules" aria-label="异常判定标准"><div class="verdict-rules-head"><span class="index">READING / 判定口径</span><h3>“本项异常”只代表对应测试项未满足断言</h3><p>单项异常不会自动推导整条渠道或模型不可用，请先看异常项的预期、实际结果和关联请求。</p></div><div class="verdict-rules-grid"><div><b class="rule-pass">✓ 通过</b><span>请求完成且实际响应满足该项独立断言，计入分子。</span></div><div><b class="rule-fail">! 本项异常</b><span>有完整证据且明确违反该项断言，计入分母并扣除本项。</span></div><div><b class="rule-pending">? 待补充证据</b><span>超时、网络中断、字段缺失或响应不完整，暂不计分，也不等于失败。</span></div><div><b class="rule-skip">– 跳过 / 未覆盖</b><span>协议不适用或本轮没有执行，不进入分母，不能据此判断不支持。</span></div></div><p class="verdict-rules-formula">评分口径：通过 ÷（通过 + 本项异常）；综合分再按已覆盖模块权重汇总。没有可判定项时显示“—”，不会用 0 代替。</p></section>'
+    executive_html='<div class="executive-panel"><div class="executive-top"><div class="executive-verdict"><span class="index">VERDICT / 本轮结论</span>'+grade_html+'<h2>'+esc(executive.get('headline') or '等待可判定证据')+'</h2><p>'+prose(executive.get('detail') or verdict.get('detail') or '本轮结果未包含足够的结论证据。')+'</p></div><div class="executive-score"><span>综合验收分</span><div><strong>'+esc(overall_score_text)+'</strong><small> / 100</small></div><p>证据可判定率 <b>'+esc(resolution_text)+'</b></p><small>按验收模块权重汇总</small></div></div>'+duration_html+('<div class="executive-grid">'+''.join(executive_items)+'</div>' if executive_items else '')+'<p class="executive-note">分数反映本轮已判定检查的通过表现；证据覆盖和异常项需同时看。缓存命中率单独按实际 token 统计，不等于缓存模块得分。</p>'+verdict_rules_html+'</div>'
     check_titles={c.get('id'): c.get('title') or c.get('id') for c in checks}
     count_labels={'passed':'通过','failed':'异常','inconclusive':'待补充证据','skipped':'跳过','not_covered':'未覆盖','cancelled':'取消'}
     def sampling_note(d):
@@ -590,10 +596,23 @@ def render_report(result, directory=None):
     title=data.get('title') or '渠道验收报告';model=config.get('model') or '未记录模型'
     from report_production import render as render_production
     admission_html,production_html=render_production(result,data,links)
+    # Keep every generated section reachable from one readable left rail.  The
+    # score link is intentionally first so reviewers see the decision signal
+    # before drilling into evidence.
+    nav_items=[('score','能力评分','综合分与覆盖率'),('overview','结论总览','本轮结论与资源评级'),('modules','验收模块','模块权重与得分')]
+    if admission_html: nav_items.append(('admission','接入建议','是否适合接入'))
+    if production_html:
+        nav_items.extend([('production','业务稳定性','准入条件与运行范围'),('cost','费用核算','Token 与账单证据')])
+    if gpt_html: nav_items.append(('gpt-quality','GPT 质量','生成与 Token 账本'))
+    nav_items.extend([('setup','范围与配置','本次测试测了什么'),('findings','问题与建议','异常、影响和处理'),('checks','逐项验收','每项预期与实际'),('requests','请求证据','请求、响应与链路')])
+    if original_html: nav_items.append(('original-results','原始评分与日志','页面原始记录'))
+    if matrix_html: nav_items.append(('parameter-matrix','参数矩阵与压测','负载与缓存明细'))
+    nav_items.extend([('limits','判读说明','边界与原始数据'),('all-results','全项结果','完整测试矩阵')])
+    nav_html='<nav class="nav"><div class="nav-heading"><span class="nav-heading-mark">☷</span><span><b>报告导航</b><small>按模块查看证据</small></span></div><div class="nav-links">'+''.join('<a href="#'+target+'" class="'+('nav-primary' if target=='score' else '')+'"><span class="nav-link-index">'+str(index).zfill(2)+'</span><span><b>'+label+'</b><small>'+description+'</small></span></a>' for index,(target,label,description) in enumerate(nav_items,1))+'</div></nav>'
     return ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>'+esc(model+' · '+title)+'</title><style>'+STYLE+'</style></head><body><main>'
         +'<div class="masthead"><span class="brand">小小宇宙无敌</span><span class="eyebrow">CHANNEL ACCEPTANCE REPORT</span><button class="button no-print" id="print-report">打印 / 保存 PDF</button></div>'
         +'<header class="cover"><div class="cover-top"><span class="eyebrow">'+esc(title)+'</span>'+badge(result.get('status'))+'</div><h1>'+esc(model)+'</h1><p>'+esc(config.get('base') or '渠道地址未记录')+'</p><p class="run-id">RUN / '+esc(result.get('run_id') or '未记录')+'</p><div class="cover-meta"><span>'+esc(data.get('engine') or '渠道验收')+'</span><span>'+str(len(checks))+' 项检查</span><span>'+str(request_count)+' 次已记录请求</span><span>依据本轮实测 · 脱敏证据</span></div></header>'
-        +'<nav class="nav"><a href="#overview">结论总览</a><a href="#modules">验收模块</a><a href="#score">能力评分</a>'+('<a href="#gpt-quality">GPT 质量</a>' if gpt_html else '')+'<a href="#setup">范围与配置</a><a href="#findings">发现的问题</a><a href="#checks">逐项检查</a><a href="#requests">请求证据</a>'+('<a href="#original-results">原始评分与日志</a>' if original_html else '')+'<a href="#limits">判读说明</a><a href="#all-results">全项结果</a></nav>'
+        +nav_html
         +'<section id="overview" class="overview">'+executive_html+'<div class="metrics">'+metrics+'</div><div class="distribution" aria-hidden="true">'+distribution+'</div><p class="legend">本报告列出 '+str(len(checks))+' 个验收项 / 用例；'+('请求样本：通过 '+str(summary.get('passed',0))+'，异常 '+str(summary.get('failed',0))+'，无法判定 '+str(summary.get('inconclusive',0))+'。' if cc else 'Claude 专项检查与真实请求数分别统计；上游来源仅为渠道声明。' if claude else '浏览器检查结果与实际 HTTP 请求数分别统计。' if browser else '官方用例、附加传输检查与真实请求数分别统计。')+'</p></section>'+admission_html+score_html+toc_html+production_html+gpt_html+matrix_html
         +'<section id="setup" class="section"><div class="section-head"><div><span class="index">01 / SCOPE</span><h2>这次测了什么</h2></div></div><div class="grid-two"><div class="panel">'+info+'</div><div class="panel">'+scopes+'</div></div></section>'
         +'<section id="findings" class="section"><div class="section-head"><div><span class="index">02 / FINDINGS</span><h2>问题与影响</h2><p>依据本轮已保存的响应和断言整理；建议用于核对链路，不代替上游日志。</p></div></div>'+reason_html+finding_html+'</section>'

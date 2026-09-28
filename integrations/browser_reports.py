@@ -34,8 +34,21 @@ def _gpt_evaluation(record, result):
     lets the unified report renderer display the same evidence for old and
     new records without inventing values.
     """
-    for source in (_dict(record).get('raw'), _dict(result).get('raw'),
-                   _dict(record).get('gpt_evaluation'), _dict(result).get('gpt_evaluation')):
+    record = _dict(record)
+    result = _dict(result)
+    # General detection used to persist a GPT-shaped field while the GPT
+    # suite was still embedded in the legacy page.  That field is historical
+    # evidence only: allowing it into the unified GPT section changes the
+    # scope of a general report and makes old runs appear to have executed the
+    # standalone GPT suite.  The explicit GPT mode remains supported for the
+    # current peer suite, whose browser record still uses kind=general for
+    # backwards-compatible history storage.
+    kind = record.get('kind') or result.get('kind')
+    mode = record.get('mode') or result.get('mode')
+    if kind not in ('gpt',) and not (kind == 'general' and mode == 'gpt'):
+        return None
+    for source in (record.get('raw'), result.get('raw'),
+                   record.get('gpt_evaluation'), result.get('gpt_evaluation')):
         if not isinstance(source, dict):
             continue
         # ``raw`` wraps the payload, while the history publisher stores the
@@ -47,7 +60,7 @@ def _gpt_evaluation(record, result):
     # detail rows returned by tGptGeneration.  Reconstruct a compact
     # evaluation from those rows instead of losing the evidence at export.
     generated = {}; accounting = {}
-    for check in _list(_dict(result).get('checks')):
+    for check in _list(result.get('checks')):
         check = _dict(check)
         identity = str(check.get('id') or check.get('name') or '')
         if 'gpt_html_svg_generation' in identity:
@@ -298,8 +311,8 @@ def normalize_browser_report(payload):
             'timing_source': '保存记录的完整运行区间；多条记录取最早开始至最晚结束，包含间隔，并发耗时不累加。' if len(started) == len(records) else '部分记录缺少起止时间或实际耗时；不使用导出时间补造测试耗时。',
             'cases': cases, 'browser_requests': requests,
             'summary': {'total': len(cases), 'completed': len(cases), **counts},
-            'verdict': {'status': overall, 'label': '存在失败或证据不足' if overall != 'passed' else '本轮已执行检查通过',
-                        'detail': '基础请求结果只代表本轮实际观察；专项能力需查看逐项覆盖。' if overall == 'passed' else '请按模型和请求证据查看失败、取消或无法判定项。'},
+            'verdict': {'status': overall, 'label': '存在本项异常或证据待补充' if overall != 'passed' else '本轮已执行检查通过',
+                        'detail': '基础请求结果只代表本轮实际观察；专项能力需查看逐项覆盖。' if overall == 'passed' else '这不是整条渠道“不通过”：请按模型和请求证据区分本项异常、无法判定、跳过和未覆盖。'},
             'original_results': originals, 'gpt_evaluations': gpt_evaluations,
             'transport': {'request_count': len(requests)}}
 

@@ -2,9 +2,9 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const {describe}=require('./general-check-content.js');
 test('core descriptions match implemented assertions without overstating capability',()=>{
-  assert.match(describe('Function Calling').method,/tool_choice=auto/);
+  assert.match(describe('Function Calling').method,/tool_choice=required/);
   assert.match(describe('Function Calling').meaning,/未执行/);
-  assert.match(describe('并行工具调用').method,/tool_choice=auto/);
+  assert.match(describe('并行工具调用').method,/parallel_tool_calls=true/);
   assert.match(describe('动态工具加载').method,/只有第二次/);
   assert.match(describe('logprobs').expected,/非null/);
   assert.match(describe('GPT usage').expected,/派生total不参与/);

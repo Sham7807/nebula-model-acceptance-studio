@@ -86,7 +86,7 @@ test('legacy general assertions get the shared descriptions without replacing ex
 test('derived or inapplicable token totals never display arithmetic verification',async()=>{
   for(const flags of [{total_derived:true},{total_tokens_derived:true},{accounting_applicable:false}]){
     const root=harness();
-    const html=await root.WorkbenchReport.render([{kind:'general',model:'old-gpt-usage',result:{checks:[{name:'GPT usage',status:'inconclusive'}],gpt_evaluation:{token_usage:{input:10,output:20,total:30,consistent:true,...flags}}}}]);
+    const html=await root.WorkbenchReport.render([{kind:'gpt',model:'old-gpt-usage',result:{checks:[{name:'GPT usage',status:'inconclusive'}],gpt_evaluation:{token_usage:{input:10,output:20,total:30,consistent:true,...flags}}}}]);
     assert.match(html,/未验证渠道上报总量/);assert.doesNotMatch(html,/usage 一致/);
     if(flags.accounting_applicable===false)assert.match(html,/当前协议不适用总量加总校验/);
     else assert.match(html,/总计 30（派生）/);

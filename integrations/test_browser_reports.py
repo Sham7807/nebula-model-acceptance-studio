@@ -13,6 +13,34 @@ def payload(checks=None, requests=None, **extra):
 
 
 class BrowserReportTests(unittest.TestCase):
+    def test_general_legacy_gpt_field_stays_out_of_gpt_sections(self):
+        """Old general records must keep GPT-shaped evidence out of GPT scope.
+
+        Before GPT became a separate workspace, the general detector persisted
+        a ``gpt_evaluation`` field alongside its ordinary checks.  Exporting
+        that field as a GPT suite result would make a historical general run
+        look as if the standalone GPT detector had executed.  The raw record
+        remains available for traceability, while normalized GPT sections stay
+        empty and ordinary checks keep their original observations.
+        """
+        data = payload([
+            {'id': 'gpt_html_svg_generation',
+             'name': 'GPT HTML / SVG 动画生成',
+             'status': 'passed',
+             'result': '旧通用记录',
+             'dimensions': ['protocol']}
+        ], gpt_evaluation={
+            'html_detected': True,
+            'svg_detected': True,
+            'token_usage': {'input': 10, 'output': 20, 'total': 30}
+        })
+        result = normalize_browser_report(data)
+
+        self.assertEqual(result['gpt_evaluations'], [])
+        self.assertNotIn('gpt_evaluation', result['cases'][0]['metadata'])
+        self.assertNotIn('GPT 专项实测', result['cases'][0]['observed'])
+        self.assertIsNone(result['original_results'][0]['gpt_evaluation'])
+
     def test_protocol_settings_and_assertion_explanation_survive_normalization(self):
         original = payload([{'id': 'tools', 'name': '工具调用', 'status': 'passed', 'method': '强制工具调用并回填结果',
             'expected': 'tool_calls 含 Calculator', 'observed': '收到 Calculator', 'meaning': '支持当前工具 Schema',
@@ -54,6 +82,16 @@ class BrowserReportTests(unittest.TestCase):
         self.assertIn('data-filter="not_covered"', html)
         self.assertIn('未覆盖', html)
         self.assertNotIn('本轮已执行检查通过', html)
+
+    def test_verdict_explains_that_one_anomaly_is_scoped_to_its_assertion(self):
+        result = normalize_browser_report(payload([
+            {'name': '基础协议', 'status': 'passed'},
+            {'name': '工具参数', 'status': 'failed', 'observed': '参数不符合断言'},
+            {'name': '缓存 usage', 'status': 'inconclusive', 'reason': '缺少完整计量'},
+        ]))
+        verdict = result['verdict']
+        self.assertEqual(verdict['label'], '存在本项异常或证据待补充')
+        self.assertIn('不是整条渠道“不通过”', verdict['detail'])
 
     def test_request_links_require_explicit_ids_and_remain_record_scoped(self):
         first = payload([

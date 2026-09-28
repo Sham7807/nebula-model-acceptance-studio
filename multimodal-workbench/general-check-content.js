@@ -14,8 +14,8 @@
     [/^图像输入$/,['multimodal'],'批量快评提交含随机数字的内置 PNG，询问图下方数字。','返回有效内容并包含本次生成的随机数字。','仅覆盖一张图的数字识别，未覆盖完整视觉推理。','改用单模型标准检测补充三色与图形内容验证。'],
     [/^图片输出$/,['multimodal'],'在对话接口中请求生成一张猫的图片，检查文本中的 Markdown 图片或图片 URL。','观察到图片引用；当前探针不验证 URL 成品真实性。','普通文本模型只返回文字可能是预期行为，此项不代替图像生成接口验收。','切换图像生成模式，检查真实媒体响应、预览与下载。'],
     [/动态工具/,['tools'],'测试 system.tools 动态加载、动态加载加 required、动态与顶层工具并存三个请求；只有第二次显式强制工具调用，其余使用渠道默认选择。','分别观察三次是否返回 Calculator 工具调用；未强制的请求未触发不能单独证明不支持工具。','这是 Kimi 动态工具契约，不能要求所有 OpenAI 兼容模型天然支持。','核对 channels 对 system.tools 的支持；普通模型使用标准顶层 tools 对照。'],
-    [/并行工具/,['tools'],'顶层声明天气工具，以 tool_choice=auto 询问北京、上海两地天气，检查同一响应的调用数量。','同一响应包含至少两个 tool_calls；此断言不验证工具真实执行。','衡量本次多工具请求形态，自动选择也可能产生串行调用。','查看 tool_choice、并行参数及工具参数内容，并补做工具结果回填。'],
-    [/Function Calling|^工具调用$/,['tools'],'顶层声明 get_weather(city) 并以 tool_choice=auto 询问北京天气。','返回非空工具调用，首个工具名为 get_weather。','当前只检查工具触发和名称，未执行外部天气工具或验证回填闭环。','检查工具 Schema、模型工具能力、所选协议适配与原始工具字段。'],
+    [/并行工具/,['tools'],'顶层声明天气工具，以 tool_choice=required、parallel_tool_calls=true 询问北京、上海两地天气，检查同一响应的调用数量。','同一响应包含至少两个 tool_calls；此断言不验证工具真实执行。','并行是独立扩展能力；未观察到两个调用只说明当前并行样本未成立，不覆盖标准工具调用。','查看 tool_choice、parallel_tool_calls、工具参数内容，并补做工具结果回填。'],
+    [/Function Calling|^工具调用$/,['tools'],'按 OpenAI 兼容格式声明 get_weather(city)，先以 tool_choice=required/具名选择发起强制调用，兼容 legacy function_call 和现代 tool_calls；仅检查结构，不执行外部工具。','至少一个正向样本返回非空结构化工具调用，工具名、唯一 ID 和 JSON 参数均符合 Schema。','自动模式本轮不触发、某个 selector 被拒或工具回填失败，工具未执行，均不能单独证明模型不支持工具；必须结合强制正向样本和 HTTP 证据。','检查 tools[].function、tool_choice 原样透传、finish_reason、tool_calls/function_call 结构以及真实 ID 回填。'],
     [/JSON Schema/,['protocol'],'声明 person JSON Schema（name 字符串、age 整数、required 和 additionalProperties=false），要求结构化返回。','响应可解析为 JSON，name 为字符串、age 为数值；当前检查并未完整遍历 Schema 约束。','仅证明本样本满足已执行字段断言，不代表所有 Schema 关键字均受支持。','检查渠道结构化输出支持并补测额外字段、缺失 required 和嵌套约束。'],
     [/JSON Mode/,['protocol'],'请求 json_object 返回张三和年龄30，解析内容并检查 name、age 字段。','输出可被 JSON.parse 解析且包含 name 和 age。','本项验证 JSON 形态与字段存在，不验证所有字段值或类型。','检查 response_format 映射、JSON 包装和模型原始文本。'],
     [/长上下文/,['protocol'],'将随机口令埋入长填充文本中部，要求只输出口令；按本次长度标签分别发送。','有效回复包含本次随机口令。','一次中部检索不等于已验证整个上下文窗口或长文推理。','对比原始口令与返回值，并增加不同位置、长度与多针样本。'],
@@ -45,11 +45,12 @@
     [/中文 token 效率/,['cache'],'发送固定中文短句，读取prompt_tokens并与页面采用的20字基数比较。','记录实际token数与比值；页面1.2阈值仅是观察参考。','计数包括协议包装或系统上下文，不可据此判定tokenizer或计费被篡改。','用明确tokenizer和相同序列化输入比对，分离隐藏上下文成本。'],
     [/延迟分布/,['reliability'],'串行发送五次hi，对成功请求计算平均耗时。','记录可用请求的均值；页面阈值为8秒和20秒。','均值不包含失败样本，亦不是纯模型生成速度或SLA。','同时复核失败数、首字节、网络延迟和高分位耗时。'],
     [/空消息处理/,['protocol'],'发送content为空字符串的用户消息。','当前规则检查是否出现HTTP 500；有效4xx拒绝也需结合协议判读。','只覆盖空内容健壮性，不证明所有无效请求都正确处理。','核对错误对象、状态码与超时，避免将空200视作能力通过。'],
-    [/usage 字段完整性|GPT usage/,['cache'],'读取所选协议的原生输入、输出计数；有原生独立总量时，GPT账本再核对输入加输出。适配器计算的total明确标为派生值。','所选协议原生字段齐全；GPT账本仅在原生独立total存在时要求非负整数且加总一致，派生total不参与该断言。','usage完整与加总正确不证明真实tokenizer计数或计费准确。','对照原始usage、所选协议字段和独立计数，缺失时请渠道补全。'],
-    [/GPT HTML|GPT 生成/,['protocol','multimodal'],'要求生成SVG鹈鹕骑自行车HTML动画，只检查源码结构、关键词和动画机制，不执行生成代码。','保存完整HTML、SVG与动画特征及token证据；以专项逐条断言为准。','结构特征不能代替视觉质量，也不能独立证明模型降智、身份或蒸馏。','查看隔离预览与源码，人工比较相同提示词下的多次结果。']
+    [/^usage 字段完整性$/,['cache'],'读取所选协议的原生输入、输出计数；有原生独立总量时核对输入加输出，适配器计算的 total 明确标为派生值。','所选协议原生字段齐全；仅在原生独立 total 存在时要求非负整数且加总一致，派生total不参与该断言。','usage 完整与加总正确不证明真实 tokenizer 计数或计费准确。','对照原始 usage、所选协议字段和独立计数，缺失时请渠道补全。']
   ];
   function describe(name,status){
-    const row=cases.find(item=>item[0].test(String(name||'')));
+    const requested=String(name||'');
+    const canonical=requested==='GPT usage'?'usage 字段完整性':requested;
+    const row=cases.find(item=>item[0].test(canonical));
     const value=row?{method:row[2],expected:row[3],meaning:row[4],next_step:row[5],dimensions:[...row[1]]}:{method:'读取该检查项保存的原始判定与请求记录。',expected:'此项未保存独立预期值，请结合原始判定核对；不推定额外能力已通过。',meaning:'仅展示已采集观察；缺少独立断言时不扩大结论。',next_step:'补充该项明确的输入、预期与请求证据后再验收。',dimensions:['protocol']};
     const state=String(status||'');
     if(['skipped','not_covered','cancelled'].includes(state))value.next_step='本项未完成有效能力验收，不参与分数；确认适用协议和测试范围后补测。 '+value.next_step;
