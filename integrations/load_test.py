@@ -215,6 +215,8 @@ def validate_config(data):
 
     body = data.get('body', None)
     model = str(data.get('model') or '').strip()
+    if not model and isinstance(body, dict):
+        model = str(body.get('model') or '').strip()
     # For OpenAI-compatible traffic, model can live alongside the config or
     # inside the body.  Supplying it at the top level makes the UI usable
     # immediately after model discovery without hand-editing JSON.
