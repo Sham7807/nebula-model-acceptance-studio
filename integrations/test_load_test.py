@@ -34,6 +34,15 @@ class LoadTestEngineTests(unittest.TestCase):
         self.assertTrue(config['url'].endswith('/v1beta/models/gemini-2.5-flash:generateContent'))
         self.assertEqual(config['headers']['x-goog-api-key'], 'g-secret')
 
+    def test_native_anthropic_root_gets_v1_messages(self):
+        config = load_test.validate_config({
+            'base_url': 'https://api.anthropic.com', 'api_key': 'a-secret',
+            'auth': 'anthropic', 'request_format': 'anthropic', 'model': 'claude-sonnet',
+            'total_requests': 1,
+        })
+        self.assertEqual(config['url'], 'https://api.anthropic.com/v1/messages')
+        self.assertEqual(config['headers']['x-api-key'], 'a-secret')
+
     def test_usage_and_rpm_tpm_are_reported_without_false_zero(self):
         calls = {'count': 0}
         def fixture(config):

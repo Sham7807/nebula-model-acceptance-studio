@@ -138,9 +138,10 @@ def _endpoint_from_base(base, *, request_format='openai', model=''):
     if re.search(r'/(?:chat/completions|responses|messages|completions)$', path, re.I):
         return value
     if request_format == 'anthropic':
-        suffix = '/messages'
+        suffix = '/messages' if re.search(r'/v\d+(?:beta\d*)?$', path, re.I) else '/v1/messages'
     elif request_format == 'gemini':
-        suffix = '/models/' + str(model).strip() + ':generateContent' if str(model).strip() else '/models'
+        prefix = '' if re.search(r'/v\d+(?:beta\d*)?$', path, re.I) else '/v1beta'
+        suffix = prefix + '/models/' + str(model).strip() + ':generateContent' if str(model).strip() else prefix + '/models'
     elif re.search(r'/v\d+(?:beta\d*)?(?:/openai)?$', path, re.I):
         suffix = '/chat/completions'
     else:
