@@ -24,6 +24,8 @@ class LoadTestEngineTests(unittest.TestCase):
         safe = load_test.redacted_config(config)
         self.assertNotIn('sk-secret', json.dumps(safe))
         self.assertEqual(safe['model'], 'fixture-model')
+        prefixed = load_test.validate_config({'base_url': 'https://relay.test/v1', 'api_key': 'Bearer sk-secret'})
+        self.assertEqual(prefixed['headers']['Authorization'], 'Bearer sk-secret')
 
     def test_native_gemini_endpoint_uses_selected_model(self):
         config = load_test.validate_config({
