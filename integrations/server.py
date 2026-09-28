@@ -1223,7 +1223,9 @@ class Handler(BaseHTTPRequestHandler):
                 if self.headers.get_content_type()!='application/json' or not 0<length<65536:raise ValueError('请求格式无效')
                 data=json.loads(self.rfile.read(length))
                 if not isinstance(data,dict):raise ValueError('请求必须为 JSON 对象')
-                base=str(data.get('base','')).strip();key=str(data.get('key','')).strip();auth=data.get('auth','bearer')
+                base=str(data.get('base_url') or data.get('base','')).strip()
+                key=str(data.get('api_key') or data.get('key','')).strip()
+                auth=data.get('auth','bearer')
                 from channel_discovery import fetch_models
                 return self.send_json(200,fetch_models(base,key,auth))
             except Exception as exc:
