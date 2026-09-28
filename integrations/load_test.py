@@ -135,7 +135,7 @@ def _endpoint_from_base(base, *, request_format='openai', model=''):
     value = _validate_url(base)
     parsed = urlsplit(value)
     path = parsed.path.rstrip('/')
-    if re.search(r'/(?:chat/completions|responses|messages|completions)$', path, re.I):
+    if re.search(r'/(?:chat/completions|responses|messages|completions|models/[^/]+:(?:stream)?generateContent)$', path, re.I):
         return value
     if request_format == 'anthropic':
         suffix = '/messages' if re.search(r'/v\d+(?:beta\d*)?$', path, re.I) else '/v1/messages'
