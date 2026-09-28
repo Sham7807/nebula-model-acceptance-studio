@@ -54,6 +54,12 @@ class LoadTestEngineTests(unittest.TestCase):
         self.assertIsNone(result['summary']['tpm'])
         self.assertEqual(usage['usage_missing_requests'], 1)
 
+    def test_sse_usage_is_read_from_final_event(self):
+        payload = (b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+                   b'data: {"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}\n\n'
+                   b'data: [DONE]\n\n')
+        self.assertEqual(load_test.extract_stream_usage(payload)['total'], 10)
+
     def test_validate_requires_safe_target_and_caps(self):
         with self.assertRaises(ValueError):
             load_test.validate_config({'url': 'file:///etc/hosts'})

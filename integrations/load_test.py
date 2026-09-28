@@ -94,6 +94,36 @@ def extract_usage(payload):
     return usage
 
 
+def extract_stream_usage(content):
+    """Read usage from an OpenAI/Anthropic SSE response when available.
+
+    Providers normally emit usage in the final ``data:`` event.  We inspect
+    only JSON event payloads and retain the last complete usage object; stream
+    text itself is never treated as a token estimate.
+    """
+    if not content:
+        return None
+    try:
+        text = content.decode('utf-8', errors='replace') if isinstance(content, (bytes, bytearray)) else str(content)
+    except Exception:
+        return None
+    found = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith('data:'):
+            line = line[5:].strip()
+        if not line or line == '[DONE]':
+            continue
+        try:
+            value = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        usage = extract_usage(value)
+        if usage is not None:
+            found = usage
+    return found
+
+
 def _endpoint_from_base(base, *, request_format='openai'):
     """Turn a provider base URL into a request endpoint.
 
@@ -328,6 +358,8 @@ def _request_once(config):
                 usage = extract_usage(response.json())
             except (ValueError, TypeError):
                 usage = None
+        if usage is None and ('event-stream' in content_type.lower() or b'data:' in response.content[:512]):
+            usage = extract_stream_usage(response.content)
         return {'ok': response.status_code in config['expected_statuses'], 'status': response.status_code,
                 'latency_ms': round(elapsed, 2), 'bytes': len(response.content), 'error_type': None,
                 'usage': usage}
