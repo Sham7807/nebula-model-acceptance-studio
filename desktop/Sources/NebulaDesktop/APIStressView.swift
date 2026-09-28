@@ -25,6 +25,10 @@ private struct APIStressResult: Sendable {
     let bytes: Int
     let error: String?
     let succeeded: Bool
+    let promptTokens: Int
+    let completionTokens: Int
+    let totalTokens: Int
+    let usageKnown: Bool
 }
 
 /// A load test must never follow a redirect and accidentally send an API key
@@ -43,6 +47,14 @@ private final class LoadTestRedirectDelegate: NSObject, URLSessionTaskDelegate, 
 
 @MainActor
 final class APIStressModel: ObservableObject {
+    // The connection fields are intentionally first-class: a load test should
+    // be reproducible from a base URL, API key and selected model alone.
+    @Published var baseURL = ""
+    @Published var apiKey = ""
+    @Published var availableModels: [String] = []
+    @Published var selectedModel = ""
+    @Published private(set) var isFetchingModels = false
+    @Published private(set) var modelsStatus: String?
     @Published var endpoint = ""
     @Published var method = "POST"
     @Published var headersText = "Content-Type: application/json"
@@ -54,6 +66,7 @@ final class APIStressModel: ObservableObject {
     @Published var durationMode = false
     @Published var durationSeconds = 30
     @Published var ratePerSecond = 0
+    @Published var maxOutputTokens = 256
     @Published var expectedStatusText = "2xx / 3xx"
     @Published var authorized = false
     @Published private(set) var resolutionText: String?
@@ -65,6 +78,11 @@ final class APIStressModel: ObservableObject {
     @Published private(set) var errorCounts: [String: Int] = [:]
     @Published private(set) var latencies: [Double] = []
     @Published private(set) var totalBytes = 0
+    @Published private(set) var promptTokens = 0
+    @Published private(set) var completionTokens = 0
+    @Published private(set) var totalTokens = 0
+    @Published private(set) var usageSamples = 0
+    @Published private(set) var usageMissing = 0
     @Published private(set) var startedAt: Date?
     @Published private(set) var finishedAt: Date?
     @Published private(set) var running = false
@@ -73,7 +91,13 @@ final class APIStressModel: ObservableObject {
 
     deinit { runTask?.cancel() }
 
-    var progress: Double { totalRequests > 0 ? Double(completed) / Double(totalRequests) : 0 }
+    var progress: Double {
+        if durationMode, let startedAt {
+            let elapsed = (finishedAt ?? Date()).timeIntervalSince(startedAt)
+            return min(1, max(0, elapsed / Double(max(1, durationSeconds))))
+        }
+        return totalRequests > 0 ? Double(completed) / Double(totalRequests) : 0
+    }
     var successRate: Double { completed > 0 ? Double(succeeded) / Double(completed) : 0 }
     var requestsPerSecond: Double {
         guard let startedAt else { return 0 }
@@ -84,22 +108,138 @@ final class APIStressModel: ObservableObject {
     var p50: Double { percentile(0.50) }
     var p95: Double { percentile(0.95) }
     var p99: Double { percentile(0.99) }
+    var requestsPerMinute: Double { requestsPerSecond * 60 }
+    var tokensPerMinute: Double {
+        guard usageSamples > 0, let startedAt else { return 0 }
+        let end = finishedAt ?? Date()
+        return Double(totalTokens) / max(0.001, end.timeIntervalSince(startedAt)) * 60
+    }
+    var tokensPerMinuteText: String { usageSamples > 0 ? String(format: "%.0f", tokensPerMinute) : "—" }
 
     func autofill(channel: ChannelProfile, key: String) {
+        if baseURL.isEmpty { baseURL = channel.base.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if apiKey.isEmpty { apiKey = key }
         guard endpoint.isEmpty else { return }
-        let base = channel.base.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = baseURL
         if !base.isEmpty {
-            endpoint = base.hasSuffix("/chat/completions") ? base : base.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/chat/completions"
+            endpoint = chatEndpoint(from: base)
         }
         if !key.isEmpty && !headersText.localizedCaseInsensitiveContains("authorization") {
             headersText = "Content-Type: application/json\nAuthorization: Bearer \(key)"
         }
-        if !channel.model.isEmpty { bodyText = bodyText.replacingOccurrences(of: "your-model", with: channel.model) }
+        if !channel.model.isEmpty {
+            selectedModel = channel.model
+            bodyText = bodyText.replacingOccurrences(of: "your-model", with: channel.model)
+        }
+    }
+
+    func chooseModel(_ value: String) {
+        selectedModel = value
+        guard !value.isEmpty else { return }
+        applyModelToBody(value)
+    }
+
+    private func applyModelToBody(_ value: String) {
+        guard !value.isEmpty else { return }
+        if let data = bodyText.data(using: .utf8),
+           var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            object["model"] = value
+            if let encoded = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
+               let text = String(data: encoded, encoding: .utf8) {
+                bodyText = text
+                return
+            }
+        }
+        if bodyText.contains("\"model\"") {
+            bodyText = bodyText.replacingOccurrences(of: #"("model"\s*:\s*")[^"]*(")"#, with: "$1\(value)$2", options: .regularExpression)
+        }
+    }
+
+    func fetchModels() {
+        guard !isFetchingModels else { return }
+        guard let url = modelsURL() else { modelsStatus = "请输入有效的 Base URL"; return }
+        if endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            endpoint = chatEndpoint(from: baseURL)
+        }
+        isFetchingModels = true; modelsStatus = "正在获取模型…"
+        var request = URLRequest(url: url, timeoutInterval: 20)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let value = apiKey.hasPrefix("Bearer ") ? apiKey : "Bearer \(apiKey)"
+            request.setValue(value, forHTTPHeaderField: "Authorization")
+        }
+        Task { [weak self] in
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else { throw NSError(domain: "Models", code: 0, userInfo: [NSLocalizedDescriptionKey: "无法读取模型接口响应"]) }
+                guard (200..<300).contains(http.statusCode) else { throw NSError(domain: "Models", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "模型接口返回 HTTP \(http.statusCode)"]) }
+                let decoded = try Self.parseModelIDs(data)
+                await MainActor.run {
+                    guard let self else { return }
+                    self.availableModels = decoded.filter { !$0.isEmpty }.sorted()
+                    if self.selectedModel.isEmpty, let first = self.availableModels.first { self.chooseModel(first) }
+                    self.modelsStatus = self.availableModels.isEmpty ? "接口已连接，但没有返回可用模型" : "已获取 \(self.availableModels.count) 个模型"
+                    self.isFetchingModels = false
+                }
+            } catch {
+                await MainActor.run { [weak self] in
+                    self?.isFetchingModels = false
+                    self?.modelsStatus = "获取失败：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private static func parseModelIDs(_ data: Data) throws -> [String] {
+        let object: Any
+        do { object = try JSONSerialization.jsonObject(with: data) }
+        catch { throw NSError(domain: "Models", code: 0, userInfo: [NSLocalizedDescriptionKey: "模型接口返回的不是 JSON"]) }
+        let values: [Any]
+        if let root = object as? [String: Any] {
+            values = (root["data"] as? [Any]) ?? (root["models"] as? [Any]) ?? []
+        } else if let array = object as? [Any] {
+            values = array
+        } else { values = [] }
+        return values.compactMap { value in
+            if let id = value as? String { return id }
+            if let row = value as? [String: Any] {
+                return (row["id"] as? String) ?? (row["name"] as? String) ?? (row["model"] as? String)
+            }
+            return nil
+        }
+    }
+
+    private func modelsURL() -> URL? {
+        var raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return nil }
+        if raw.hasSuffix("/chat/completions") { raw = String(raw.dropLast("/chat/completions".count)) }
+        if raw.hasSuffix("/completions") { raw = String(raw.dropLast("/completions".count)) }
+        if raw.hasSuffix("/models") { raw = String(raw.dropLast("/models".count)) }
+        raw = raw.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if !raw.lowercased().hasSuffix("/v1") { raw += "/v1" }
+        return URL(string: raw + "/models")
+    }
+
+    private func chatEndpoint(from value: String) -> String {
+        var raw = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if raw.hasSuffix("/chat/completions") || raw.hasSuffix("/completions") { return raw }
+        raw = raw.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return raw.lowercased().hasSuffix("/v1") ? raw + "/chat/completions" : raw + "/v1/chat/completions"
+    }
+
+    func syncEndpointFromBase() {
+        guard !baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        endpoint = chatEndpoint(from: baseURL)
     }
 
     func start() {
         guard !running else { return }
         guard authorized else { errorText = "请确认你已获得目标接口所有者的压测授权。"; return }
+        if endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !baseURL.isEmpty {
+            endpoint = chatEndpoint(from: baseURL)
+        }
+        if !selectedModel.isEmpty { applyModelToBody(selectedModel) }
         guard let config = makeConfig() else { return }
         resetMetrics()
         running = true
@@ -128,7 +268,10 @@ final class APIStressModel: ObservableObject {
         let panel = NSSavePanel()
         panel.title = "导出 API 压测报告"
         panel.canCreateDirectories = true
-        panel.nameFieldStringValue = "API压测报告-\(Int(Date().timeIntervalSince1970)).\(format.extension)"
+        let stamp = DateFormatter.apiReportStamp.string(from: Date())
+        let model = selectedModel.isEmpty ? "未选择模型" : selectedModel
+        let safeModel = model.replacingOccurrences(of: "[^A-Za-z0-9._-]+", with: "-", options: .regularExpression).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        panel.nameFieldStringValue = "测试报告-\(safeModel.isEmpty ? "模型" : safeModel)-\(stamp).\(format.extension)"
         panel.begin { [weak self] response in
             guard response == .OK, let self, let url = panel.url else { return }
             do { try self.reportData(format: format).write(to: url, options: .atomic); self.statusText = "报告已保存：\(url.lastPathComponent)" }
@@ -155,7 +298,8 @@ final class APIStressModel: ObservableObject {
     private func resetMetrics() {
         completed = 0; succeeded = 0; failed = 0
         statusText = "准备就绪"; errorText = nil; errorCounts = [:]
-        latencies = []; totalBytes = 0; startedAt = nil; finishedAt = nil
+        latencies = []; totalBytes = 0; promptTokens = 0; completionTokens = 0; totalTokens = 0; usageSamples = 0; usageMissing = 0
+        startedAt = nil; finishedAt = nil
     }
 
     private func makeConfig() -> APIStressConfig? {
@@ -185,9 +329,19 @@ final class APIStressModel: ObservableObject {
             guard !name.isEmpty else { errorText = "请求头名称不能为空。"; return nil }
             headers[name] = value
         }
-        let body = bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            headers["Authorization"] = apiKey.hasPrefix("Bearer ") ? apiKey : "Bearer \(apiKey)"
+        }
+        var body = bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if selectedModel.isEmpty && body.range(of: #""model"\s*:\s*"your-model""#, options: .regularExpression) != nil {
+            errorText = "请先点击“获取模型”并选择模型，或在高级请求体中填写实际模型 ID。"; return nil
+        }
         if ["GET", "HEAD"].contains(method) && !body.isEmpty {
             errorText = "GET / HEAD 请求不应携带请求体；请清空请求体或改用 POST。"; return nil
+        }
+        if !body.isEmpty, let jsonData = body.data(using: .utf8), var object = (try? JSONSerialization.jsonObject(with: jsonData)) as? [String: Any], object["max_tokens"] == nil {
+            object["max_tokens"] = maxOutputTokens
+            if let encoded = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]), let formatted = String(data: encoded, encoding: .utf8) { body = formatted }
         }
         let data = body.isEmpty ? nil : Data(body.utf8)
         // Keep the native runner within the same bounded envelope as the
@@ -197,7 +351,7 @@ final class APIStressModel: ObservableObject {
         let workers = min(max(concurrency, 1), total)
         let timeout = min(max(timeoutSeconds, 1), 600)
         let duration = durationMode ? min(max(durationSeconds, 1), 600) : 0
-        let rate = durationMode ? min(max(ratePerSecond, 1), 1_000) : min(max(ratePerSecond, 0), 1_000)
+        let rate = min(max(ratePerSecond, 0), 1_000)
         let expected = expectedStatusText == "2xx / 3xx" ? nil : Int(expectedStatusText)
         return APIStressConfig(endpoint: endpointURL, method: method, headers: headers, body: data,
                                total: total, concurrency: workers, timeout: TimeInterval(timeout),
@@ -217,6 +371,10 @@ final class APIStressModel: ObservableObject {
         if result.succeeded { succeeded += 1 } else { failed += 1 }
         latencies.append(result.latency * 1_000)
         totalBytes += result.bytes
+        promptTokens += result.promptTokens
+        completionTokens += result.completionTokens
+        totalTokens += result.totalTokens
+        if result.usageKnown { usageSamples += 1 } else { usageMissing += 1 }
         if let error = result.error {
             errorCounts[error, default: 0] += 1
         } else if let statusCode = result.statusCode, !(200..<400).contains(statusCode) {
@@ -268,17 +426,36 @@ final class APIStressModel: ObservableObject {
             let (data, response) = try await session.data(for: request)
             let status = (response as? HTTPURLResponse)?.statusCode
             if delegate.redirected {
-                return APIStressResult(statusCode: status, latency: Date().timeIntervalSince(begin), bytes: data.count, error: "检测到重定向，已停止以避免凭据跨域发送", succeeded: false)
+                return APIStressResult(statusCode: status, latency: Date().timeIntervalSince(begin), bytes: data.count, error: "检测到重定向，已停止以避免凭据跨域发送", succeeded: false, promptTokens: 0, completionTokens: 0, totalTokens: 0, usageKnown: false)
             }
             let success = config.expectedStatus.map { status == $0 } ?? (status.map { (200..<400).contains($0) } ?? false)
             let error = success ? nil : (config.expectedStatus.map { "HTTP \(status ?? 0)（预期 \($0)）" } ?? "HTTP \(status ?? 0)")
-            return APIStressResult(statusCode: status, latency: Date().timeIntervalSince(begin), bytes: data.count, error: error, succeeded: success)
+            let usage = Self.usage(from: data)
+            let known = usage.prompt != nil || usage.completion != nil || usage.total != nil
+            let prompt = usage.prompt ?? 0
+            let completion = usage.completion ?? 0
+            let total = usage.total ?? (known ? prompt + completion : 0)
+            return APIStressResult(statusCode: status, latency: Date().timeIntervalSince(begin), bytes: data.count, error: error, succeeded: success, promptTokens: prompt, completionTokens: completion, totalTokens: total, usageKnown: known)
         } catch is CancellationError {
-            return APIStressResult(statusCode: nil, latency: Date().timeIntervalSince(begin), bytes: 0, error: "已取消", succeeded: false)
+            return APIStressResult(statusCode: nil, latency: Date().timeIntervalSince(begin), bytes: 0, error: "已取消", succeeded: false, promptTokens: 0, completionTokens: 0, totalTokens: 0, usageKnown: false)
         } catch {
             let message = (error as NSError).localizedDescription
-            return APIStressResult(statusCode: nil, latency: Date().timeIntervalSince(begin), bytes: 0, error: message, succeeded: false)
+            return APIStressResult(statusCode: nil, latency: Date().timeIntervalSince(begin), bytes: 0, error: message, succeeded: false, promptTokens: 0, completionTokens: 0, totalTokens: 0, usageKnown: false)
         }
+    }
+
+    private struct Usage { let prompt: Int?; let completion: Int?; let total: Int? }
+    nonisolated private static func usage(from data: Data) -> Usage {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let usage = object["usage"] as? [String: Any] else { return Usage(prompt: nil, completion: nil, total: nil) }
+        func number(_ keys: [String]) -> Int? {
+            for key in keys {
+                if let n = usage[key] as? Int { return n }
+                if let n = usage[key] as? NSNumber { return n.intValue }
+            }
+            return nil
+        }
+        return Usage(prompt: number(["prompt_tokens", "input_tokens"]), completion: number(["completion_tokens", "output_tokens"]), total: number(["total_tokens"]))
     }
 
     nonisolated private static func resolve(host: String) -> [String] {
@@ -319,146 +496,342 @@ final class APIStressModel: ObservableObject {
             }
             return components.string ?? endpoint
         }()
-        let summary = ["endpoint": endpointForReport, "method": method, "completed": completed, "succeeded": succeeded, "failed": failed, "successRate": successRate, "throughput": requestsPerSecond, "p50Ms": p50, "p95Ms": p95, "p99Ms": p99, "bytes": totalBytes, "errors": errorCounts, "headers": header] as [String : Any]
+        let baseForReport = redactedURL(baseURL)
+        let summary = ["baseUrl": baseForReport, "model": selectedModel, "endpoint": endpointForReport, "method": method, "completed": completed, "succeeded": succeeded, "failed": failed, "successRate": successRate, "throughputRps": requestsPerSecond, "requestsPerMinute": requestsPerMinute, "tokensPerMinute": usageSamples > 0 ? tokensPerMinute : NSNull(), "promptTokens": usageSamples > 0 ? promptTokens : NSNull(), "completionTokens": usageSamples > 0 ? completionTokens : NSNull(), "totalTokens": usageSamples > 0 ? totalTokens : NSNull(), "usageSamples": usageSamples, "usageMissing": usageMissing, "p50Ms": p50, "p95Ms": p95, "p99Ms": p99, "bytes": totalBytes, "errors": errorCounts, "headers": header] as [String : Any]
         if format == .json { return (try? JSONSerialization.data(withJSONObject: summary, options: [.prettyPrinted, .sortedKeys])) ?? Data() }
         let escaped = (try? JSONSerialization.data(withJSONObject: summary, options: [.prettyPrinted, .sortedKeys])).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         let html = """
-<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>API 压测报告</title><style>body{font:15px -apple-system,BlinkMacSystemFont,sans-serif;background:#f5f7fb;color:#18212f;margin:0;padding:40px}main{max-width:920px;margin:auto;background:#fff;border-radius:20px;padding:32px;box-shadow:0 8px 30px #15233d12}h1{margin-top:0;color:#0b70e8}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.metric{padding:16px;background:#f5f8fd;border-radius:14px}.value{font-size:24px;font-weight:650;margin-top:7px}pre{white-space:pre-wrap;background:#111827;color:#d1e4ff;padding:20px;border-radius:14px}</style><main><h1>API 压测报告</h1><p>生成时间：\(Date())</p><div class="grid"><div class="metric">完成<div class="value">\(completed)</div></div><div class="metric">成功率<div class="value">\(String(format: "%.1f%%", successRate*100))</div></div><div class="metric">吞吐<div class="value">\(String(format: "%.1f req/s", requestsPerSecond))</div></div><div class="metric">P95<div class="value">\(String(format: "%.0f ms", p95))</div></div></div><h2>请求摘要</h2><pre>\(escaped.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;"))</pre></main></html>
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>API 压测报告</title><style>body{font:15px -apple-system,BlinkMacSystemFont,sans-serif;background:#f5f7fb;color:#18212f;margin:0;padding:40px}main{max-width:980px;margin:auto;background:#fff;border-radius:24px;padding:36px;box-shadow:0 8px 30px #15233d12}h1{margin-top:0;color:#0b70e8}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.metric{padding:16px;background:#f5f8fd;border-radius:14px}.value{font-size:24px;font-weight:650;margin-top:7px}.label{color:#64748b;font-size:12px}pre{white-space:pre-wrap;background:#111827;color:#d1e4ff;padding:20px;border-radius:14px;overflow:auto}</style><main><h1>API 压测报告</h1><p>生成时间：\(Date()) · 模型：\(selectedModel.isEmpty ? "未指定" : selectedModel)</p><div class="grid"><div class="metric"><div class="label">完成</div><div class="value">\(completed)</div></div><div class="metric"><div class="label">成功率</div><div class="value">\(String(format: "%.1f%%", successRate*100))</div></div><div class="metric"><div class="label">RPM</div><div class="value">\(String(format: "%.1f", requestsPerMinute))</div></div><div class="metric"><div class="label">TPM</div><div class="value">\(tokensPerMinuteText)</div></div><div class="metric"><div class="label">P95 延迟</div><div class="value">\(String(format: "%.0f ms", p95))</div></div><div class="metric"><div class="label">输入 Token</div><div class="value">\(usageSamples > 0 ? "\(promptTokens)" : "—")</div></div><div class="metric"><div class="label">输出 Token</div><div class="value">\(usageSamples > 0 ? "\(completionTokens)" : "—")</div></div><div class="metric"><div class="label">总 Token</div><div class="value">\(usageSamples > 0 ? "\(totalTokens)" : "—")</div></div></div><h2>请求摘要</h2><p>服务端提供 usage 的请求：\(usageSamples)；未提供 usage：\(usageMissing)。</p><pre>\(escaped.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;"))</pre></main></html>
 """
         return Data(html.utf8)
+    }
+
+    private func redactedURL(_ raw: String) -> String {
+        guard var components = URLComponents(string: raw) else { return raw.isEmpty ? "" : "[已隐藏]" }
+        if components.user != nil { components.user = "[已隐藏]" }
+        if components.password != nil { components.password = "[已隐藏]" }
+        if let items = components.queryItems {
+            components.queryItems = items.map { URLQueryItem(name: $0.name, value: "[已隐藏]") }
+        }
+        return components.string ?? raw
     }
 
     enum ReportFormat { case json, html; var `extension`: String { self == .json ? "json" : "html" } }
 }
 
+private extension DateFormatter {
+    static let apiReportStamp: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter
+    }()
+}
+
 struct APIStressView: View {
     @ObservedObject var model: AppModel
     @StateObject private var runner = APIStressModel()
+    @State private var showAdvanced = false
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 24) {
                 header
-                configuration
+                connectionCard
                 metrics
+                requestCard
+                advancedCard
                 errors
                 footer
             }
-            .padding(.horizontal, 34).padding(.vertical, 28)
-            .frame(maxWidth: 1_180).frame(maxWidth: .infinity)
+            .padding(.horizontal, 36)
+            .padding(.vertical, 30)
+            .frame(maxWidth: 1_180)
+            .frame(maxWidth: .infinity)
         }
         .background(DesktopTheme.canvas)
         .onAppear { runner.autofill(channel: model.channel, key: model.apiKey) }
     }
 
     private var header: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 8) {
-                Label("API 压测", systemImage: "speedometer").font(.system(size: 28, weight: .semibold))
-                Text("用可复现的并发请求验证吞吐、延迟、稳定性与错误边界。")
-                    .font(.system(size: 13)).foregroundStyle(.secondary)
+        HStack(alignment: .center, spacing: 18) {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 10) {
+                    Image(systemName: "chart.xyaxis.line")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundStyle(DesktopTheme.accent)
+                    Text("API 压测")
+                        .font(.system(size: 30, weight: .bold, design: .rounded))
+                }
+                Text("用真实模型请求测量 RPM、TPM、延迟与稳定性。先连接渠道，再开始受控压测。")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
             }
             Spacer()
-            HStack(spacing: 9) {
-                Button("清空") { runner.clear() }.disabled(runner.running)
-                Menu {
-                    Button("导出 JSON") { runner.saveReport(format: .json) }
-                    Button("导出 HTML") { runner.saveReport(format: .html) }
-                } label: { Label("导出报告", systemImage: "square.and.arrow.up") }
-                    .disabled(runner.completed == 0)
-                if runner.running {
-                    Button("停止") { runner.stop() }.buttonStyle(.bordered).tint(.orange)
-                } else {
-                    Button { runner.start() } label: { Label("开始压测", systemImage: "play.fill") }
-                        .buttonStyle(.borderedProminent).tint(DesktopTheme.accent)
+            if runner.running {
+                StatusPill(text: "压测进行中", color: .orange, icon: "waveform.path.ecg")
+                Button("停止") { runner.stop() }
+                    .buttonStyle(.bordered)
+                    .tint(.orange)
+            } else {
+                StatusPill(text: "准备就绪", color: .green, icon: "checkmark.circle.fill")
+                Button { runner.start() } label: {
+                    Label("开始压测", systemImage: "play.fill")
+                        .font(.system(size: 13, weight: .semibold))
                 }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .tint(DesktopTheme.accent)
             }
+            Menu {
+                Button("导出 HTML 报告") { runner.saveReport(format: .html) }
+                Button("导出 JSON 数据") { runner.saveReport(format: .json) }
+                Divider()
+                Button("清空本次结果") { runner.clear() }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 22))
+                    .foregroundStyle(.secondary)
+            }
+            .menuStyle(.borderlessButton)
+            .disabled(runner.running)
         }
     }
 
-    private var configuration: some View {
-        VStack(alignment: .leading, spacing: 17) {
-            Text("请求配置").font(.system(size: 15, weight: .semibold))
-            HStack(spacing: 9) {
-                TextField("请求地址，例如 https://api.example.com/v1/chat/completions", text: $runner.endpoint)
-                    .textFieldStyle(.roundedBorder)
-                Button("解析") { runner.resolveEndpoint() }.controlSize(.small)
+    private var connectionCard: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            cardTitle("连接渠道", subtitle: "输入 OpenAI 兼容接口的 Base URL 与 API Key，自动读取可用模型")
+            HStack(alignment: .bottom, spacing: 14) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("BASE URL").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                    TextField("https://api.example.com/v1", text: $runner.baseURL)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 13, design: .monospaced))
+                        .onSubmit { runner.fetchModels() }
+                        .onChange(of: runner.baseURL) { _, _ in runner.syncEndpointFromBase() }
+                }
+                .frame(maxWidth: .infinity)
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("API KEY").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                    SecureField("sk-…", text: $runner.apiKey)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 13, design: .monospaced))
+                }
+                Button {
+                    runner.fetchModels()
+                } label: {
+                    Label(runner.isFetchingModels ? "获取中…" : "获取模型", systemImage: runner.isFetchingModels ? "arrow.triangle.2.circlepath" : "arrow.down.circle.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .tint(DesktopTheme.accent)
+                .disabled(runner.isFetchingModels)
             }
-            if let resolution = runner.resolutionText { Label(resolution, systemImage: "network").font(.system(size: 11)).foregroundStyle(.secondary) }
             HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("压测模型").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                    if runner.availableModels.isEmpty {
+                        HStack(spacing: 8) {
+                            Image(systemName: "square.stack.3d.up").foregroundStyle(.secondary)
+                            Text("先点击“获取模型”，或在下方手动填写模型 ID")
+                                .font(.system(size: 12)).foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 11).padding(.vertical, 8)
+                        .background(DesktopTheme.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    } else {
+                        Picker("选择模型", selection: Binding(get: { runner.selectedModel }, set: { runner.chooseModel($0) })) {
+                            ForEach(runner.availableModels, id: \.self) { Text($0).tag($0) }
+                        }
+                        .labelsHidden()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("模型 ID（可选）").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                    TextField("例如 gpt-4o-mini", text: Binding(get: { runner.selectedModel }, set: { runner.chooseModel($0) }))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12, design: .monospaced))
+                        .onSubmit { runner.chooseModel(runner.selectedModel) }
+                }
+                .frame(maxWidth: .infinity)
+            }
+            if let status = runner.modelsStatus {
+                Label(status, systemImage: status.hasPrefix("获取失败") ? "exclamationmark.triangle" : "info.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(status.hasPrefix("获取失败") ? .orange : .secondary)
+            }
+            if let error = runner.errorText {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.orange)
+            }
+        }
+        .padding(24)
+        .background(.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(DesktopTheme.line))
+        .shadow(color: .black.opacity(0.025), radius: 8, y: 3)
+    }
+
+    private var requestCard: some View {
+        VStack(alignment: .leading, spacing: 17) {
+            cardTitle("运行配置", subtitle: "默认发送 OpenAI Chat Completions 请求，可展开自定义请求参数")
+            HStack(spacing: 14) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("请求地址").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                    TextField("自动由 Base URL 生成，也可以手动覆盖", text: $runner.endpoint)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12, design: .monospaced))
+                }
+                .frame(maxWidth: .infinity)
                 Picker("方法", selection: $runner.method) {
-                    ForEach(["GET", "POST", "PUT", "PATCH", "DELETE"], id: \.self) { Text($0).tag($0) }
-                }.frame(width: 150)
-                Picker("模式", selection: $runner.durationMode) {
-                    Text("按总请求").tag(false)
-                    Text("按持续时间").tag(true)
-                }.pickerStyle(.segmented).frame(width: 190)
-                Stepper("超时 \(runner.timeoutSeconds) 秒", value: $runner.timeoutSeconds, in: 1...600).frame(width: 180)
-                Stepper("启动间隔 \(runner.rampUpMilliseconds) ms", value: $runner.rampUpMilliseconds, in: 0...60_000, step: 100).frame(width: 230)
-                Spacer()
+                    ForEach(["POST", "GET", "PUT", "PATCH"], id: \.self) { Text($0).tag($0) }
+                }
+                .labelsHidden()
+                .frame(width: 105)
             }
-            HStack(alignment: .top, spacing: 16) {
-                editor("请求头（每行 Header: Value）", text: $runner.headersText, height: 90)
-                editor("请求体（支持任意 JSON / 文本）", text: $runner.bodyText, height: 150)
-            }
-            HStack(spacing: 16) {
-                Stepper("总请求 \(runner.totalRequests)", value: $runner.totalRequests, in: 1...20_000, step: 10)
-                Stepper("并发数 \(runner.concurrency)", value: $runner.concurrency, in: 1...100)
-                if runner.durationMode { Stepper("持续 \(runner.durationSeconds) 秒", value: $runner.durationSeconds, in: 1...600) }
-                Stepper("速率 \(runner.ratePerSecond == 0 ? "不限" : "\(runner.ratePerSecond)/s")", value: $runner.ratePerSecond, in: 0...1_000, step: 1)
+            HStack(spacing: 18) {
+                Stepper(value: $runner.totalRequests, in: 1...20_000, step: 10) {
+                    setting("请求数", "\(runner.totalRequests)")
+                }
+                Stepper(value: $runner.concurrency, in: 1...100) {
+                    setting("并发", "\(runner.concurrency)")
+                }
+                Stepper(value: $runner.timeoutSeconds, in: 1...600) {
+                    setting("超时", "\(runner.timeoutSeconds)s")
+                }
+                Stepper(value: $runner.ratePerSecond, in: 0...1_000) {
+                    setting("限速", runner.ratePerSecond == 0 ? "不限" : "\(runner.ratePerSecond) RPS")
+                }
                 Spacer()
             }
             HStack(spacing: 18) {
-                Picker("预期状态", selection: $runner.expectedStatusText) {
-                    ForEach(["2xx / 3xx", "200", "201", "204", "400", "401", "429", "500"], id: \.self) { Text($0).tag($0) }
-                }.frame(width: 170)
-                Toggle("我已获得目标接口所有者的压测授权", isOn: $runner.authorized).toggleStyle(.checkbox)
-                    .font(.system(size: 11))
+                Stepper(value: $runner.maxOutputTokens, in: 1...32_768, step: 32) {
+                    setting("输出上限", "\(runner.maxOutputTokens) tokens")
+                }
+                Text("仅在请求体未设置 max_tokens 时作为默认值")
+                    .font(.system(size: 11)).foregroundStyle(.tertiary)
                 Spacer()
             }
-            Text("支持实时停止。建议先用低并发预检，再逐步提升；所有请求均使用当前填写的请求头和请求体。")
-                .font(.system(size: 11)).foregroundStyle(.tertiary)
-            if let error = runner.errorText { Label(error, systemImage: "exclamationmark.triangle").font(.system(size: 11)).foregroundStyle(.orange) }
+            HStack(spacing: 12) {
+                Toggle("持续时间模式", isOn: $runner.durationMode)
+                    .toggleStyle(.switch)
+                if runner.durationMode {
+                    Stepper("持续 \(runner.durationSeconds) 秒", value: $runner.durationSeconds, in: 1...600)
+                }
+                Spacer()
+                Toggle("我已获得目标接口所有者的压测授权", isOn: $runner.authorized)
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 11))
+            }
+            if let resolution = runner.resolutionText {
+                Label(resolution, systemImage: "network")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            HStack {
+                Button("解析 DNS") { runner.resolveEndpoint() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                Text("建议从 1 并发、10 次请求开始，确认渠道正常后逐步提高。")
+                    .font(.system(size: 11)).foregroundStyle(.tertiary)
+                Spacer()
+            }
         }
-        .padding(22).background(.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(DesktopTheme.line))
+        .padding(24)
+        .background(.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(DesktopTheme.line))
     }
 
-    private func editor(_ title: String, text: Binding<String>, height: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
-            TextEditor(text: text).font(.system(size: 11, design: .monospaced))
-                .frame(maxWidth: .infinity).frame(height: height)
-                .padding(7).background(DesktopTheme.surface, in: RoundedRectangle(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(DesktopTheme.line))
-        }.frame(maxWidth: .infinity)
+    private var advancedCard: some View {
+        DisclosureGroup(isExpanded: $showAdvanced) {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top, spacing: 16) {
+                    editor("请求头（每行 Header: Value）", text: $runner.headersText, height: 100)
+                    editor("请求体（OpenAI JSON）", text: $runner.bodyText, height: 145)
+                }
+                HStack(spacing: 18) {
+                    Picker("预期状态", selection: $runner.expectedStatusText) {
+                        ForEach(["2xx / 3xx", "200", "201", "204", "400", "401", "429", "500"], id: \.self) { Text($0).tag($0) }
+                    }
+                    .frame(width: 170)
+                    Stepper("启动间隔 \(runner.rampUpMilliseconds) ms", value: $runner.rampUpMilliseconds, in: 0...60_000, step: 100)
+                    Spacer()
+                }
+            }
+            .padding(.top, 16)
+        } label: {
+            HStack(spacing: 9) {
+                Image(systemName: "slider.horizontal.3")
+                    .foregroundStyle(DesktopTheme.accent)
+                Text("高级请求参数")
+                    .font(.system(size: 14, weight: .semibold))
+                Text("请求头、请求体、状态码与启动策略")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+        }
+        .padding(20)
+        .background(DesktopTheme.surface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).stroke(DesktopTheme.line))
     }
 
     private var metrics: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack { Text("实时指标").font(.system(size: 15, weight: .semibold)); Spacer(); Text(runner.statusText).font(.system(size: 11)).foregroundStyle(.secondary) }
-            ProgressView(value: runner.progress).tint(DesktopTheme.accent)
-            HStack(spacing: 0) {
-                metric("完成", "\(runner.completed)/\(runner.totalRequests)", "checkmark.circle")
-                Divider().frame(height: 38)
-                metric("成功率", String(format: "%.1f%%", runner.successRate * 100), "chart.line.uptrend.xyaxis")
-                Divider().frame(height: 38)
-                metric("吞吐", String(format: "%.1f req/s", runner.requestsPerSecond), "arrow.up.right")
-                Divider().frame(height: 38)
-                metric("P50 / P95", String(format: "%.0f / %.0f ms", runner.p50, runner.p95), "timer")
-                Divider().frame(height: 38)
-                metric("P99", String(format: "%.0f ms", runner.p99), "gauge.with.dots.needle.67percent")
-                Divider().frame(height: 38)
-                metric("响应量", ByteCountFormatter.string(fromByteCount: Int64(runner.totalBytes), countStyle: .file), "arrow.down.doc")
+        VStack(alignment: .leading, spacing: 17) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("实时指标").font(.system(size: 17, weight: .semibold))
+                    Text("RPM 按完成请求统计；TPM 只使用服务端返回的真实 usage，未返回时显示“—”。")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(runner.statusText).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
             }
-        }.padding(22).background(DesktopTheme.surface, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            ProgressView(value: runner.progress)
+                .tint(DesktopTheme.accent)
+                .scaleEffect(x: 1, y: 1.2, anchor: .center)
+            HStack(spacing: 10) {
+                metric("RPM", String(format: "%.1f", runner.requestsPerMinute), "arrow.up.right.circle.fill", "请求 / 分钟")
+                metric("TPM", runner.tokensPerMinuteText, "textformat.123", runner.usageSamples > 0 ? "Token / 分钟" : "服务未返回 usage")
+                metric("成功率", String(format: "%.1f%%", runner.successRate * 100), "checkmark.circle.fill", "\(runner.completed) 次完成")
+                metric("P95", String(format: "%.0f ms", runner.p95), "timer", "延迟")
+            }
+            HStack(spacing: 10) {
+                compactMetric("输入 Token", runner.usageSamples > 0 ? "\(runner.promptTokens)" : "—")
+                compactMetric("输出 Token", runner.usageSamples > 0 ? "\(runner.completionTokens)" : "—")
+                compactMetric("总 Token", runner.usageSamples > 0 ? "\(runner.totalTokens)" : "—")
+                compactMetric("响应量", ByteCountFormatter.string(fromByteCount: Int64(runner.totalBytes), countStyle: .file))
+            }
+        }
+        .padding(24)
+        .background(DesktopTheme.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
-    private func metric(_ title: String, _ value: String, _ icon: String) -> some View {
-        HStack(spacing: 9) {
-            Image(systemName: icon).foregroundStyle(DesktopTheme.accent)
-            VStack(alignment: .leading, spacing: 3) { Text(value).font(.system(size: 16, weight: .semibold, design: .rounded)); Text(title).font(.system(size: 10)).foregroundStyle(.secondary) }
-        }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12)
+    private func metric(_ title: String, _ value: String, _ icon: String, _ caption: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Image(systemName: icon).foregroundStyle(DesktopTheme.accent)
+                Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+            }
+            Text(value).font(.system(size: 25, weight: .bold, design: .rounded))
+            Text(caption).font(.system(size: 10)).foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(15)
+        .background(.white, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(DesktopTheme.line))
+    }
+
+    private func compactMetric(_ title: String, _ value: String) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.system(size: 10)).foregroundStyle(.secondary)
+                Text(value).font(.system(size: 14, weight: .semibold, design: .rounded))
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 13).padding(.vertical, 11)
+        .background(.white.opacity(0.76), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
     }
 
     @ViewBuilder private var errors: some View {
@@ -466,17 +839,70 @@ struct APIStressView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text("错误分布").font(.system(size: 15, weight: .semibold))
                 ForEach(runner.errorCounts.sorted(by: { $0.value > $1.value }), id: \.key) { item in
-                    HStack { Image(systemName: "xmark.octagon").foregroundStyle(.orange); Text(item.key).font(.system(size: 11)).lineLimit(1); Spacer(); Text("×\(item.value)").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary) }
+                    HStack(spacing: 8) {
+                        Image(systemName: "xmark.octagon.fill").foregroundStyle(.orange)
+                        Text(item.key).font(.system(size: 11)).lineLimit(1)
+                        Spacer()
+                        Text("×\(item.value)").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                    }
                 }
-            }.padding(22).background(.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous)).overlay(RoundedRectangle(cornerRadius: 20).stroke(DesktopTheme.line))
+            }
+            .padding(22)
+            .background(.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(DesktopTheme.line))
         }
     }
 
     private var footer: some View {
-        HStack {
-            Label("P50 / P95 / P99 延迟、吞吐与 HTTP 错误都会随本次运行记录", systemImage: "waveform.path.ecg").font(.system(size: 10)).foregroundStyle(.tertiary)
+        HStack(spacing: 8) {
+            Image(systemName: "lock.shield").foregroundStyle(.secondary)
+            Text("受控压测：最多 20,000 次请求、100 并发、600 秒；不会自动重试或跟随重定向。")
+                .font(.system(size: 10)).foregroundStyle(.tertiary)
             Spacer()
-            if let started = runner.startedAt { Text("开始于 \(started, format: .dateTime.hour().minute().second())").font(.system(size: 10)).foregroundStyle(.tertiary) }
+            if let started = runner.startedAt {
+                Text("开始于 \(started, format: .dateTime.hour().minute().second())")
+                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+            }
         }
+    }
+
+    private func cardTitle(_ title: String, subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.system(size: 16, weight: .semibold))
+            Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary)
+        }
+    }
+
+    private func setting(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).font(.system(size: 10)).foregroundStyle(.secondary)
+            Text(value).font(.system(size: 13, weight: .semibold, design: .rounded))
+        }
+    }
+
+    private func editor(_ title: String, text: Binding<String>, height: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+            TextEditor(text: text)
+                .font(.system(size: 11, design: .monospaced))
+                .frame(maxWidth: .infinity).frame(height: height)
+                .padding(7)
+                .background(.white, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(DesktopTheme.line))
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+private struct StatusPill: View {
+    let text: String
+    let color: Color
+    let icon: String
+    var body: some View {
+        Label(text, systemImage: icon)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 11).padding(.vertical, 7)
+            .background(color.opacity(0.10), in: Capsule())
     }
 }
