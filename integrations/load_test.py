@@ -124,7 +124,7 @@ def extract_stream_usage(content):
     return found
 
 
-def _endpoint_from_base(base, *, request_format='openai'):
+def _endpoint_from_base(base, *, request_format='openai', model=''):
     """Turn a provider base URL into a request endpoint.
 
     Explicit terminal paths always win.  For an ordinary OpenAI-compatible
@@ -140,7 +140,7 @@ def _endpoint_from_base(base, *, request_format='openai'):
     if request_format == 'anthropic':
         suffix = '/messages'
     elif request_format == 'gemini':
-        suffix = '/models'
+        suffix = '/models/' + str(model).strip() + ':generateContent' if str(model).strip() else '/models'
     elif re.search(r'/v\d+(?:beta\d*)?(?:/openai)?$', path, re.I):
         suffix = '/chat/completions'
     else:
@@ -203,7 +203,9 @@ def validate_config(data):
         raise ValueError('请求格式必须是 openai、anthropic、gemini 或 custom。')
     raw_url = data.get('url') or data.get('endpoint')
     raw_base = data.get('base_url') or data.get('base')
-    url = _validate_url(raw_url) if raw_url else _endpoint_from_base(raw_base, request_format=request_format)
+    # Read the selected model before deriving a native Gemini endpoint.
+    model = str(data.get('model') or '').strip()
+    url = _validate_url(raw_url) if raw_url else _endpoint_from_base(raw_base, request_format=request_format, model=model)
     method = str(data.get('method', 'POST')).upper().strip()
     if method not in {'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'}:
         raise ValueError('请求方法不受支持。')
@@ -244,7 +246,6 @@ def validate_config(data):
             normalized_headers['Authorization'] = 'Bearer ' + api_key
 
     body = data.get('body', None)
-    model = str(data.get('model') or '').strip()
     if not model and isinstance(body, dict):
         model = str(body.get('model') or '').strip()
     # For OpenAI-compatible traffic, model can live alongside the config or

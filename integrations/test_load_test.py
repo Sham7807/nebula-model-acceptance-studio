@@ -25,6 +25,15 @@ class LoadTestEngineTests(unittest.TestCase):
         self.assertNotIn('sk-secret', json.dumps(safe))
         self.assertEqual(safe['model'], 'fixture-model')
 
+    def test_native_gemini_endpoint_uses_selected_model(self):
+        config = load_test.validate_config({
+            'base_url': 'https://generativelanguage.googleapis.com/v1beta',
+            'api_key': 'g-secret', 'auth': 'gemini', 'request_format': 'gemini',
+            'model': 'gemini-2.5-flash', 'total_requests': 1,
+        })
+        self.assertTrue(config['url'].endswith('/v1beta/models/gemini-2.5-flash:generateContent'))
+        self.assertEqual(config['headers']['x-goog-api-key'], 'g-secret')
+
     def test_usage_and_rpm_tpm_are_reported_without_false_zero(self):
         calls = {'count': 0}
         def fixture(config):
