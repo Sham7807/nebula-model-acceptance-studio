@@ -28,6 +28,10 @@ REPORTS = Path(os.environ.get('WORKBENCH_REPORTS', str(ROOT / 'reports')))
 TOKEN = secrets.token_urlsafe(32)
 JOBS = {}
 LOCK = threading.RLock()
+# API 压测是桌面工作区的独立运行队列。它不占用验收任务的并发槽位，
+# 但自身受 load_test.py 的并发、请求数和持续时间上限约束。
+LOAD_TESTS = {}
+LOAD_LOCK = threading.RLock()
 # The website retains serial execution. The private desktop engine opts into
 # bounded parallel top-level jobs; batch children share their parent's slot.
 MAX_CONCURRENT_RUNS = 1
@@ -662,6 +666,71 @@ def snapshot(job):
         return data
     return {k:v for k,v in job.items() if k not in ('cancel','result','parent_emit')} | {'elapsed': round((job.get('finished_at') or time.time())-job['started_at'],1), 'result':job.get('result')}
 
+def snapshot_load_test(job):
+    """Return a safe progress view for an API load-test job.
+
+    The cancel event and raw request headers/body are intentionally omitted;
+    the completed result already carries a redacted configuration.
+    """
+    with LOAD_LOCK:
+        data = {key: value for key, value in job.items() if key not in ('cancel', 'result')}
+        started = float(job.get('started_at') or time.time())
+        data['elapsed'] = round((job.get('finished_at') or time.time()) - started, 3)
+        if job.get('result') is not None:
+            data['result'] = job['result']
+        return data
+
+def run_load_test_job(job, config):
+    """Worker wrapper that keeps load-test state observable and cancellable."""
+    from load_test import run
+    def emit(event):
+        with LOAD_LOCK:
+            job['events'].append(event)
+            if len(job['events']) > 1000:
+                job['events'] = job['events'][-1000:]
+            for key in ('completed', 'total', 'request_count'):
+                if event.get(key) is not None:
+                    job[key] = event[key]
+    try:
+        result = run(config, emit, job['cancel'].is_set)
+        result['run_id'] = job['id']
+        result['finished_at'] = time.time()
+        # Keep the local evidence available after the desktop page is
+        # refreshed. The load-test report is already redacted by run().
+        directory = REPORTS / job['id']
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / 'report.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+        with LOAD_LOCK:
+            job['result'] = result
+            job['status'] = result.get('status', 'error')
+            job['finished_at'] = result['finished_at']
+            job['summary'] = result.get('summary', {})
+            job['completed'] = result.get('summary', {}).get('completed', job.get('completed', 0))
+            job['total'] = result.get('summary', {}).get('total', job.get('total'))
+    except Exception as exc:
+        with LOAD_LOCK:
+            try:
+                from load_test import redacted_config
+                safe_config = redacted_config(config)
+            except Exception:
+                safe_config = {k: v for k, v in config.items() if k not in ('headers', 'body')}
+            job['status'] = 'error'
+            job['finished_at'] = time.time()
+            job['result'] = {'suite': 'api_stress', 'status': 'error', 'run_id': job['id'],
+                             'error': clean(str(exc), str(config.get('headers', {}).get('Authorization', ''))),
+                             'configuration': safe_config,
+                             'summary': {}}
+            try:
+                directory = REPORTS / job['id']
+                directory.mkdir(parents=True, exist_ok=True)
+                (directory / 'report.json').write_text(json.dumps(job['result'], ensure_ascii=False, indent=2), encoding='utf-8')
+            except OSError:
+                pass
+    finally:
+        # Do not retain credentials in the live job after execution.
+        config['headers'] = {}
+        config['body'] = None
+
 def session_job_ids():
     """Restore the user's top-level run, including batches after a restart."""
     with LOCK:
@@ -869,6 +938,27 @@ class Handler(BaseHTTPRequestHandler):
                     result=normalize_browser_report(record);directory=None
                 return self.send_bytes(200,report_html(result,directory),'text/html; charset=utf-8',report_download_name(record,'html'))
             return self.send_json(404, {'error':'历史资源不存在'})
+        if path == '/api/load-tests':
+            with LOAD_LOCK:
+                rows = [snapshot_load_test(job) for job in LOAD_TESTS.values()]
+            rows.sort(key=lambda row: row.get('started_at', 0), reverse=True)
+            return self.send_json(200, {'items': rows[:50]})
+        load_json_match = re.fullmatch(r'/api/load-tests/([a-f0-9]+)/report\.json', path)
+        if load_json_match:
+            with LOAD_LOCK:
+                job = LOAD_TESTS.get(load_json_match.group(1))
+                result = job.get('result') if job else None
+            if not result:
+                return self.send_json(404, {'error': '压测报告尚未生成'})
+            return self.send_bytes(200, json.dumps(result, ensure_ascii=False, indent=2).encode(),
+                                   'application/json', 'API压测报告-%s.json' % load_json_match.group(1)[:12])
+        load_match = re.fullmatch(r'/api/load-tests/([a-f0-9]+)', path)
+        if load_match:
+            with LOAD_LOCK:
+                job = LOAD_TESTS.get(load_match.group(1))
+                if not job:
+                    return self.send_json(404, {'error': '压测任务不存在'})
+                return self.send_json(200, snapshot_load_test(job))
         if path.startswith('/api/runs/'):
             if not self.guard(auth=True):return
             parts=path.split('/');job=JOBS.get(parts[3])
@@ -942,6 +1032,49 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(400,{'error':str(exc)})
         if path == '/api/auth/logout':
             AUTH_STORE.logout(self.cookie_token()); self.send_response(200); self.send_header('Content-Type','application/json; charset=utf-8'); self.clear_session_cookie(); self.send_header('Content-Length','0'); self.end_headers(); return
+        if path == '/api/load-tests/resolve':
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+                if self.headers.get_content_type() != 'application/json' or not 0 < length <= 64 * 1024:
+                    raise ValueError('解析请求格式无效。')
+                data = json.loads(self.rfile.read(length))
+                from load_test import resolve_target
+                return self.send_json(200, resolve_target(data.get('url') or data.get('base')))
+            except (ValueError, TypeError) as exc:
+                return self.send_json(400, {'error': str(exc)})
+        load_cancel = re.fullmatch(r'/api/load-tests/([a-f0-9]+)/cancel', path)
+        if load_cancel:
+            with LOAD_LOCK:
+                job = LOAD_TESTS.get(load_cancel.group(1))
+                if not job:
+                    return self.send_json(404, {'error': '压测任务不存在'})
+                if job.get('status') == 'running':
+                    job['cancel'].set()
+            return self.send_json(200, {'status': 'stopping'})
+        if path == '/api/load-tests':
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+                if self.headers.get_content_type() != 'application/json' or not 0 < length <= 4 * 1024 * 1024:
+                    raise ValueError('压测配置必须是不超过 4 MB 的 JSON。')
+                payload = json.loads(self.rfile.read(length))
+                if not isinstance(payload, dict) or payload.get('acknowledge_risk') is not True:
+                    raise ValueError('开始压测前请确认目标服务归你管理或已获得授权。')
+                from load_test import validate_config, redacted_config
+                config = validate_config(payload)
+                identity = uuid.uuid4().hex
+                with LOAD_LOCK:
+                    job = {'id': identity, 'suite': 'api_stress', 'status': 'running',
+                           'started_at': time.time(), 'finished_at': None,
+                           'total': config['total_requests'] if config['mode'] == 'requests' else None,
+                           'completed': 0, 'request_count': 0, 'events': [],
+                           'cancel': threading.Event(), 'configuration': redacted_config(config)}
+                    LOAD_TESTS[identity] = job
+                threading.Thread(target=run_load_test_job, args=(job, config), daemon=True).start()
+                return self.send_json(202, {'id': identity, 'status': 'running', 'limits': {
+                    'max_requests': 20000, 'max_concurrency': 100, 'max_duration_seconds': 600,
+                    'retries': 0}})
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                return self.send_json(400, {'error': str(exc)})
         if path == '/api/history':
             try:
                 length=int(self.headers.get('Content-Length','0'))

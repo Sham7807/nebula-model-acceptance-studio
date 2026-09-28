@@ -94,7 +94,7 @@ struct OverviewView: View {
                         }
                     }.background(.white,in:RoundedRectangle(cornerRadius:20,style:.continuous)).overlay(RoundedRectangle(cornerRadius:20,style:.continuous).stroke(DesktopTheme.line))
                 }
-                HStack { Label("本机存储 · 钥匙串保护",systemImage:"lock.shield"); Spacer(); Text("渠道测试系统 / \(AppVersion.current)") }.font(.system(size:10)).foregroundStyle(.tertiary).padding(.bottom,8)
+                HStack { Label("本机存储 · 钥匙串保护",systemImage:"lock.shield"); Spacer(); Text("渠道测试系统 / \(AppVersion.label)") }.font(.system(size:10)).foregroundStyle(.tertiary).padding(.bottom,8)
             }.padding(.horizontal,34).padding(.vertical,26).frame(maxWidth:1200).frame(maxWidth:.infinity)
         }.background(DesktopTheme.canvas)
     }

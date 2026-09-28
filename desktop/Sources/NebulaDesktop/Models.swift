@@ -5,11 +5,13 @@ import Security
 enum AppVersion {
     static let name = "渠道测试系统"
     static var current: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "开发版" }
+    static var build: String { Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "本地" }
+    static var label: String { "v\(current) · build \(build)" }
 }
 
 enum Destination: String, CaseIterable, Identifiable {
-    case overview, tasks, text, image, video, audio, general, ccmax, claude, kimi, gpt, history
-    var isTest: Bool { ![.overview, .tasks, .history].contains(self) }
+    case overview, tasks, text, image, video, audio, general, ccmax, claude, kimi, gpt, apiStress, history
+    var isTest: Bool { ![.overview, .tasks, .history, .apiStress].contains(self) }
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -24,6 +26,7 @@ enum Destination: String, CaseIterable, Identifiable {
         case .claude: return "Claude 专项"
         case .kimi: return "Kimi · KVV"
         case .gpt: return "GPT 生成专项"
+        case .apiStress: return "API 压测"
         case .history: return "测试档案"
         }
     }
@@ -40,6 +43,7 @@ enum Destination: String, CaseIterable, Identifiable {
         case .claude: return "sparkle"
         case .kimi: return "moon.stars"
         case .gpt: return "curlybraces"
+        case .apiStress: return "speedometer"
         case .history: return "clock.arrow.circlepath"
         }
     }
@@ -56,6 +60,7 @@ enum Destination: String, CaseIterable, Identifiable {
         case .claude: return "缓存、签名、透传与受控压测"
         case .kimi: return "官方预检、全套验证与参数矩阵"
         case .gpt: return "HTML / SVG 生成质量与 Token 账本"
+        case .apiStress: return "并发、吞吐、延迟与错误率全量观测"
         case .history: return "留存结果、请求证据与完整报告"
         }
     }

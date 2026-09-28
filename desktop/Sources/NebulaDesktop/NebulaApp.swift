@@ -40,13 +40,20 @@ struct MainWindow: View {
             VStack(spacing:0) {
                 HStack(spacing:11) {
                     ZStack { RoundedRectangle(cornerRadius:12,style:.continuous).fill(DesktopTheme.accent.opacity(0.08)).frame(width:38,height:38); Image(systemName:"point.3.connected.trianglepath.dotted").foregroundStyle(DesktopTheme.accent).font(.system(size:21,weight:.medium)) }
-                    VStack(alignment:.leading,spacing:4) { Text(AppVersion.name).font(.system(size:14,weight:.semibold)); Text("CHANNEL TEST SYSTEM").font(.system(size:8,weight:.medium)).tracking(1.1).foregroundStyle(.secondary) }
+                    VStack(alignment:.leading,spacing:4) {
+                        HStack(alignment:.firstTextBaseline, spacing:7) {
+                            Text(AppVersion.name).font(.system(size:14,weight:.semibold))
+                            Text(AppVersion.label).font(.system(size:9,weight:.medium,design:.rounded)).foregroundStyle(DesktopTheme.accent)
+                        }
+                        Text("CHANNEL TEST SYSTEM").font(.system(size:8,weight:.medium)).tracking(1.1).foregroundStyle(.secondary)
+                    }
                     Spacer(minLength:0)
                 }.padding(.horizontal,18).padding(.top,20).padding(.bottom,22)
                 List(selection:$model.destination) {
                     section(nil,[.overview,.tasks,.history])
                     section("多模态工作区",[.text,.image,.video,.audio])
                     section("专业验收",[.general,.ccmax,.claude,.kimi,.gpt])
+                    section("性能工具",[.apiStress])
                 }.listStyle(.sidebar).scrollContentBackground(.hidden)
                 Spacer(minLength:0)
                 VStack(alignment:.leading,spacing:10) {
@@ -69,6 +76,9 @@ struct MainWindow: View {
                         .padding(12).background(.blue.opacity(0.08))
                 }
                 if let task = model.activeTask, model.selected.isTest { TaskStrip(model:model,task:task) }
+                if model.selected == .apiStress {
+                    APIStressView(model: model)
+                } else {
                 ZStack {
                     WorkspaceView(workspace:model.archiveWorkspace)
                         .opacity(model.selected == .history && model.engine.isReady ? 1 : 0)
@@ -84,6 +94,7 @@ struct MainWindow: View {
                     if model.selected == .overview { OverviewView(model:model).zIndex(2) }
                     else if model.selected == .tasks { TaskCenterView(model:model).zIndex(2) }
                     else if !model.engine.isReady || !model.workspace.loaded { EnginePlaceholder(model:model).zIndex(2) }
+                }
                 }
             }.background(DesktopTheme.canvas)
             .navigationTitle(model.selected.title)

@@ -63,6 +63,11 @@ def main():
         with server.LOCK:
             for job in server.JOBS.values():
                 job['cancel'].set()
+        # API 压测使用独立队列，但关闭桌面引擎时也必须立即停止，避免
+        # 窗口退出后仍有请求在后台发送。
+        with server.LOAD_LOCK:
+            for job in server.LOAD_TESTS.values():
+                job['cancel'].set()
         threading.Thread(target=httpd.shutdown, daemon=True).start()
 
     def watch_parent():
