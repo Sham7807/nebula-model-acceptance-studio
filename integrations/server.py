@@ -1042,6 +1042,31 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(200, resolve_target(data.get('url') or data.get('base')))
             except (ValueError, TypeError) as exc:
                 return self.send_json(400, {'error': str(exc)})
+        if path == '/api/load-tests/models':
+            # Friendly model discovery for the pressure-test workspace.  The
+            # browser only supplies Base URL + API key; the server reuses the
+            # same hardened discovery adapter as every acceptance panel and
+            # returns redacted, actionable diagnostics on failure.
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+                if self.headers.get_content_type() != 'application/json' or not 0 < length <= 64 * 1024:
+                    raise ValueError('模型获取请求必须是不超过 64 KB 的 JSON。')
+                data = json.loads(self.rfile.read(length))
+                if not isinstance(data, dict):
+                    raise ValueError('模型获取请求必须是 JSON 对象。')
+                base = str(data.get('base_url') or data.get('base') or '').strip()
+                key = str(data.get('api_key') or data.get('key') or '').strip()
+                auth = str(data.get('auth') or 'bearer').lower().strip()
+                from channel_discovery import fetch_models
+                result = fetch_models(base, key, auth)
+                # Include the normalized input fields so the desktop can bind
+                # a selected model directly into the stress-test form.
+                if isinstance(result, dict):
+                    result.setdefault('base_url', base)
+                    result.setdefault('auth', auth)
+                return self.send_json(200, result)
+            except Exception as exc:
+                return self.send_json(400, model_discovery_failure(exc, locals().get('key', '')))
         load_cancel = re.fullmatch(r'/api/load-tests/([a-f0-9]+)/cancel', path)
         if load_cancel:
             with LOAD_LOCK:

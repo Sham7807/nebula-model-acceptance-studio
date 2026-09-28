@@ -28,6 +28,95 @@ MAX_HEADERS = 64
 MAX_HEADER_VALUE = 16 * 1024
 MAX_SAMPLES = 250
 
+# OpenAI-compatible gateways use several spellings for the usage object.  The
+# normalizer below deliberately accepts the common OpenAI, Anthropic and
+# Gemini forms without trying to estimate tokens when a provider omits usage.
+# A missing usage field is reported as "unavailable" in the final report; it
+# must never be rendered as zero because that would falsely imply no tokens
+# were consumed.
+_TOKEN_KEYS = {
+    'input': ('prompt_tokens', 'input_tokens', 'promptTokenCount', 'inputTokenCount', 'input'),
+    'output': ('completion_tokens', 'output_tokens', 'candidatesTokenCount', 'outputTokenCount', 'output'),
+    'total': ('total_tokens', 'totalTokens', 'total'),
+    'cached': ('cached_tokens', 'cache_read_input_tokens', 'cache_read_tokens', 'cachedContentTokenCount'),
+}
+
+
+def _non_negative_int(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        value = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if value >= 0 else None
+
+
+def extract_usage(payload):
+    """Extract explicit token usage from a JSON response.
+
+    ``None`` means the provider did not return a usable usage object.  The
+    function intentionally does not derive tokens from character counts.
+    """
+    if not isinstance(payload, dict):
+        return None
+    candidates = []
+    for key in ('usage', 'token_usage', 'tokenUsage', 'usageMetadata'):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            candidates.append(value)
+    # Some gateways put usage under the first choice/message envelope.
+    for key in ('message', 'response'):
+        value = payload.get(key)
+        if isinstance(value, dict) and isinstance(value.get('usage'), dict):
+            candidates.append(value['usage'])
+    if not candidates:
+        return None
+    usage = {}
+    for output_name, keys in _TOKEN_KEYS.items():
+        value = None
+        for source in candidates:
+            for key in keys:
+                value = _non_negative_int(source.get(key))
+                if value is not None:
+                    break
+            if value is not None:
+                break
+        if value is not None:
+            usage[output_name] = value
+    # A usage object without any known numeric field is not useful evidence.
+    if not usage:
+        return None
+    if 'total' not in usage and 'input' in usage and 'output' in usage:
+        usage['total'] = usage['input'] + usage['output']
+        usage['total_derived'] = True
+    usage['reported'] = True
+    return usage
+
+
+def _endpoint_from_base(base, *, request_format='openai'):
+    """Turn a provider base URL into a request endpoint.
+
+    Explicit terminal paths always win.  For an ordinary OpenAI-compatible
+    base URL, append ``/v1/chat/completions`` (or ``/chat/completions`` when a
+    version path is already present).  Native Anthropic/Gemini callers can
+    still pass ``url`` explicitly and retain their protocol.
+    """
+    value = _validate_url(base)
+    parsed = urlsplit(value)
+    path = parsed.path.rstrip('/')
+    if re.search(r'/(?:chat/completions|responses|messages|completions)$', path, re.I):
+        return value
+    if request_format == 'anthropic':
+        suffix = '/messages'
+    elif request_format == 'gemini':
+        suffix = '/models'
+    elif re.search(r'/v\d+(?:beta\d*)?(?:/openai)?$', path, re.I):
+        suffix = '/chat/completions'
+    else:
+        suffix = '/v1/chat/completions'
+    return urlunsplit((parsed.scheme, parsed.netloc, path + suffix, '', ''))
+
 
 def _number(value, name, low, high, *, integer=True, default=None):
     if value is None and default is not None:
@@ -74,7 +163,17 @@ def validate_config(data):
     """Validate and normalize a user supplied load-test configuration."""
     if not isinstance(data, dict):
         raise ValueError('压测配置必须是 JSON 对象。')
-    url = _validate_url(data.get('url') or data.get('base'))
+    # The desktop flow is intentionally simple: Base URL + API key, followed
+    # by model selection.  Keep the old ``url``/``headers`` contract for
+    # backwards compatibility while accepting the new friendly aliases.
+    request_format = str(data.get('request_format') or data.get('format') or 'openai').lower().strip()
+    if request_format in ('openai-compatible', 'openai_compatible', 'chat'):
+        request_format = 'openai'
+    if request_format not in {'openai', 'anthropic', 'gemini', 'custom'}:
+        raise ValueError('请求格式必须是 openai、anthropic、gemini 或 custom。')
+    raw_url = data.get('url') or data.get('endpoint')
+    raw_base = data.get('base_url') or data.get('base')
+    url = _validate_url(raw_url) if raw_url else _endpoint_from_base(raw_base, request_format=request_format)
     method = str(data.get('method', 'POST')).upper().strip()
     if method not in {'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'}:
         raise ValueError('请求方法不受支持。')
@@ -94,7 +193,35 @@ def validate_config(data):
             raise ValueError(f'请求头 {key} 过长。')
         normalized_headers[key] = text
 
+    # Inject the API key only after validation, and only when the caller did
+    # not already provide an explicit authentication header.  The secret is
+    # kept in memory for this run and removed by the server worker finally
+    # block; redacted_config never persists it.
+    api_key = str(data.get('api_key') or data.get('key') or '').strip()
+    if any(c in api_key for c in ('\r', '\n')):
+        raise ValueError('API Key 不能包含换行。')
+    auth = str(data.get('auth') or 'bearer').lower().strip()
+    if auth not in {'bearer', 'anthropic', 'gemini', 'none'}:
+        raise ValueError('鉴权方式必须是 bearer、anthropic、gemini 或 none。')
+    header_names = {key.lower() for key in normalized_headers}
+    if api_key and auth != 'none' and not header_names.intersection({'authorization', 'x-api-key', 'x-goog-api-key'}):
+        if auth == 'anthropic':
+            normalized_headers['x-api-key'] = api_key
+            normalized_headers.setdefault('anthropic-version', '2023-06-01')
+        elif auth == 'gemini':
+            normalized_headers['x-goog-api-key'] = api_key
+        else:
+            normalized_headers['Authorization'] = 'Bearer ' + api_key
+
     body = data.get('body', None)
+    model = str(data.get('model') or '').strip()
+    # For OpenAI-compatible traffic, model can live alongside the config or
+    # inside the body.  Supplying it at the top level makes the UI usable
+    # immediately after model discovery without hand-editing JSON.
+    if body is None and method not in {'GET', 'HEAD', 'OPTIONS'} and model:
+        body = {'model': model, 'messages': [{'role': 'user', 'content': 'ping'}]}
+    elif isinstance(body, dict) and model and not body.get('model'):
+        body = {**body, 'model': model}
     if isinstance(body, (dict, list)):
         body = json.dumps(body, ensure_ascii=False, separators=(',', ':'))
         if not any(key.lower() == 'content-type' for key in normalized_headers):
@@ -136,6 +263,9 @@ def validate_config(data):
         'ramp_up_milliseconds': ramp_up,
         'rate_limit': rate_limit, 'timeout_seconds': timeout,
         'expected_statuses': expected,
+        'base_url': str(raw_base or url).strip(),
+        'request_format': request_format,
+        'model': model,
         # A label is useful in the UI but must never be used in a request.
         'name': str(data.get('name', '')).strip()[:80],
     }
@@ -160,14 +290,16 @@ def redacted_config(config):
         low = key.lower()
         headers[key] = '[已隐藏]' if low in {'authorization', 'proxy-authorization', 'x-api-key', 'api-key', 'x-goog-api-key'} else value
     result = {key: value for key, value in config.items() if key not in {'body', 'headers'}}
-    parsed = urlsplit(str(result.get('url', '')))
-    if parsed.query:
-        # Query strings are valid for API endpoints, but frequently contain
-        # access tokens. Keep parameter names while masking all values.
-        from urllib.parse import parse_qsl, urlencode
-        result['url'] = urlunsplit((parsed.scheme, parsed.netloc, parsed.path,
-                                    urlencode([(key, '[已隐藏]') for key, _ in parse_qsl(parsed.query, keep_blank_values=True)]),
-                                    parsed.fragment))
+    # Query strings are valid for API endpoints, but frequently contain
+    # access tokens. Keep parameter names while masking all values on both
+    # the request URL and the user-facing Base URL field.
+    from urllib.parse import parse_qsl, urlencode
+    for field in ('url', 'base_url'):
+        parsed = urlsplit(str(result.get(field, '')))
+        if parsed.query:
+            result[field] = urlunsplit((parsed.scheme, parsed.netloc, parsed.path,
+                                        urlencode([(key, '[已隐藏]') for key, _ in parse_qsl(parsed.query, keep_blank_values=True)]),
+                                        parsed.fragment))
     result['headers'] = headers
     if config.get('body') is not None:
         result['body_bytes'] = len(str(config['body']).encode('utf-8'))
@@ -187,17 +319,25 @@ def _request_once(config):
         with httpx.Client(timeout=config['timeout_seconds'], follow_redirects=False, trust_env=False) as client:
             response = client.request(config['method'], config['url'], headers=config['headers'], content=config.get('body'))
         elapsed = (time.perf_counter() - started) * 1000
+        usage = None
+        content_type = response.headers.get('content-type', '')
+        if 'json' in content_type.lower() or response.content[:1] in (b'{', b'['):
+            try:
+                usage = extract_usage(response.json())
+            except (ValueError, TypeError):
+                usage = None
         return {'ok': response.status_code in config['expected_statuses'], 'status': response.status_code,
-                'latency_ms': round(elapsed, 2), 'bytes': len(response.content), 'error_type': None}
+                'latency_ms': round(elapsed, 2), 'bytes': len(response.content), 'error_type': None,
+                'usage': usage}
     except httpx.TimeoutException as exc:
         return {'ok': False, 'status': None, 'latency_ms': round((time.perf_counter() - started) * 1000, 2), 'bytes': 0,
-                'error_type': 'timeout', 'error': str(exc)[:240]}
+                'error_type': 'timeout', 'error': str(exc)[:240], 'usage': None}
     except httpx.RequestError as exc:
         return {'ok': False, 'status': None, 'latency_ms': round((time.perf_counter() - started) * 1000, 2), 'bytes': 0,
-                'error_type': 'network_error', 'error': str(exc)[:240]}
+                'error_type': 'network_error', 'error': str(exc)[:240], 'usage': None}
     except Exception as exc:  # classify parser/transport faults without leaking credentials
         return {'ok': False, 'status': None, 'latency_ms': round((time.perf_counter() - started) * 1000, 2), 'bytes': 0,
-                'error_type': 'client_error', 'error': str(exc)[:240]}
+                'error_type': 'client_error', 'error': str(exc)[:240], 'usage': None}
 
 
 def run(config, emit=None, cancelled=None):
@@ -243,7 +383,7 @@ def run(config, emit=None, cancelled=None):
             emit({'type': 'request_finish', 'completed': completed,
                   'total': target_total, 'request_count': completed,
                   'latency_ms': row['latency_ms'], 'status': row.get('status'),
-                  'ok': row['ok'], 'message': '请求完成'})
+                  'ok': row['ok'], 'usage': row.get('usage'), 'message': '请求完成'})
             local_index += config['concurrency']
 
     with ThreadPoolExecutor(max_workers=config['concurrency'], thread_name_prefix='load-test') as pool:
@@ -273,10 +413,40 @@ def run(config, emit=None, cancelled=None):
     total_bytes = sum(int(row.get('bytes') or 0) for row in results)
     samples = []
     for row in results[:MAX_SAMPLES]:
-        samples.append({key: row.get(key) for key in ('ok', 'status', 'latency_ms', 'bytes', 'error_type', 'error') if row.get(key) is not None})
+        sample = {key: row.get(key) for key in ('ok', 'status', 'latency_ms', 'bytes', 'error_type', 'error') if row.get(key) is not None}
+        if row.get('usage') is not None:
+            sample['usage'] = row['usage']
+        samples.append(sample)
     was_cancelled = bool(cancelled())
     status = 'cancelled' if was_cancelled else 'completed'
     if completed == 0 and not was_cancelled and config['mode'] == 'requests': status = 'error'
+    token_totals = Counter()
+    usage_requests = 0
+    for row in results:
+        usage = row.get('usage')
+        if not isinstance(usage, dict):
+            continue
+        usage_requests += 1
+        for key in ('input', 'output', 'total', 'cached'):
+            value = _non_negative_int(usage.get(key))
+            if value is not None:
+                token_totals[key] += value
+    rate_factor = 60 / elapsed
+    token_report = {
+        'input': token_totals.get('input') if 'input' in token_totals else None,
+        'output': token_totals.get('output') if 'output' in token_totals else None,
+        'total': token_totals.get('total') if 'total' in token_totals else None,
+        'cached': token_totals.get('cached') if 'cached' in token_totals else None,
+        'usage_requests': usage_requests,
+        'usage_missing_requests': completed - usage_requests,
+    }
+    if token_report['total'] is None and token_report['input'] is not None and token_report['output'] is not None:
+        token_report['total'] = token_report['input'] + token_report['output']
+        token_report['total_derived'] = True
+    token_report['input_per_minute'] = round(token_report['input'] * rate_factor, 2) if token_report['input'] is not None else None
+    token_report['output_per_minute'] = round(token_report['output'] * rate_factor, 2) if token_report['output'] is not None else None
+    token_report['tokens_per_minute'] = round(token_report['total'] * rate_factor, 2) if token_report['total'] is not None else None
+    token_report['cached_per_minute'] = round(token_report['cached'] * rate_factor, 2) if token_report['cached'] is not None else None
     result = {
         'suite': 'api_stress', 'status': status,
         'configuration': _redacted_config(config),
@@ -287,8 +457,16 @@ def run(config, emit=None, cancelled=None):
             'cancelled': was_cancelled, 'error_rate': round((failed / completed * 100) if completed else 0, 2),
             'elapsed_seconds': round(elapsed, 3),
             'requests_per_second': round(completed / elapsed, 3),
+            # RPM/TPM are rates over the whole completed window.  Keep both
+            # names so the desktop and HTML report can use their preferred
+            # labels without recomputing from rounded values.
+            'rpm': round(completed / elapsed * 60, 2),
+            'tpm': token_report['tokens_per_minute'],
+            'input_tpm': token_report['input_per_minute'],
+            'output_tpm': token_report['output_per_minute'],
             'bytes_per_second': round(total_bytes / elapsed, 1),
             'status_codes': dict(statuses), 'errors': dict(errors),
+            'token_usage': token_report,
         },
         'latency_ms': {
             'min': round(min(latencies), 2) if latencies else None,

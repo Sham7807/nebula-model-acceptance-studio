@@ -13,6 +13,47 @@ import server
 
 
 class LoadTestEngineTests(unittest.TestCase):
+    def test_base_url_api_key_builds_openai_request(self):
+        config = load_test.validate_config({
+            'base_url': 'https://relay.test/v1', 'api_key': 'sk-secret',
+            'model': 'fixture-model', 'total_requests': 1,
+        })
+        self.assertEqual(config['url'], 'https://relay.test/v1/chat/completions')
+        self.assertEqual(config['headers']['Authorization'], 'Bearer sk-secret')
+        self.assertEqual(json.loads(config['body'])['model'], 'fixture-model')
+        safe = load_test.redacted_config(config)
+        self.assertNotIn('sk-secret', json.dumps(safe))
+        self.assertEqual(safe['model'], 'fixture-model')
+
+    def test_usage_and_rpm_tpm_are_reported_without_false_zero(self):
+        calls = {'count': 0}
+        def fixture(config):
+            calls['count'] += 1
+            return {'ok': True, 'status': 200, 'latency_ms': 100, 'bytes': 10,
+                    'error_type': None,
+                    'usage': {'input': 10, 'output': 5, 'total': 15}}
+        with patch.object(load_test, '_request_once', side_effect=fixture):
+            result = load_test.run({'base_url': 'https://relay.test/v1', 'api_key': 'sk-secret',
+                                    'model': 'fixture', 'total_requests': 2, 'concurrency': 1})
+        usage = result['summary']['token_usage']
+        self.assertEqual(usage['input'], 20)
+        self.assertEqual(usage['output'], 10)
+        self.assertEqual(usage['total'], 30)
+        self.assertEqual(result['summary']['tpm'], usage['tokens_per_minute'])
+        self.assertGreater(result['summary']['rpm'], 0)
+
+    def test_missing_usage_is_unavailable_not_zero(self):
+        with patch.object(load_test, '_request_once', return_value={
+            'ok': True, 'status': 200, 'latency_ms': 2, 'bytes': 1, 'error_type': None,
+            'usage': None,
+        }):
+            result = load_test.run({'url': 'https://relay.test/chat/completions', 'total_requests': 1, 'concurrency': 1})
+        usage = result['summary']['token_usage']
+        self.assertIsNone(usage['input'])
+        self.assertIsNone(usage['output'])
+        self.assertIsNone(result['summary']['tpm'])
+        self.assertEqual(usage['usage_missing_requests'], 1)
+
     def test_validate_requires_safe_target_and_caps(self):
         with self.assertRaises(ValueError):
             load_test.validate_config({'url': 'file:///etc/hosts'})
