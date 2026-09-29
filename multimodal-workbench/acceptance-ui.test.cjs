@@ -719,12 +719,14 @@ async function download(page, format, bytes) {
     }
     for (const restoredSuite of ['ccmax', 'kvv11', 'kvvfull']) {
       const cc = restoredSuite === 'ccmax';
-      const configuration = { request_format: 'openai', auth: 'bearer', timeout: 95, ...(cc ? { signature_samples: 5, sse_samples: 50 } : { think_mode: 'openai', thinking: false }), key: 'never-restore-this-fixture-key' };
+      const configuration = { resource_source: 'official', request_format: 'openai', auth: 'bearer', timeout: 95, ...(cc ? { signature_samples: 5, sse_samples: 50 } : { think_mode: 'openai', thinking: false }), key: 'never-restore-this-fixture-key' };
       const f = await fixture(browser, { latest: restoredSuite, ...(cc ? { total: 57 } : {}), configuration });const { page, state } = f;
       try {
         await page.waitForFunction(() => document.getElementById('acceptanceStage').textContent.includes('已完成'));
         assert.equal(await page.locator('#acceptanceTimeout').inputValue(), '95');
         assert.equal(await page.locator('#acceptanceKey').inputValue(), '', 'OpenAI configuration restoration excludes channel keys');
+        assert.equal(await page.locator('#acceptanceResourceSource').inputValue(), 'official_relay', 'legacy direct API claim maps to the two-category source vocabulary');
+        assert.deepEqual(await page.locator('#acceptanceResourceSource option').evaluateAll(nodes=>nodes.map(x=>x.value)), ['unknown','official_relay','reverse']);
         if (cc) {
           assert.equal(await page.locator('#acceptanceFormat').inputValue(), 'openai');
           assert.equal(await page.locator('#acceptanceAuth').inputValue(), 'bearer');

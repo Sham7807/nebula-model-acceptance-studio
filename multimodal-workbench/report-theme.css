@@ -181,3 +181,13 @@ main { margin-left: auto; margin-right: auto; }
 .verdict-rules-formula { margin-top: 11px; padding-top: 10px; border-top: 1px dashed #cfe0f0; }
 @media(max-width:900px) { .verdict-rules-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } }
 @media(max-width:700px) { .verdict-rules-grid { grid-template-columns: 1fr; } }
+
+/* Provenance is an evidence judgement, independent of capability scores. */
+.resource-provenance[data-source="unknown"]{border-color:#dce3eb;border-left-color:#98a7b7;background:#f6f8fb;color:#42566d}
+.resource-provenance[data-source="official_relay"]{border-color:#c8dedc;border-left-color:#488781;background:#f0f8f7;color:#315f5b}
+.resource-provenance[data-source="reverse"]{border-color:#e8d5b7;border-left-color:#b58b4c;background:#fffbf2;color:#856331}
+.resource-provenance .source-claim{font-weight:600;color:inherit}
+.resource-provenance .source-details{flex-basis:100%;font-size:11px;line-height:1.7;margin-top:3px}
+.source-details>summary{cursor:pointer;color:inherit;font-weight:600;padding:4px 0}
+.source-details>div{padding-top:8px}.source-details ul{margin:4px 0 0;padding-left:18px;color:#60768a}
+@media print{.source-details{break-inside:avoid}}

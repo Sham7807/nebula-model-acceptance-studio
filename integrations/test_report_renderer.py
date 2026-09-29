@@ -75,12 +75,17 @@ class ReportTests(unittest.TestCase):
                 'executive_summary':{'headline':'工具调用可用', 'detail':'本轮已完成。',
                     'items':[{'id':'tools','label':'工具调用','status':'passed','status_label':'已验证',
                               'tone':'passed','rate':100,'text':'通过率 100%（通过 1 / 异常 0）。'}],
-                    'resource_source':{'label':'官方资源转接 / 官转（渠道自报）','kind':'operator_claim',
+                    'resource_source':{'label':'倾向官转（实测线索）','kind':'inferred','classification':'official_relay',
+                                       'operator_label':'渠道声明：官转（不作为检测结论）',
+                                       'evidence':['API 原生结构 <安全转义>'], 'missing_evidence':['需要对应日志'],
                                        'note':'需要上游账单或服务商日志佐证。'}}}
         with patch('report_renderer.build_report_data', return_value=data):
             report = render_report({'suite':'general','status':'completed'}).decode()
-        self.assertIn('class="resource-provenance"', report)
-        self.assertIn('官方资源转接 / 官转', report)
+        self.assertIn('class="resource-provenance" data-source="official_relay"', report)
+        self.assertIn('倾向官转（实测线索）', report)
+        self.assertIn('查看判定依据与证据缺口', report)
+        self.assertIn('API 原生结构 &lt;安全转义&gt;', report)
+        self.assertIn('渠道声明：官转', report)
         self.assertIn('class="brief-metric"', report)
         self.assertIn('setActiveNav', report)
         self.assertIn("classList.remove('nav-primary')", report)

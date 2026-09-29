@@ -2,6 +2,8 @@
 from datetime import datetime, timezone, timedelta
 import json
 import math
+import re
+from urllib.parse import urlsplit
 
 
 def obj(value): return value if isinstance(value, dict) else {}
@@ -203,31 +205,249 @@ def item(key, label, checks, conclusion=None, detail=''):
             'check_ids': [c['id'] for c in evidence if c.get('id')], 'request_ids': list(dict.fromkeys(x for c in evidence for x in rows(c.get('request_ids'))))}
 
 
-def resource_source(result):
-    """Return a clearly scoped provenance label without pretending to authenticate it.
+_SOURCE_LABELS = {'official_relay': '倾向官转（实测线索）', 'reverse': '倾向逆向（实测线索）', 'unknown': '待判定（官转 / 逆向）'}
+_API_CHAT_HOSTS = {
+    'api.openai.com', 'api.deepseek.com', 'api.moonshot.cn', 'api.moonshot.ai',
+    'api.mistral.ai', 'api.x.ai',
+}
+_WEB_SESSION_PATH = re.compile(
+    r'https://(?:claude\.ai/api/organizations/[^\s/"<>]+/chat_conversations'
+    r'|(?:chatgpt\.com|chat\.openai\.com)/backend-api/conversation)(?=[/?\s"<>]|$)', re.I)
 
-    A channel can claim to be official, an official relay, or a reverse/compatible
-    implementation, but an OpenAI-compatible response cannot prove that claim.
-    Keep the operator's explicit annotation separate from observed evidence.
-    """
-    config = obj(result.get('configuration'))
-    value = str(config.get('resource_source') or '').strip().lower()
-    provider = str(config.get('provider') or '').strip().lower()
-    labels = {
-        'official': ('官方资源（渠道自报）', 'operator_claim', '仅表示操作者选择了“官方直连”；本轮接口证据不能认证官方账号、权重或授权。'),
-        'official_relay': ('官方资源转接 / 官转（渠道自报）', 'operator_claim', '仅表示操作者选择了“官方资源转接”；需要上游账单、Request ID 或服务商日志进一步佐证。'),
-        'reverse': ('逆向 / 兼容实现（渠道自报）', 'operator_claim', '仅表示操作者选择了“逆向 / 兼容实现”；本轮能力结果不等同于安全审计或代码确认。'),
-    }
-    if value in labels:
-        label, kind, note = labels[value]
-    elif provider == 'anthropic':
-        label, kind, note = 'Anthropic 官方（渠道自报，未认证）', 'provider_claim', 'Claude 来源字段由操作者填写，不能单独证明直连官方资源。'
-    elif provider == 'aws':
-        label, kind, note = 'AWS Bedrock 官方云资源（渠道自报，未认证）', 'provider_claim', 'AWS 区域、账号和内部代签仍需上游日志或账单佐证。'
+
+def _source_json(value):
+    if isinstance(value, str):
+        try: value = json.loads(value)
+        except (ValueError, TypeError): return {}
+    return obj(value)
+
+
+def _source_sample(raw, fallback_model=''):
+    """Read HTTP observations, never request or generated text as error evidence."""
+    raw = {**obj(obj(raw).get('extra')), **obj(raw)}
+    request = obj(raw.get('request')); response = obj(raw.get('response'))
+    # Browser rows carry response_body directly; native rows have response.body.
+    body = raw.get('response_body', response.get('body', raw.get('response')))
+    if body is None and raw.get('type') == 'request_finish': body = raw.get('body')
+    wrapper = _source_json(body)
+    if 'body' in wrapper and any(key in wrapper for key in ('status', 'headers', 'body_truncated')):
+        response = {**response, **wrapper}; body = wrapper['body']
+    payload = _source_json(body)
+    request_body = _source_json(raw.get('request_body', request.get('body')))
+    if 'body' in request_body and any(key in request_body for key in ('url', 'method', 'headers')):
+        request_body = _source_json(request_body['body'])
+    status = next((value for value in (raw.get('http_status'), response.get('status'), raw.get('status')) if isinstance(value, int) and not isinstance(value, bool)), None)
+    url = str(raw.get('url') or raw.get('endpoint') or request.get('url') or '')
+    try:
+        parsed = urlsplit(url)
+        # Origins containing credentials or explicit insecure ports cannot
+        # support a public API-origin inference. Do not include secrets in notes.
+        valid_url = parsed.scheme == 'https' and not parsed.username and not parsed.password and parsed.port in (None, 443)
+        host, path = (parsed.hostname or '').lower(), parsed.path.rstrip('/')
+    except ValueError:
+        valid_url = False; host = path = ''
+    headers = raw.get('response_headers')
+    if headers is None: headers = response.get('headers', {})
+    pairs = headers.items() if isinstance(headers, dict) else rows(headers)
+    header_names = {str(pair[0]).lower() for pair in pairs if isinstance(pair, (list, tuple)) and len(pair) == 2 and str(pair[1]).strip()}
+    end = raw.get('termination')
+    complete = (end in (None, '', 'eof')
+                and not any(raw.get(k) for k in ('body_truncated', 'truncated'))
+                and not any(response.get(k) for k in ('body_truncated', 'truncated'))
+                and not obj(raw.get('evidence')).get('truncated'))
+    return {'raw': raw, 'id': str(raw.get('id') or raw.get('request_id') or '未命名请求'),
+            'model': str(request_body.get('model') or raw.get('model') or raw.get('requested_model') or fallback_model or '未记录模型'),
+            'url': url, 'endpoint': url, 'valid_url': valid_url, 'host': host, 'path': path,
+            'request_body': request_body, 'payload': payload, 'http_status': status,
+            'complete': complete, 'success': complete and not raw.get('infrastructure_error') and status is not None and 200 <= status < 300 and payload.get('error') in (None, {}),
+            'headers': header_names, 'probe': raw.get('suite_probe') or raw.get('probe')}
+
+
+def _native_message(payload):
+    usage = obj(payload.get('usage'))
+    return (payload.get('type') == 'message' and payload.get('role') == 'assistant'
+            and isinstance(payload.get('content'), list) and bool(payload.get('stop_reason'))
+            and token(usage.get('input_tokens')) is not None and token(usage.get('output_tokens')) is not None)
+
+
+def _native_chat(payload):
+    usage = obj(payload.get('usage')); choices = rows(payload.get('choices'))
+    return (payload.get('object') == 'chat.completion' and bool(choices)
+            and isinstance(obj(choices[0]).get('message'), dict) and bool(obj(choices[0]).get('finish_reason'))
+            and token(usage.get('prompt_tokens')) is not None and token(usage.get('completion_tokens')) is not None)
+
+
+def _api_origin(sample):
+    if not sample['success'] or not sample['valid_url']: return False
+    host, path, payload = sample['host'], sample['path'], sample['payload']
+    if host == 'api.anthropic.com' and path == '/v1/messages': return _native_message(payload)
+    if host in _API_CHAT_HOSTS and path in ('/v1/chat/completions', '/chat/completions'): return _native_chat(payload)
+    if (host == 'dashscope.aliyuncs.com' and path == '/compatible-mode/v1/chat/completions') or (host == 'open.bigmodel.cn' and path == '/api/paas/v4/chat/completions') or (host == 'api.z.ai' and path == '/api/paas/v4/chat/completions'):
+        return _native_chat(payload)
+    if host == 'api.openai.com' and path == '/v1/responses':
+        usage = obj(payload.get('usage'))
+        return (payload.get('object') == 'response' and payload.get('status') == 'completed' and isinstance(payload.get('output'), list)
+                and token(usage.get('input_tokens')) is not None and token(usage.get('output_tokens')) is not None)
+    if host == 'generativelanguage.googleapis.com' and re.fullmatch(r'/v1(?:beta)?/models/[^/]+:generateContent', path):
+        usage = obj(payload.get('usageMetadata'))
+        return bool(rows(payload.get('candidates'))) and token(usage.get('promptTokenCount')) is not None and token(usage.get('candidatesTokenCount')) is not None
+    if re.fullmatch(r'bedrock-runtime\.[a-z]{2}(?:-[a-z0-9]+)+-\d\.amazonaws\.com(?:\.cn)?', host) and re.fullmatch(r'/model/[^/]+/invoke', path):
+        return _native_message(payload)
+    return False
+
+
+def _web_error(sample):
+    # Only error fields, not assistant content, a user URL, or request bodies.
+    # The returned note describes the path family without copying URLs/tokens.
+    if not sample['complete'] or sample['http_status'] is None or sample['http_status'] < 400: return False
+    error = sample['payload'].get('error')
+    if not isinstance(error, dict): return False
+    def strings(value, depth=0):
+        if depth > 4: return []
+        if isinstance(value, str): return [value]
+        if not isinstance(value, dict): return []
+        return [text for key, child in value.items() if key in ('message', 'detail', 'description', 'url', 'upstream_url', 'endpoint', 'path', 'error', 'cause') for text in strings(child, depth+1)]
+    request_text = json.dumps(sample['request_body'], ensure_ascii=False).lower()
+    return any(match.group(0).lower() not in request_text for value in strings(error) for match in _WEB_SESSION_PATH.finditer(value))
+
+
+def _source_signature_chain(samples):
+    """Require the actual linked positive/negative bodies, not check labels."""
+    positives = [s for s in samples if s['probe'] == 'thinking_return' and s['success'] and _native_message(s['payload'])]
+    negatives = [s for s in samples if s['probe'] == 'signature_mutation' and s['complete'] and s['http_status'] in (400, 422)]
+    for original in samples:
+        if original['probe'] != 'thinking' or not original['success'] or not _native_message(original['payload']): continue
+        signed = any(isinstance(block, dict) and block.get('type') == 'thinking' and isinstance(block.get('signature'), str) and block['signature'] for block in original['payload']['content'])
+        if not signed or not _vendor_header(original): continue
+        for positive in positives:
+            if positive['endpoint'] != original['endpoint'] or positive['model'] != original['model']: continue
+            messages = rows(positive['request_body'].get('messages'))
+            if not any(obj(m).get('role') == 'assistant' and obj(m).get('content') == original['payload']['content'] for m in messages): continue
+            for negative in negatives:
+                if negative['endpoint'] != original['endpoint'] or negative['model'] != original['model']: continue
+                error = json.dumps(obj(negative['payload'].get('error')), ensure_ascii=False)
+                if not (re.search(r'signature|签名', error, re.I) and re.search(r'invalid|mismatch|verification|verify|failed|not valid|incorrect|无效|校验|验证|不匹配', error, re.I)) or re.search(r'unsupported|unknown field|not supported|unrecognized|不支持|未知字段', error, re.I): continue
+                # Compare every request field. A valid negative changes exactly
+                # one character in a thinking signature and nothing else.
+                left = json.loads(json.dumps(positive['request_body']))
+                right = json.loads(json.dumps(negative['request_body']))
+                differences = []
+                def compare(a, b, path=()):
+                    if type(a) is not type(b): differences.append((path, a, b)); return
+                    if isinstance(a, dict):
+                        if a.keys() != b.keys(): differences.append((path, a, b)); return
+                        for key in a: compare(a[key], b[key], path+(key,))
+                    elif isinstance(a, list):
+                        if len(a) != len(b): differences.append((path, a, b)); return
+                        for i, (x, y) in enumerate(zip(a, b)): compare(x, y, path+(i,))
+                    elif a != b: differences.append((path, a, b))
+                compare(left, right)
+                if len(differences) != 1: continue
+                path, a, b = differences[0]
+                if path and path[-1] == 'signature' and isinstance(a, str) and isinstance(b, str) and len(a) == len(b) and sum(x != y for x, y in zip(a, b)) == 1:
+                    return [original['id'], positive['id'], negative['id']]
+    return []
+
+
+def _vendor_header(sample):
+    headers = sample['headers']
+    return bool(headers.intersection({'anthropic-request-id', 'anthropic-organization-id', 'x-amzn-bedrock-invocation-latency'})) or any(h.startswith('anthropic-ratelimit-') or h.startswith('x-amzn-bedrock-') for h in headers)
+
+
+def _resource_source_group(samples):
+    evidence, missing = [], []
+    api = [s for s in samples if _api_origin(s)]
+    reverse = [s for s in samples if _web_error(s)]
+    signature = _source_signature_chain(samples)
+    if api: evidence.append('标准供应商 API 域名取得完整原生响应及用量字段（请求 %s）；按本报告的两类口径归入官转 / API 资源。' % '、'.join(s['id'] for s in api[:4]))
+    if signature: evidence.append('同一模型、同一端点完成真实 thinking 签名原样回传与单字符篡改拒绝，原始响应同时包含供应商专有头及原生用量结构（请求 %s）。' % '、'.join(signature))
+    if reverse: evidence.append('结构化错误暴露网页会话专用接口路径，存在网页会话转换的线索（请求 %s）；错误信息可由中间层改写。' % '、'.join(s['id'] for s in reverse[:4]))
+    official = bool(api or signature)
+    classification = 'unknown' if official and reverse else 'official_relay' if official else 'reverse' if reverse else 'unknown'
+    if samples and all(s['model'] == '未记录模型' for s in samples):
+        classification = 'unknown'
+        missing.append('请求和配置均未记录模型，无法把链路线索关联到具体被测模型。')
+    if official and reverse: missing.append('API 资源与网页会话线索互相冲突；需按本轮 Request ID 核对是否混用或回退上游。')
+    if not api and not reverse and not signature:
+        successful = sum(s['success'] for s in samples)
+        evidence.append('已检查 %s 条 HTTP 记录，其中 %s 条完整成功；本轮未出现可区分官转 / 逆向的来源线索。' % (len(samples), successful) if samples else '本轮未保存可用于来源分析的 HTTP 请求和响应。')
+        missing.append('未取得供应商 API 域名上的完整原生响应，或同一链路的签名正负对照 + 专有头 + 原生用量组合。')
+        missing.append('已保存的结构化错误未暴露网页会话专用路径；没有此类错误不代表没有逆向。' if samples else '缺少结构化响应错误记录，无法检查网页会话链路线索。')
+    if not signature:
+        returned = [s for s in samples if s['probe'] == 'thinking_return' and s['success'] and _native_message(s['payload'])]
+        accepted = [s for s in samples if s['probe'] == 'signature_mutation' and s['success']]
+        originals = [s for s in samples if s['probe'] == 'thinking' and s['success']]
+        if returned: evidence.append('原样签名回传请求成功（请求 %s）；往返成功不能单独证明来源。' % '、'.join(s['id'] for s in returned[:4]))
+        if accepted: evidence.append('篡改签名仍收到 HTTP %s（请求 %s）；可能被删除、重写或忽略，属于签名校验异常，不能单独证明逆向。' % (' / '.join(str(code) for code in sorted({s['http_status'] for s in accepted})), '、'.join(s['id'] for s in accepted[:4])))
+        if originals and not any(_vendor_header(s) for s in originals): missing.append('签名原始响应未保留供应商专有头；只有中转通用头或未记录响应头，不满足组合判断依据。')
+    missing.append('若需确认而非倾向判断，需用本轮 Request ID 对应的上游调用日志或计费记录核对。')
+    return {'classification': classification, 'kind': 'inferred' if classification != 'unknown' else 'unknown', 'label': _SOURCE_LABELS[classification],
+            'note': '按可观察的 API / 网页会话链路线索判断；属于倾向判断，不是来源认证。' if classification != 'unknown' else '本轮证据不足或相互冲突，无法可靠二选一；能力通过、缓存命中、模型自述及普通错误不作为来源结论。',
+            'evidence': evidence, 'missing_evidence': missing}
+
+
+def resource_source(result):
+    """Infer API versus web-session resources without treating claims as tests."""
+    result = obj(result); config = obj(result.get('configuration') or result.get('config'))
+    configurations = [obj(c) for c in rows(config.get('records'))] or [config]
+    values = {str(c.get('resource_source') or '').strip().lower() for c in configurations} - {'', 'unknown'}
+    values = {'official_relay' if value == 'official' else value for value in values}
+    providers = {str(c.get('provider') or '').strip().lower() for c in configurations} - {'', 'auto'}
+    operator_label = '渠道未声明来源'
+    unclaimed = any(str(c.get('resource_source') or '').strip().lower() in ('', 'unknown') and str(c.get('provider') or '').strip().lower() in ('', 'auto') for c in configurations)
+    if len(values) > 1: operator_label = '渠道声明不一致（官转 / 逆向）'
+    elif values: operator_label = '渠道声明：' + ('官转' if 'official_relay' in values else '逆向') + '（未作为实测结论）'
+    elif providers: operator_label = '渠道声明：官转（%s，未作为实测结论）' % ' / '.join({'anthropic':'Anthropic API', 'aws':'AWS Bedrock'}.get(p, p) for p in sorted(providers))
+    if unclaimed and (values or providers): operator_label += '；部分记录未声明'
+    # Child runs and browser records must not lend one model's signature or
+    # headers to another. Endpoints are additionally matched inside the chain.
+    if result.get('suite') == 'batch_acceptance':
+        children = [(str(obj(obj(child.get('result')).get('configuration')).get('model') or child.get('model') or '未记录模型'), resource_source(child.get('result'))) for child in rows(result.get('results')) if isinstance(child, dict)]
     else:
-        label, kind, note = '来源未确认（官方 / 官转 / 逆向待核实）', 'unknown', '仅凭模型名、响应字段、能力表现或 Request ID，无法认证上游资源来源。'
-    return {'label': label, 'kind': kind, 'note': note, 'operator_value': value or 'unknown',
-            'provider': provider or None}
+        raw_samples = requests(result)
+        seen = {id(row) for row in raw_samples}
+        identities = {row.get('id') or row.get('request_id') for row in raw_samples} - {None, ''}
+        for row in rows(result.get('requests')):
+            if not isinstance(row, dict) or id(row) in seen: continue
+            identity = row.get('id') or row.get('request_id')
+            if identity and identity in identities: continue
+            raw_samples.append(row); seen.add(id(row))
+            if identity: identities.add(identity)
+        grouped = {}; group_labels = {}; record_configs = rows(config.get('records'))
+        for row in raw_samples:
+            record_match = re.match(r'^record-(\d+)-request-', str(row.get('id') or ''))
+            record_index = int(record_match.group(1))-1 if record_match else None
+            group_config = obj(record_configs[record_index]) if record_index is not None and 0 <= record_index < len(record_configs) else config
+            sample = _source_sample(row, group_config.get('model'))
+            model = str(group_config.get('model') or sample['model'])
+            # A deliberately invalid-model request is a control for the same
+            # tested resource, not a new resource lacking successful samples.
+            if not record_configs and len(rows(config.get('models'))) > 1:
+                model = sample['model'] if sample['model'] in config['models'] else '未关联到被测模型'
+            key = (record_index, model)
+            grouped.setdefault(key, []).append(sample); group_labels[key] = model
+        # Include configured but unobserved models in a multi-model report.
+        if record_configs:
+            for index, cfg in enumerate(record_configs):
+                model = str(obj(cfg).get('model') or '未记录模型'); key = (index, model)
+                grouped.setdefault(key, []); group_labels[key] = model
+        else:
+            for model in rows(config.get('models')):
+                if isinstance(model, str):
+                    key = (None, model); grouped.setdefault(key, []); group_labels[key] = model
+        children = [(group_labels[key], _resource_source_group(samples)) for key, samples in grouped.items()]
+    if not children: answer = _resource_source_group([])
+    elif len(children) == 1: answer = dict(children[0][1])
+    else:
+        classes = {child['classification'] for _, child in children}
+        classification = next(iter(classes)) if len(classes) == 1 else 'unknown'
+        answer = {'classification': classification, 'kind': 'inferred' if classification != 'unknown' else 'unknown', 'label': _SOURCE_LABELS[classification],
+                  'note': '逐模型分析后汇总；任一模型待判定或不同模型来源倾向不一致时，不替全部模型二选一。',
+                  'evidence': [model+'：'+child['label']+'；'+' '.join(child['evidence']) for model, child in children],
+                  'missing_evidence': list(dict.fromkeys(value for _, child in children for value in child['missing_evidence']))}
+        answer['models'] = [{'model':model, 'classification':child['classification'], 'label':child['label']} for model, child in children]
+    answer.update(operator_label=operator_label, operator_value=next(iter(values)) if len(values) == 1 else 'unknown', provider=next(iter(providers)) if len(providers) == 1 else None)
+    return answer
 
 
 def presentation(value, label, tone):

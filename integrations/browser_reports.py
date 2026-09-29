@@ -118,7 +118,7 @@ def dimensions_for(name):
 def _configuration(record, result):
     config = {**_dict(record.get('config')), **_dict(result.get('config'))}
     # Keep the saved protocol contract, never export credentials as settings.
-    out = {k: deepcopy(config[k]) for k in ('base', 'model', 'models', 'requestFormat', 'request_format', 'format', 'auth', 'path', 'endpoint', 'timeout', 'conc', 'concurrency', 'mode', 'preset') if k in config}
+    out = {k: deepcopy(config[k]) for k in ('base', 'model', 'models', 'requestFormat', 'request_format', 'format', 'auth', 'path', 'endpoint', 'timeout', 'conc', 'concurrency', 'mode', 'preset', 'resource_source', 'provider') if k in config}
     request_format = config.get('request_format') or config.get('requestFormat') or config.get('format')
     if request_format:
         out['request_format'] = request_format

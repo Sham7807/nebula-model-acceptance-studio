@@ -364,10 +364,22 @@ def render_report(result, directory=None):
     grade_note=grade.get('note') or '评级以本轮已判定检查为依据；未取得评分时不推定资源等级。'
     grade_criteria=grade.get('criteria')
     grade_html+='<p class="grade-note grade-detail">'+prose(grade_note)+'</p>'+('<details class="grade-criteria"><summary>查看评级标准与适用范围</summary><div>'+prose(grade_criteria)+'</div></details>' if grade_criteria else '')
-    source = executive.get('resource_source') or {'label':'来源未确认（官方 / 官转 / 逆向待核实）','note':'仅凭接口响应无法认证上游资源来源。'}
-    source_label = source.get('label') or '来源未确认（官方 / 官转 / 逆向待核实）'
-    source_note = source.get('note') or '仅凭接口响应无法认证上游资源来源。'
-    source_html = '<div class="resource-provenance"><div><span class="grade-label">资源来源判定</span><b>'+esc(source_label)+'</b></div><p>'+prose(source_note)+'</p></div>'
+    source = executive.get('resource_source') or {}
+    source_label = source.get('label') or '待判定（官转 / 逆向）'
+    source_note = source.get('note') or '未保存足够的来源证据；能力测试通过或失败不能单独确定来源。'
+    source_class = source.get('classification') if source.get('classification') in ('official_relay', 'reverse') else 'unknown'
+    source_evidence = [str(value) for value in source.get('evidence', []) if isinstance(value, str)]
+    source_missing = [str(value) for value in source.get('missing_evidence', []) if isinstance(value, str)]
+    source_details = ''
+    for heading, values in [('本轮依据', source_evidence), ('仍需补充', source_missing)]:
+        if values:
+            source_details += '<div><strong>'+esc(heading)+'</strong><ul>'+''.join('<li>'+esc(value)+'</li>' for value in values)+'</ul></div>'
+    source_html = '<div class="resource-provenance" data-source="'+source_class+'"><div><span class="grade-label">资源来源判定</span><b>'+esc(source_label)+'</b></div><p>'+prose(source_note)+'</p>'
+    if source.get('operator_label'):
+        source_html += '<p class="source-claim">'+esc(source['operator_label'])+'</p>'
+    if source_details:
+        source_html += '<details class="source-details"><summary>查看判定依据与证据缺口</summary>'+source_details+'</details>'
+    source_html += '</div>'
     duration=executive.get('duration') or {}
     duration_title=duration.get('title') or ('请求观测时段' if duration.get('kind')=='request_window' else '测试总耗时')
     duration_note=duration.get('source') or ('总耗时为本轮实际经过时间；并发请求耗时不累加。' if duration.get('total_ms') is not None else '没有保存可确认的全程耗时；不使用请求耗时累加估算。')
@@ -495,7 +507,7 @@ def render_report(result, directory=None):
         runtime_info.extend([('采样设置',('签名不适用 · ' if openai else f'签名 {config.get("signature_samples","未记录")} 次 · ')+f'普通 SSE {config.get("sse_samples","未记录")} 次 · 工具与非法模型各 1 次'),
             ('并发 / 鉴权',str(config.get('concurrency','未记录'))+' / '+('x-api-key' if config.get('auth')=='anthropic' else config.get('auth','未记录')))])
     elif claude:
-        provider_names = {'auto': '未指定 / 自动观察', 'anthropic': 'Anthropic 官方（渠道声明）', 'aws': 'AWS Bedrock（渠道声明）'}
+        provider_names = {'auto': '未指定 / 自动观察', 'anthropic': 'Anthropic API（渠道声明）', 'aws': 'AWS Bedrock（渠道声明）'}
         runtime_info.extend([('上游来源声明',provider_names.get(config.get('provider'), config.get('provider') or '未指定')),
             ('来源判读','来源为配置提示，未对官方资源、AWS 账号或模型权重进行认证'),
             ('缓存目标规模',str(config.get('cache_tokens','未记录'))+' tokens（目标值，实测以 usage 为准）'),

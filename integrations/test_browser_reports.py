@@ -231,3 +231,18 @@ class NativeRequestFieldsTests(unittest.TestCase):
         self.assertEqual(gemini['observed_fields']['thoughtsTokenCount'], 3)
         self.assertEqual(gemini['observed_fields']['totalTokenCount'], 14)
         self.assertNotIn('completion_tokens', gemini['observed_fields'])
+
+
+class SourceConfigurationTests(unittest.TestCase):
+    def test_each_record_keeps_source_claim_separate_from_credentials(self):
+        data = payload()
+        data['records'][0]['result']['config'].update(resource_source='official', provider='aws')
+        data['records'].append({'kind': 'general', 'model': 'fixture-model', 'base': 'https://other.test',
+                                'result': {'checks': [], 'requests': []}})
+        report = normalize_browser_report(data)
+        configs = report['configuration']['records']
+        self.assertEqual(configs[0]['resource_source'], 'official')
+        self.assertEqual(configs[0]['provider'], 'aws')
+        self.assertNotIn('resource_source', configs[1])
+        self.assertNotIn('key', configs[0])
+        self.assertNotIn('resource_source', report['configuration'])

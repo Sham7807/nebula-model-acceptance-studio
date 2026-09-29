@@ -28,16 +28,16 @@ class BriefTests(unittest.TestCase):
         self.assertIn('通过率 50%', tools['conclusion'])
         self.assertIn('通过率 100%', media['conclusion'])
 
-    def test_resource_source_is_an_explicit_operator_annotation(self):
+    def test_resource_source_does_not_promote_operator_annotation_to_observation(self):
         unknown = resource_source({'configuration': {'model': 'claude-fable-5'}})
         self.assertEqual(unknown['kind'], 'unknown')
-        self.assertIn('来源未确认', unknown['label'])
+        self.assertEqual(unknown['label'], '待判定（官转 / 逆向）')
         relay = resource_source({'configuration': {'resource_source': 'official_relay'}})
-        self.assertEqual(relay['kind'], 'operator_claim')
-        self.assertIn('官转', relay['label'])
+        self.assertEqual(relay['kind'], 'unknown')
+        self.assertIn('渠道声明：官转', relay['operator_label'])
         anthropic = resource_source({'configuration': {'provider': 'anthropic'}})
-        self.assertEqual(anthropic['kind'], 'provider_claim')
-        self.assertIn('未认证', anthropic['label'])
+        self.assertEqual(anthropic['kind'], 'unknown')
+        self.assertIn('Anthropic API', anthropic['operator_label'])
     def test_one_overall_score_uses_module_weights(self):
         checks = [check('p','protocol'), check('t','tools','failed')]
         score = _report_score(checks, {'suite': 'browser_report'})

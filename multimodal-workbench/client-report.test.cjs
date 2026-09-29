@@ -32,7 +32,9 @@ test('portable report shows source provenance and compact capability metrics',as
   const r=record();r.result.config.resource_source='official_relay';
   const html=await harness().WorkbenchReport.render([r],[]);
   assert.match(html,/资源来源判定/);
-  assert.match(html,/官方资源转接 \/ 官转（渠道自报）/);
+  assert.match(html,/待判定（官转 \/ 逆向）/);
+  assert.match(html,/渠道声明：官转（未作为实测结论）/);
+  assert.match(html,/data-source="unknown"/);
   assert.match(html,/class="brief-metric"/);
   assert.match(html,/已判定通过率 <b>100%<\/b>/);
   assert.match(html,/class="nav-links"/);
@@ -321,10 +323,85 @@ test('unscorable evidence is pending assessment, never a fabricated zero grade',
 test('resource grade sits before the headline and multimodel ratings remain provisional even with sufficient evidence',async()=>{
   const first={...gradeFixture(90),model:'first'},second={...gradeFixture(90),model:'second'};
   const html=overview(await harness().WorkbenchReport.render([first,second]));
-  assert.match(html,/<div class="executive-verdict"><span class="index">VERDICT \/ 本轮结论<\/span><div class="resource-provenance">[\s\S]*<div class="resource-grade grade-high">/);
+  assert.match(html,/<div class="executive-verdict"><span class="index">VERDICT \/ 本轮结论<\/span><div class="resource-provenance"[^>]*>[\s\S]*<div class="resource-grade grade-high">/);
   assert.ok(html.indexOf('class="resource-grade')<html.indexOf('<h2>'));
   assert.doesNotMatch(html.split('<div class="executive-score">')[1],/class="resource-grade/);
   assert.match(html,/<small>暂定 · 证据待完善<\/small>/);
   assert.match(html,/多模型汇总评级仅供参考，不能代表单个模型/);
   assert.match(html,/<details class="grade-criteria"><summary>查看评级标准与适用范围<\/summary>/);
+});
+
+const sourceChat=()=>({object:'chat.completion',choices:[{message:{role:'assistant',content:'OK'},finish_reason:'stop'}],usage:{prompt_tokens:10,completion_tokens:1}});
+const sourceMessage=()=>({type:'message',role:'assistant',content:[{type:'thinking',thinking:'calculation',signature:'abcdefgh'},{type:'text',text:'OK'}],stop_reason:'end_turn',usage:{input_tokens:10,output_tokens:5}});
+const sourceRow=(extra={})=>({id:'source',status:200,url:'https://api.deepseek.com/v1/chat/completions',request_body:{model:'source-model',messages:[{role:'user',content:'hi'}]},response_body:sourceChat(),...extra});
+const sourceRecord=(rows,config={})=>({kind:'general',model:'source-model',result:{config,checks:[],requests:rows}});
+async function sourceResult(records){const html=await harness().WorkbenchReport.render(records);return {html:overview(html),classification:html.match(/class="resource-provenance" data-source="([^"]+)"/)[1]};}
+function signatureRows(){
+  const payload=sourceMessage(),url='https://relay.test/v1/messages';
+  const body={model:'source-model',messages:[{role:'user',content:'hi'},{role:'assistant',content:structuredClone(payload.content)},{role:'user',content:'continue'}]};
+  const negative=structuredClone(body);negative.messages[1].content[0].signature='abcdefgi';
+  return [
+    {id:'original',probe:'thinking',status:'passed',request:{url,body:{model:'source-model',messages:[{role:'user',content:'hi'}]}},response:{status:200,headers:[['anthropic-request-id','req-origin']],body:JSON.stringify(payload)},termination:'eof'},
+    {id:'positive',probe:'thinking_return',status:'passed',request:{url,body},response:{status:200,body:sourceMessage()},termination:'eof'},
+    {id:'negative',probe:'signature_mutation',status:'passed',request:{url,body:negative},response:{status:400,body:{error:{message:'invalid signature'}}},termination:'eof'},
+  ];
+}
+test('source inference ignores declarations, capability scores and checks without wire evidence',async()=>{
+  for(const status of ['passed','failed']){
+    const r=sourceRecord([],{resource_source:'official_relay',provider:'aws'});
+    r.result.checks=['tools','cache','signature'].map(id=>check(id,['tools'],status));
+    const result=await sourceResult([r]);assert.equal(result.classification,'unknown');assert.match(result.html,/渠道声明：官转/);
+  }
+  const result=await sourceResult([sourceRecord([],{provider:'aws'})]);assert.equal(result.classification,'unknown');assert.match(result.html,/AWS Bedrock/);
+});
+test('complete typed responses from strict official origins support only an inferred source',async()=>{
+  for(const row of [sourceRow(),sourceRow({url:'https://api.anthropic.com/v1/messages',response_body:sourceMessage()}),sourceRow({url:'https://api.openai.com/v1/responses',response_body:{object:'response',status:'completed',output:[],usage:{input_tokens:2,output_tokens:3}}}),sourceRow({url:'https://generativelanguage.googleapis.com/v1beta/models/gemini:generateContent',response_body:{candidates:[{content:{}}],usageMetadata:{promptTokenCount:2,candidatesTokenCount:3}}})]){
+    const result=await sourceResult([sourceRecord([row])]);assert.equal(result.classification,'official_relay');assert.match(result.html,/不是来源认证/);
+  }
+});
+test('lookalike or insecure origins and incomplete payloads never establish official provenance',async()=>{
+  const variants=[...['http://api.deepseek.com/v1/chat/completions','https://api.deepseek.com.evil.test/v1/chat/completions','https://user:pass@api.deepseek.com/v1/chat/completions','https://api.deepseek.com:444/v1/chat/completions'].map(url=>({url})),{response_body:{usage:{prompt_tokens:10,completion_tokens:1}}},{termination:'timeout'},{body_truncated:true},{evidence:{truncated:true}},{infrastructure_error:'transport failed'},{response_body:{...sourceChat(),error:{message:'failure'}}},{response_body:{status:200,body:sourceChat(),body_truncated:true}}];
+  for(const extra of variants)assert.equal((await sourceResult([sourceRecord([sourceRow(extra)])])).classification,'unknown',JSON.stringify(extra));
+});
+test('wrapped bodies and null status preserve legitimate complete HTTP evidence',async()=>{
+  const row=sourceRow({status:'passed',http_status:null,response_body:{status:200,headers:{'x-request-id':'id'},body:JSON.stringify(sourceChat())},request_body:{method:'POST',body:{model:'source-model'}}});
+  assert.equal((await sourceResult([sourceRecord([row])])).classification,'official_relay');
+});
+test('reverse requires structured HTTP error, excludes generated output and request echoes',async()=>{
+  const url='https://claude.ai/api/organizations/organization/chat_conversations?access_token=private-test';
+  const error={error:{message:'upstream failed '+url}};
+  const result=await sourceResult([sourceRecord([sourceRow({status:502,url:'https://relay.test/v1/messages',response_body:error})])]);
+  assert.equal(result.classification,'reverse');assert.doesNotMatch(result.html,/private-test|claude\.ai/);
+  for(const extra of [
+    {status:200,response_body:error},{status:502,response_body:{message:url}},{status:502,response_body:{error:url}},
+    {status:502,response_body:{error:{unrelated:url}}},{status:200,response_body:{...sourceChat(),choices:[{message:{content:url},finish_reason:'stop'}]}},
+    {status:502,response_body:error,request_body:{model:'source-model',messages:[{role:'user',content:url}]}},
+    {status:502,response_body:error,body_truncated:true},{status:502,response_body:{error:{message:'https://claude.ai.evil.test/api/organizations/organization/chat_conversations'}}}
+  ])assert.equal((await sourceResult([sourceRecord([sourceRow({url:'https://relay.test/v1/messages',...extra})])])).classification,'unknown',JSON.stringify(extra));
+});
+test('signature provenance requires a full linked positive and one-character rejection on the same endpoint',async()=>{
+  assert.equal((await sourceResult([sourceRecord(signatureRows())])).classification,'official_relay');
+  const variants=[rows=>rows.splice(1,1),rows=>{rows[0].response.headers=[['request-id','generic']];},rows=>{delete rows[0].response;rows[0].response={status:200,body:{usage:{input_tokens:1,output_tokens:1}}};},rows=>{rows[2].response.body.error.message='signature unknown field';},rows=>{rows[2].request.body.max_tokens=20;},rows=>{rows[1].request.body.messages[1].content.pop();},rows=>{rows[2].request.url+='?other=1';},rows=>{rows[2].request.body.model='other-model';}];
+  for(const mutate of variants){const rows=signatureRows();mutate(rows);assert.equal((await sourceResult([sourceRecord(rows)])).classification,'unknown');}
+});
+test('source chains cannot borrow records, models or missing observations and conflicts remain unknown',async()=>{
+  const rows=signatureRows();
+  assert.equal((await sourceResult([sourceRecord(rows.slice(0,1)),sourceRecord(rows.slice(1))])).classification,'unknown');
+  assert.equal((await sourceResult([sourceRecord([sourceRow()]),{kind:'general',model:'unobserved',result:{checks:[]}}])).classification,'unknown');
+  assert.equal((await sourceResult([sourceRecord([sourceRow()],{models:['source-model','unobserved']})])).classification,'unknown');
+  const conflict=sourceRow({id:'reverse',status:502,url:'https://relay.test/v1/messages',response_body:{error:{message:'https://chatgpt.com/backend-api/conversation'}}});
+  const result=await sourceResult([sourceRecord([sourceRow(),conflict])]);assert.equal(result.classification,'unknown');assert.match(result.html,/互相冲突/);
+  const missing=sourceRow();delete missing.request_body.model;
+  const r=sourceRecord([missing]);delete r.model;
+  const unresolved=await sourceResult([r]);assert.equal(unresolved.classification,'unknown');assert.match(unresolved.html,/均未记录模型/);
+});
+test('accepted mutated signature and missing vendor headers explain uncertainty without implying reverse',async()=>{
+  const rows=signatureRows();rows[0].response.headers=[['x-oneapi-request-id','relay']];rows[2].response={status:200,body:sourceMessage()};
+  const result=await sourceResult([sourceRecord(rows)]);assert.equal(result.classification,'unknown');assert.match(result.html,/原样签名回传请求成功/);assert.match(result.html,/篡改签名仍收到 HTTP 200/);assert.match(result.html,/只有中转通用头/);
+});
+test('native storage variants retain the source evidence and missing declarations stay visible',async()=>{
+  const r=sourceRecord([]);r.result.matrix_validation={samples:signatureRows()};
+  assert.equal((await sourceResult([r])).classification,'official_relay');
+  const result=await sourceResult([sourceRecord([],{resource_source:'official_relay'}),sourceRecord([])]);
+  assert.equal(result.classification,'unknown');assert.match(result.html,/部分记录未声明/);
 });

@@ -149,16 +149,171 @@
     const batch=new Set(cases.map(x=>x.model)).size>1;
     return {level,label,provisional:batch||(score!==null&&reasons.length>0),reasons,sampleCount,batch};
   }
+  const SOURCE_LABELS={official_relay:'倾向官转（实测线索）',reverse:'倾向逆向（实测线索）',unknown:'待判定（官转 / 逆向）'};
+  const SOURCE_CHAT_HOSTS=new Set(['api.openai.com','api.deepseek.com','api.moonshot.cn','api.moonshot.ai','api.mistral.ai','api.x.ai']);
+  function sourceJson(value){
+    if(typeof value==='string'){try{value=JSON.parse(value);}catch(_){return {};}}
+    return object(value);
+  }
+  function sourceSample(value,fallbackModel){
+    const raw={...object(value?.extra),...object(value)},request=object(raw.request);
+    let response=object(raw.response);
+    let body=raw.response_body??response.body??(raw.type==='request_finish'?raw.body:raw.response);
+    let responseWrapper=sourceJson(body);
+    if(responseWrapper.body!==undefined&&['status','headers','body_truncated','truncated'].some(key=>Object.hasOwn(responseWrapper,key))){
+      response={...response,...responseWrapper};body=responseWrapper.body;
+    }
+    const payload=sourceJson(body);
+    let requestBody=sourceJson(raw.request_body??request.body);
+    if(requestBody.body!==undefined&&['url','method','headers'].some(key=>Object.hasOwn(requestBody,key)))requestBody=sourceJson(requestBody.body);
+    const status=[raw.http_status,response.status,raw.status].find(candidate=>Number.isInteger(candidate)&&!Number.isNaN(candidate));
+    const url=String(raw.url||raw.endpoint||request.url||'');
+    let validUrl=false,host='',path='';
+    try{const parsed=new URL(url);validUrl=parsed.protocol==='https:'&&!parsed.username&&!parsed.password&&(!parsed.port||parsed.port==='443');host=parsed.hostname.toLowerCase();path=parsed.pathname.replace(/\/+$/,'');}catch(_){}
+    const headers=raw.response_headers??response.headers??{},pairs=Array.isArray(headers)?headers:Object.entries(object(headers));
+    const names=new Set(pairs.filter(pair=>Array.isArray(pair)&&pair.length===2&&String(pair[1]).trim()).map(pair=>String(pair[0]).toLowerCase()));
+    const complete=[undefined,null,'','eof'].includes(raw.termination)
+      &&!['body_truncated','truncated'].some(key=>raw[key]||response[key])
+      &&!object(raw.evidence).truncated;
+    const httpStatus=Number.isInteger(status)?status:null;
+    const noError=payload.error==null||(typeof payload.error==='object'&&!Array.isArray(payload.error)&&Object.keys(payload.error).length===0);
+    return {raw,id:String(raw.id||raw.request_id||'未命名请求'),model:String(requestBody.model||raw.model||raw.requested_model||fallbackModel||'未记录模型'),endpoint:url,validUrl,host,path,requestBody,payload,httpStatus,complete,success:complete&&!raw.infrastructure_error&&httpStatus!==null&&httpStatus>=200&&httpStatus<300&&noError,headers:names,probe:raw.suite_probe||raw.probe};
+  }
+  function sourceNativeMessage(payload){
+    const usage=object(payload.usage);
+    return payload.type==='message'&&payload.role==='assistant'&&Array.isArray(payload.content)&&!!payload.stop_reason&&tokenNumber(usage.input_tokens)!==null&&tokenNumber(usage.output_tokens)!==null;
+  }
+  function sourceNativeChat(payload){
+    const usage=object(payload.usage),first=object(list(payload.choices)[0]);
+    return payload.object==='chat.completion'&&list(payload.choices).length>0&&!!first.message&&typeof first.message==='object'&&!Array.isArray(first.message)&&!!first.finish_reason&&tokenNumber(usage.prompt_tokens)!==null&&tokenNumber(usage.completion_tokens)!==null;
+  }
+  function sourceApiOrigin(sample){
+    if(!sample.success||!sample.validUrl)return false;
+    const {host,path,payload}=sample;
+    if(host==='api.anthropic.com'&&path==='/v1/messages')return sourceNativeMessage(payload);
+    if(SOURCE_CHAT_HOSTS.has(host)&&['/v1/chat/completions','/chat/completions'].includes(path))return sourceNativeChat(payload);
+    if((host==='dashscope.aliyuncs.com'&&path==='/compatible-mode/v1/chat/completions')||(['open.bigmodel.cn','api.z.ai'].includes(host)&&path==='/api/paas/v4/chat/completions'))return sourceNativeChat(payload);
+    const usage=object(payload.usage);
+    if(host==='api.openai.com'&&path==='/v1/responses')return payload.object==='response'&&payload.status==='completed'&&Array.isArray(payload.output)&&tokenNumber(usage.input_tokens)!==null&&tokenNumber(usage.output_tokens)!==null;
+    if(host==='generativelanguage.googleapis.com'&&/^\/v1(?:beta)?\/models\/[^/]+:generateContent$/.test(path))return list(payload.candidates).length>0&&tokenNumber(payload.usageMetadata?.promptTokenCount)!==null&&tokenNumber(payload.usageMetadata?.candidatesTokenCount)!==null;
+    if(/^bedrock-runtime\.[a-z]{2}(?:-[a-z0-9]+)+-\d\.amazonaws\.com(?:\.cn)?$/.test(host)&&/^\/model\/[^/]+\/invoke$/.test(path))return sourceNativeMessage(payload);
+    return false;
+  }
+  function sourceWebError(sample){
+    // Generated text is never provenance. A request echo excludes a match;
+    // only a complete, structured HTTP error may supply a web-session clue.
+    if(!sample.complete||sample.httpStatus===null||sample.httpStatus<400)return false;
+    const error=sample.payload.error;if(!error||typeof error!=='object'||Array.isArray(error))return false;
+    const strings=(value,depth=0)=>{
+      if(depth>4)return [];
+      if(typeof value==='string')return [value];
+      return Object.entries(object(value)).filter(([key])=>['message','detail','description','url','upstream_url','endpoint','path','error','cause'].includes(key)).flatMap(([,child])=>strings(child,depth+1));
+    };
+    const requestText=JSON.stringify(sample.requestBody).toLowerCase();
+    const pattern=/https:\/\/(?:claude\.ai\/api\/organizations\/[^\s/"<>]+\/chat_conversations|(?:chatgpt\.com|chat\.openai\.com)\/backend-api\/conversation)(?=[/?\s"<>]|$)/gi;
+    return strings(error).some(value=>[...value.matchAll(pattern)].some(match=>!requestText.includes(match[0].toLowerCase())));
+  }
+  function sourceDifferences(a,b,path=[],differences=[]){
+    if(a===b)return differences;
+    if(a===null||b===null||typeof a!==typeof b||Array.isArray(a)!==Array.isArray(b)){differences.push({path,a,b});return differences;}
+    if(typeof a==='object'){
+      const left=Object.keys(a),right=Object.keys(b);
+      if(left.length!==right.length||left.some(key=>!Object.hasOwn(b,key))){differences.push({path,a,b});return differences;}
+      for(const key of left)sourceDifferences(a[key],b[key],[...path,key],differences);
+    }else differences.push({path,a,b});
+    return differences;
+  }
+  function sourceSignatureChain(samples){
+    const positives=samples.filter(s=>s.probe==='thinking_return'&&s.success&&sourceNativeMessage(s.payload));
+    const negatives=samples.filter(s=>s.probe==='signature_mutation'&&s.complete&&[400,422].includes(s.httpStatus));
+    for(const original of samples){
+      if(original.probe!=='thinking'||!original.success||!sourceNativeMessage(original.payload))continue;
+      const signed=original.payload.content.some(block=>block?.type==='thinking'&&typeof block.signature==='string'&&block.signature);
+      const vendorHeader=[...original.headers].some(name=>['anthropic-request-id','anthropic-organization-id','x-amzn-bedrock-invocation-latency'].includes(name)||name.startsWith('anthropic-ratelimit-')||name.startsWith('x-amzn-bedrock-'));
+      if(!signed||!vendorHeader)continue;
+      for(const positive of positives){
+        if(positive.endpoint!==original.endpoint||positive.model!==original.model)continue;
+        if(!list(positive.requestBody.messages).some(message=>message?.role==='assistant'&&sourceDifferences(message.content,original.payload.content).length===0))continue;
+        for(const negative of negatives){
+          if(negative.endpoint!==original.endpoint||negative.model!==original.model)continue;
+          const error=JSON.stringify(object(negative.payload.error));
+          if(!/signature|签名/i.test(error)||!/invalid|mismatch|verification|verify|failed|not valid|incorrect|无效|校验|验证|不匹配/i.test(error)||/unsupported|unknown field|not supported|unrecognized|不支持|未知字段/i.test(error))continue;
+          const changes=sourceDifferences(positive.requestBody,negative.requestBody);
+          if(changes.length!==1)continue;
+          const {path,a,b}=changes[0];
+          if(path.at(-1)==='signature'&&typeof a==='string'&&typeof b==='string'&&a.length===b.length&&[...a].filter((char,index)=>char!==b[index]).length===1)return [original.id,positive.id,negative.id];
+        }
+      }
+    }
+    return [];
+  }
+  function sourceGroup(samples){
+    const evidence=[],missing=[];
+    const api=samples.filter(sourceApiOrigin),reverse=samples.filter(sourceWebError),signature=sourceSignatureChain(samples);
+    if(api.length)evidence.push(`标准供应商 API 域名取得完整原生响应及用量字段（请求 ${api.slice(0,4).map(s=>s.id).join('、')}）；按本报告的两类口径归入官转 / API 资源。`);
+    if(signature.length)evidence.push(`同一模型、同一端点完成真实 thinking 签名原样回传与单字符篡改拒绝，原始响应同时包含供应商专有头及原生用量结构（请求 ${signature.join('、')}）。`);
+    if(reverse.length)evidence.push(`结构化错误暴露网页会话专用接口路径，存在网页会话转换的线索（请求 ${reverse.slice(0,4).map(s=>s.id).join('、')}）；错误信息可由中间层改写。`);
+    const official=api.length>0||signature.length>0;
+    let classification=official&&reverse.length?'unknown':official?'official_relay':reverse.length?'reverse':'unknown';
+    if(samples.length&&samples.every(s=>s.model==='未记录模型')){classification='unknown';missing.push('请求和配置均未记录模型，无法把链路线索关联到具体被测模型。');}
+    if(official&&reverse.length)missing.push('API 资源与网页会话线索互相冲突；需按本轮 Request ID 核对是否混用或回退上游。');
+    if(!api.length&&!reverse.length&&!signature.length){
+      evidence.push(samples.length?`已检查 ${samples.length} 条 HTTP 记录，其中 ${samples.filter(s=>s.success).length} 条完整成功；本轮未出现可区分官转 / 逆向的来源线索。`:'本轮未保存可用于来源分析的 HTTP 请求和响应。');
+      missing.push('未取得供应商 API 域名上的完整原生响应，或同一链路的签名正负对照 + 专有头 + 原生用量组合。');
+      missing.push(samples.length?'已保存的结构化错误未暴露网页会话专用路径；没有此类错误不代表没有逆向。':'缺少结构化响应错误记录，无法检查网页会话链路线索。');
+    }
+    if(!signature.length){
+      const returned=samples.filter(s=>s.probe==='thinking_return'&&s.success&&sourceNativeMessage(s.payload));
+      const accepted=samples.filter(s=>s.probe==='signature_mutation'&&s.success);
+      const originals=samples.filter(s=>s.probe==='thinking'&&s.success);
+      if(returned.length)evidence.push(`原样签名回传请求成功（请求 ${returned.slice(0,4).map(s=>s.id).join('、')}）；往返成功不能单独证明来源。`);
+      if(accepted.length)evidence.push(`篡改签名仍收到 HTTP ${[...new Set(accepted.map(s=>s.httpStatus))].join(' / ')}（请求 ${accepted.slice(0,4).map(s=>s.id).join('、')}）；可能被删除、重写或忽略，属于签名校验异常，不能单独证明逆向。`);
+      if(originals.length&&!originals.some(s=>[...s.headers].some(name=>['anthropic-request-id','anthropic-organization-id','x-amzn-bedrock-invocation-latency'].includes(name)||name.startsWith('anthropic-ratelimit-')||name.startsWith('x-amzn-bedrock-'))))missing.push('签名原始响应未保留供应商专有头；只有中转通用头或未记录响应头，不满足组合判断依据。');
+    }
+    missing.push('若需确认而非倾向判断，需用本轮 Request ID 对应的上游调用日志或计费记录核对。');
+    return {classification,kind:classification==='unknown'?'unknown':'inferred',label:SOURCE_LABELS[classification],note:classification==='unknown'?'本轮证据不足或相互冲突，无法可靠二选一；能力通过、缓存命中、模型自述及普通错误不作为来源结论。':'按可观察的 API / 网页会话链路线索判断；属于倾向判断，不是来源认证。',evidence,missing_evidence:missing};
+  }
   function resourceSource(records){
-    const configs=list(records).map(record=>{const result=object(record.result);return {...object(record),...object(record.config),...object(result.config),...object(result.configuration)};});
-    const values=[...new Set(configs.map(config=>String(config.resource_source||'').trim().toLowerCase()).filter(Boolean))];
-    const providers=[...new Set(configs.map(config=>String(config.provider||'').trim().toLowerCase()).filter(Boolean))];
-    const labels={official:['官方资源（渠道自报）','仅表示操作者选择了“官方直连”；本轮接口证据不能认证官方账号、权重或授权。'],official_relay:['官方资源转接 / 官转（渠道自报）','仅表示操作者选择了“官方资源转接”；需要上游账单、Request ID 或服务商日志进一步佐证。'],reverse:['逆向 / 兼容实现（渠道自报）','仅表示操作者选择了“逆向 / 兼容实现”；本轮能力结果不等同于安全审计或代码确认。']};
-    if(values.length===1&&labels[values[0]])return {label:labels[values[0]][0],note:labels[values[0]][1]};
-    if(values.length>1)return {label:'来源标注不一致（待核实）',note:'本轮多条记录的操作者来源标注不一致，不能据此认证官方、官转或逆向资源。'};
-    if(providers.length===1&&providers[0]==='anthropic')return {label:'Anthropic 官方（渠道自报，未认证）',note:'Claude 来源字段由操作者填写，不能单独证明直连官方资源。'};
-    if(providers.length===1&&providers[0]==='aws')return {label:'AWS Bedrock 官方云资源（渠道自报，未认证）',note:'AWS 区域、账号和内部代签仍需上游日志或账单佐证。'};
-    return {label:'来源未确认（官方 / 官转 / 逆向待核实）',note:'仅凭模型名、响应字段、能力表现或 Request ID，无法认证上游资源来源。'};
+    const configs=[],children=[];
+    const inspect=record=>{
+      const result=object(record.result),config={...object(record),...object(record.config),...object(result.config),...object(result.configuration)};
+      if(result.suite==='batch_acceptance'){
+        for(const child of list(result.results))if(child&&typeof child==='object')inspect({...child,config:{...config,...object(child.config)}});
+        return;
+      }
+      configs.push(config);
+      const matrix=object(result.matrix_validation),seen=new Set(),identities=new Set(),groups=new Map();
+      const rows=[...list(result.samples),...list(result.browser_requests),...list(matrix.samples||matrix.evidence_samples),...list(result.production_validation?.samples),...list(result.transport?.requests),...list(result.requests)];
+      for(const row of rows){
+        if(!row||typeof row!=='object'||Array.isArray(row)||seen.has(row))continue;
+        seen.add(row);
+        const identity=row.id||row.request_id;if(identity&&identities.has(identity))continue;if(identity)identities.add(identity);
+        const sample=sourceSample(row,config.model);
+        const configuredModels=list(config.models),model=configuredModels.length>1?(configuredModels.includes(sample.model)?sample.model:'未关联到被测模型'):String(config.model||sample.model);
+        if(!groups.has(model))groups.set(model,[]);groups.get(model).push(sample);
+      }
+      for(const model of list(config.models))if(typeof model==='string'&&!groups.has(model))groups.set(model,[]);
+      if(!groups.size)groups.set(String(config.model||'未记录模型'),[]);
+      for(const [model,samples]of groups)children.push({model,...sourceGroup(samples)});
+    };
+    list(records).forEach(inspect);
+    const clean=value=>String(value||'').trim().toLowerCase();
+    const values=[...new Set(configs.map(config=>clean(config.resource_source)).filter(value=>value&&value!=='unknown').map(value=>value==='official'?'official_relay':value))];
+    const providers=[...new Set(configs.map(config=>clean(config.provider)).filter(value=>value&&value!=='auto'))].sort();
+    const unclaimed=configs.some(config=>['','unknown'].includes(clean(config.resource_source))&&['','auto'].includes(clean(config.provider)));
+    let operatorLabel='渠道未声明来源';
+    if(values.length>1)operatorLabel='渠道声明不一致（官转 / 逆向）';
+    else if(values.length)operatorLabel=`渠道声明：${values[0]==='official_relay'?'官转':'逆向'}（未作为实测结论）`;
+    else if(providers.length)operatorLabel=`渠道声明：官转（${providers.map(provider=>({anthropic:'Anthropic API',aws:'AWS Bedrock'}[provider]||provider)).join(' / ')}，未作为实测结论）`;
+    if(unclaimed&&(values.length||providers.length))operatorLabel+='；部分记录未声明';
+    let answer;
+    if(!children.length)answer=sourceGroup([]);
+    else if(children.length===1){const {model,...child}=children[0];answer=child;}
+    else{
+      const classes=new Set(children.map(child=>child.classification)),classification=classes.size===1?children[0].classification:'unknown';
+      answer={classification,kind:classification==='unknown'?'unknown':'inferred',label:SOURCE_LABELS[classification],note:'逐模型分析后汇总；任一模型待判定或不同模型来源倾向不一致时，不替全部模型二选一。',evidence:children.map(child=>`${child.model}：${child.label}；${child.evidence.join(' ')}`),missing_evidence:[...new Set(children.flatMap(child=>child.missing_evidence))],models:children.map(({model,classification,label})=>({model,classification,label}))};
+    }
+    return {...answer,operator_label:operatorLabel,operator_value:values.length===1?values[0]:'unknown',provider:providers.length===1?providers[0]:null};
   }
   function responseUsage(raw){
     // Never inspect request bodies or a quoted model answer for accounting.
@@ -335,9 +490,10 @@
     if(params&&typeof params==='object')rows.push(...Object.entries(params));else if(params!=null)rows.push(['测试参数',params]);
     return rows.length?`<div class="parameter-facts"><dl class="key-value">${rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(display(v))}</dd>`).join('')}</dl></div>`:'';
   }
+  const portableProvenanceCss="\n.resource-provenance[data-source=\"unknown\"]{border-color:#dce3eb;border-left-color:#98a7b7;background:#f6f8fb;color:#42566d}\n.resource-provenance[data-source=\"official_relay\"]{border-color:#c8dedc;border-left-color:#488781;background:#f0f8f7;color:#315f5b}\n.resource-provenance[data-source=\"reverse\"]{border-color:#e8d5b7;border-left-color:#b58b4c;background:#fffbf2;color:#856331}\n.resource-provenance .source-claim{font-weight:600;color:inherit}\n.resource-provenance .source-details{flex-basis:100%;font-size:11px;line-height:1.7;margin-top:3px}\n.source-details>summary{cursor:pointer;color:inherit;font-weight:600;padding:4px 0}\n.source-details>div{padding-top:8px}.source-details ul{margin:4px 0 0;padding-left:18px;color:#60768a}\n@media print{.source-details{break-inside:avoid}}\n";
   const portableSummaryCss=`.badge.attention{color:#8b661f;background:#fff3d7}.badge.risk{color:#a0483c;background:#faebe6}.badge.neutral{color:#657487;background:#eef2f6}.brief-item.attention{border-top:3px solid #c1994b}.brief-item.risk{border-top:3px solid #bb6453}.brief-item.passed{border-top:3px solid #418062}.brief-item.neutral{border-top:3px solid #aab6c3}.module-card.failed.tone-attention .module-bar i,.score-dimension.failed.tone-attention .bar i{background:#c1994b}.resource-grade{display:flex;flex-wrap:wrap;align-items:center;gap:7px 12px;margin:10px 0 6px;padding:10px 13px;border:1px solid #dce5ed;border-radius:9px;background:#f2f6fa;color:#536d85}.resource-grade .grade-label{font-size:11px;font-weight:500}.resource-grade .grade-status{font-size:19px;line-height:1.5;font-weight:700}.resource-grade small{font-size:10px;color:inherit;opacity:.85}.resource-grade.grade-high{border-color:#cde7d9;background:#eff8f3;color:#287b52}.resource-grade.grade-medium{border-color:#d4e3f1;background:#eff5fc;color:#315f8c}.resource-grade.grade-low{border-color:#eadbbd;background:#fcf6e9;color:#936c2a}.resource-grade.grade-unknown{border-color:#e0e6ec;background:#f3f6f9;color:#687b8b}.resource-provenance{display:flex;flex-wrap:wrap;align-items:flex-start;gap:3px 12px;margin:8px 0 10px;padding:10px 13px;border:1px solid #c9ddec;border-left:4px solid #4d82ab;border-radius:9px;background:#f0f6fb;color:#315a78}.resource-provenance>div{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px}.resource-provenance .grade-label{font-size:10px;letter-spacing:.04em;color:#6b8296}.resource-provenance b{font-size:15px;line-height:1.45}.resource-provenance p{flex-basis:100%;font-size:10px;line-height:1.65;color:#60768a;margin:1px 0 0}.executive-verdict .grade-detail{font-size:11px;line-height:1.75;color:#627487;margin:4px 0 0}.grade-criteria{font-size:11px;line-height:1.75;color:#63778a;margin:5px 0 12px}.grade-criteria>summary{color:#456887;cursor:pointer}.grade-criteria>div{padding:7px 10px;border-left:2px solid #d9e4ed;margin-top:6px;background:#f7fafc}.executive-verdict>.grade-criteria+h2{margin-top:14px}.executive-panel,.module-panel{background:#fff;border:1px solid var(--line);border-radius:16px;padding:24px}.executive-top{display:flex;justify-content:space-between;gap:28px}.executive-verdict{flex:1;min-width:0}.executive-verdict h2{font-size:25px;line-height:1.5;margin:8px 0}.executive-verdict p,.executive-note,.executive-timing small{color:var(--muted);font-size:12px}.executive-score{flex:0 0 175px;text-align:right}.executive-score strong{font-size:48px;color:var(--green);line-height:1.2}.executive-score small{color:var(--muted);font-size:11px}.executive-timing{display:grid;grid-template-columns:1fr 2fr 1.5fr;gap:16px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:14px 0;margin:20px 0}.executive-timing span,.executive-timing small,.executive-timing strong{display:block}.executive-latency{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:16px}.executive-latency b{color:var(--ink)}.executive-timing span{font-size:11px;color:var(--muted)}.executive-timing strong{font-size:22px}.executive-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.brief-item{border:1px solid var(--line);border-radius:10px;padding:14px;background:#f8fafc;min-width:0}.brief-item.failed{border-top:3px solid var(--red)}.brief-item-head{display:flex;justify-content:space-between;gap:8px}.brief-item h3{font-size:14px}.brief-item p{font-size:12px;margin-top:9px;overflow-wrap:anywhere}.brief-links{display:flex;gap:10px;margin-top:10px;font-size:11px}.executive-note{margin-top:16px}.module-panel{margin-top:20px}.module-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:18px}.module-card{border:1px solid var(--line);border-radius:10px;padding:15px}.module-card h3{font-size:15px}.module-weight,.module-desc,.module-meta{font-size:11px;color:var(--muted)}.module-score strong{font-size:28px}.module-score small{font-size:11px;color:var(--muted)}.module-bar{height:5px;background:#e8edf3;border-radius:5px;margin:10px 0;overflow:hidden}.module-bar i{display:block;height:100%;background:var(--green)}.module-card.failed .module-bar i{background:var(--red)}.module-meta{display:flex;justify-content:space-between}.all-results{margin-top:28px}.results-table{width:100%;border-collapse:collapse;background:#fff;font-size:12px}.results-table th,.results-table td{padding:12px;vertical-align:top;text-align:left;border-bottom:1px solid var(--line);overflow-wrap:anywhere}.results-table small,.result-number,.result-name{display:block}.result-number,.all-results-note{font-size:11px;color:var(--muted)}.result-observation+.result-observation{margin-top:10px}.results-scroll{overflow-x:auto}@media(max-width:800px){.executive-grid,.module-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.executive-timing{grid-template-columns:1fr 1fr}}@media(max-width:520px){.executive-top{display:block}.executive-score{text-align:left;margin-top:18px}.executive-grid,.module-grid,.executive-timing{grid-template-columns:1fr}.executive-panel,.module-panel{padding:18px}}`;
   const portableRulesCss='.verdict-rules{margin-top:16px;padding:16px 18px;background:#f8fbff;border:1px solid #cfe0f0;border-radius:12px}.verdict-rules-head h3{margin:2px 0 3px;color:#244e74;font-size:15px}.verdict-rules-head p,.verdict-rules-formula{margin:0;color:#5d6b7b;font-size:12px}.verdict-rules-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin-top:12px}.verdict-rules-grid>div{display:flex;flex-direction:column;gap:4px;padding:10px 11px;background:#fff;border:1px solid #dfeaf3;border-radius:9px;font-size:11px;color:#556575;line-height:1.55}.verdict-rules-grid b{font-size:12px}.rule-pass{color:#1a8a4a}.rule-fail{color:#c62828}.rule-pending{color:#a56506}.rule-skip{color:#68717d}.verdict-rules-formula{margin-top:11px;padding-top:10px;border-top:1px dashed #cfe0f0}@media(max-width:900px){.verdict-rules-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:700px){.verdict-rules-grid{grid-template-columns:1fr}}';
-  function themeCss(){return (css+portableSummaryCss+portableRulesCss+(typeof window.WORKBENCH_REPORT_THEME==='string'?'\n'+window.WORKBENCH_REPORT_THEME:'')).replace(/<\/style/gi,'<\\/style');}
+  function themeCss(){return (css+portableSummaryCss+portableRulesCss+portableProvenanceCss+(typeof window.WORKBENCH_REPORT_THEME==='string'?'\n'+window.WORKBENCH_REPORT_THEME:'')).replace(/<\/style/gi,'<\\/style');}
   async function render(records, logs) {
     if(window.WORKBENCH_REPORT_THEME_READY)await Promise.resolve(window.WORKBENCH_REPORT_THEME_READY).catch(()=>{});
     records=scrub(list(records));logs=scrub(list(logs));
@@ -370,7 +526,8 @@
     const gradeCriteria=`90–100 分为优质资源，70–89 分为中等资源，低于 70 分为低等级资源。${grade.reasons.length?'暂定评级依据：'+grade.reasons.join('；')+'。':'当前已满足本报告的评级证据门槛。'}${grade.batch?'多模型汇总评级仅供参考，不能代表单个模型。':''}`;
     const gradeHtml=`<div class="resource-grade grade-${grade.level}"><span class="grade-label">本轮资源评级</span><b class="grade-status">${grade.label}</b>${grade.provisional?'<small>暂定 · 证据待完善</small>':''}</div><p class="grade-note grade-detail">${esc(gradeNote)}</p><details class="grade-criteria"><summary>查看评级标准与适用范围</summary><div>${esc(gradeCriteria)}</div></details>`;
     const provenance=resourceSource(records);
-    const sourceHtml=`<div class="resource-provenance"><div><span class="grade-label">资源来源判定</span><b>${esc(provenance.label)}</b></div><p>${esc(provenance.note)}</p></div>`;
+    const sourceDetails=[['本轮依据',provenance.evidence],['仍需补充',provenance.missing_evidence]].filter(([,values])=>values?.length).map(([heading,values])=>`<div><strong>${esc(heading)}</strong><ul>${values.map(value=>`<li>${esc(value)}</li>`).join('')}</ul></div>`).join('');
+    const sourceHtml=`<div class="resource-provenance" data-source="${['official_relay','reverse'].includes(provenance.classification)?provenance.classification:'unknown'}"><div><span class="grade-label">资源来源判定</span><b>${esc(provenance.label)}</b></div><p>${esc(provenance.note)}</p>${provenance.operator_label?`<p class="source-claim">${esc(provenance.operator_label)}</p>`:''}${sourceDetails?`<details class="source-details"><summary>查看判定依据与证据缺口</summary>${sourceDetails}</details>`:''}</div>`;
     const briefMetric=item=>{const value=item.percent!==null&&item.percent!==undefined?item.percent:item.rate!==null&&item.rate!==undefined?item.rate:null;if(value===null)return '';const label=item.percent!==null&&item.percent!==undefined?'缓存复用率':'已判定通过率';return `<span class="brief-metric">${label} <b>${esc(compactNumber(value))}%</b></span>`;};
     const executiveHtml=`<div class="executive-panel"><div class="executive-top"><div class="executive-verdict"><span class="index">VERDICT / 本轮结论</span>${sourceHtml}${gradeHtml}<h2>${esc(brief.headline)}</h2><p>${esc(brief.detail)}</p></div><div class="executive-score"><span>综合验收分</span><div><strong>${score===null?'—':score}</strong><small> / 100</small></div><p>证据可判定率 <b>${brief.resolution===null?'未记录':brief.resolution+'%'}</b></p><small>按验收模块权重汇总</small></div></div><div class="executive-timing"><div><span>${timingInfo.source==='完整测试时间'?'测试总耗时':timingInfo.start===null?'测试耗时':'请求观测时段'}</span><strong>${esc(timingInfo.label)}</strong><small>${esc(timingInfo.source)}</small></div><div><span>测试时间</span><p>${timingInfo.start===null?'未记录':esc(stamp(timingInfo.start))+' → '+esc(stamp(timingInfo.end))}</p><small>实际经过时间；并发请求耗时不累加。</small></div><div class="executive-latency"><span>单请求 P50 <b>${esc(durationLabel(timingInfo.p50))}</b></span><span>单请求 P95 <b>${esc(durationLabel(timingInfo.p95))}</b></span><span>已保存耗时 <b>${timingInfo.request_count}/${requests.length} 个请求</b></span></div></div><div class="executive-grid">${brief.items.map(item=>`<article class="brief-item ${item.display_tone}" data-status="${item.status}"><div class="brief-item-head"><h3>${esc(item.label)}</h3>${badge(item.status,item.display_label,item.display_tone)}</div>${briefMetric(item)}<p>${esc(item.text)}</p>${item.check_ids.length?`<div class="brief-links">${[...new Set(item.check_ids)].slice(0,3).map((id,i)=>`<a href="#${id}">证据 ${i+1} ↗</a>`).join('')}</div>`:''}</article>`).join('')}</div><p class="executive-note">分数反映本轮已判定检查的通过表现；证据覆盖和异常项需同时看。缓存命中率单独按实际 Token 统计，不等于缓存模块得分。</p>${verdictRulesHtml}</div>`;
     const navItems=[['score','能力评分','综合分与覆盖率'],['overview','结论总览','本轮结论与资源评级'],['modules','验收模块','模块权重与得分'],['scope','测试范围','本次测试测了什么'],['findings','问题与建议','异常、影响和处理'],['checks','逐项验收','每项预期与实际'],['requests','请求证据','请求、响应与链路']];

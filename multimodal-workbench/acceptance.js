@@ -239,7 +239,7 @@ function restoreConfiguration(job){
   if(Number.isFinite(value)&&value>=min&&value<=max&&(field==='timeout'||Number.isInteger(value))){el(id).value=String(value);restored[field]=value;}
  }
  if(['anthropic','bearer'].includes(saved.auth))el('acceptanceAuth').value=saved.auth;
- if(['unknown','official','official_relay','reverse'].includes(saved.resource_source))el('acceptanceResourceSource').value=saved.resource_source;
+ if(['unknown','official','official_relay','reverse'].includes(saved.resource_source))el('acceptanceResourceSource').value=saved.resource_source==='official'?'official_relay':saved.resource_source;
  if(job.suite==='claude'){
   if(['auto','anthropic','aws'].includes(saved.provider))el('claudeProvider').value=saved.provider;
   if(['anthropic','openai'].includes(saved.request_format))el('claudeFormat').value=saved.request_format;

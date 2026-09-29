@@ -477,7 +477,7 @@ def _claude_observation_sections(original, samples, result):
         identity_samples = [sample for sample in samples if sample.get("id") == "baseline" or sample.get("suite_probe") == "baseline" or sample.get("probe") == "baseline" or sample.get("id") in relevant_ids or any(
             _dict(assessment).get("check") == original.get("id") for assessment in _list(sample.get("assessments")))]
         provider = _dict(result.get("configuration")).get("provider")
-        provider_name = {"auto": "未指定 / 自动观察", "anthropic": "Anthropic 官方", "aws": "AWS Bedrock"}.get(provider, _text(provider) or "未记录")
+        provider_name = {"auto": "未指定 / 自动观察", "anthropic": "Anthropic API", "aws": "AWS Bedrock"}.get(provider, _text(provider) or "未记录")
         lines = ["上游来源声明：%s（由操作者填写，未经来源认证）。" % provider_name]
         for sample in identity_samples:
             identity = _text(sample.get("id")); evidence_ids.append(identity)
