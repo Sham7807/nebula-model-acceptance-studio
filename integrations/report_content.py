@@ -1005,7 +1005,7 @@ def _score_stats(checks, known_samples=None):
     score = round(passed / len(scored) * 100) if scored else None
     capability = [c for c in checks if not _observation_only(c) and c.get('evidence_category') not in ('control','aggregate')]
     status = ("not_covered" if not present else "failed" if any(c.get("status") == "failed" for c in scored)
-              else "inconclusive" if not scored or any(c.get('status') in ('inconclusive','not_covered','cancelled','skipped') for c in capability) else "passed")
+              else "inconclusive" if not scored or any(c.get('status') in ('inconclusive','not_covered','cancelled','skipped') or (c.get('status') in ('passed', 'failed') and (c.get('score_applicable') is False or _dict(c.get('metadata')).get('score_applicable') is False)) for c in capability) else "passed")
     return {"score": score, "max_score": 100, "status": status, "covered": len(present),
             "capability_observed":len(observed), "observation_count":len(ancillary), "scored_passed":passed, "scored_failed":len(scored)-passed,
             "conclusive": len(scored), "counts": counts, "resolution_percent": round(len(scored) / len(observed) * 100) if observed else None,
@@ -1083,6 +1083,20 @@ REASON_LABELS = {"authentication": "鉴权或权限阻断", "rate_limit": "限�
 
 
 REASON_CODE_LABELS = {
+    'protocol_not_applicable':'当前原生协议不定义此能力，未发送请求',
+    'model_parameter_incompatible':'当前模型不支持此参数组合',
+    'unsupported_capability':'当前协议或模型未覆盖此可选能力',
+    'safe_refusal':'拒绝执行不可信指令，未观察到泄露',
+    'injection_resisted':'拒绝越权要求，未观察到泄露或覆盖',
+    'control_behavior_mismatch':'正对照回执有偏差，未建立判定前提',
+    'instruction_behavior_variation':'回答形式变化，未观察到明确注入成功',
+    'duplicate_response_ids':'独立请求复用了响应 ID',
+    'upstream_stream_error':'上游通过合法 SSE 错误帧中止生成',
+    'upstream_error':'上游服务错误或过载',
+    'rate_limit':'请求受到限流',
+    'request_rejected':'请求被拒绝，需查看原始错误',
+    'tool_not_selected':'自动工具模式本轮未选择工具',
+    'response_format_variation':'内容语义一致，仅存在展示格式差异',
     'upstream_prompt_observation':'上游加词线索观察，不作能力判定',
     'assertion_passed':'本轮断言通过', 'assertion_failed':'实测不符合断言', 'transport_error':'传输未正常完成',
     'authentication_error':'鉴权或权限阻断', 'http_error':'HTTP 错误，需结合状态与正文定位', 'rate_limited':'限流或额度阻断',
@@ -1111,11 +1125,25 @@ def _explain_check(check):
         check['reason_label'] = REASON_CODE_LABELS.get(reason_code, reason_code)
     if check.get('reason_codes'):
         check['reason_labels'] = [REASON_CODE_LABELS.get(code,code) for code in check['reason_codes']]
+    # A grouped check may contain both 429 and a genuine schema/token failure.
+    # The failed assertion wins; incidental error text must not hide it.
+    from acceptance_results import BLOCKED_REASONS, BLOCKED_CATEGORIES
+    failures = [row for row in _list(check.get('evidence_rows')) if _dict(row).get('status') == 'failed']
+    assertion_failure = status == 'failed' and (
+        reason_code in ('assertion_failed', 'duplicate_response_ids')
+        or 'assertion_failed' in _list(check.get('reason_codes'))
+        or any(row.get('reason_code') == 'assertion_failed' or (
+            row.get('reason_code') not in BLOCKED_REASONS
+            and isinstance(row.get('http_status'), int) and 200 <= row['http_status'] < 300
+            and row.get('termination') == 'eof') for row in failures))
+    if assertion_failure and category not in ('observation', 'control', 'aggregate'):
+        category = 'capability_failure'
     if category == 'infrastructure' and reason_code in ('authentication_error','rate_limited'):
         category = {'authentication_error':'authentication','rate_limited':'rate_limit'}[reason_code]
     if not category and reason_code:
         category = {'assertion_passed':'passed','assertion_failed':'capability_failure','transport_error':'infrastructure','authentication_error':'authentication',
                     'rate_limited':'rate_limit','unsupported_parameter':'unsupported','unsupported_format':'not_applicable',
+                    'protocol_not_applicable':'not_applicable','model_parameter_incompatible':'unsupported','unsupported_capability':'unsupported',
                     'evidence_missing':'insufficient_evidence','usage_missing':'insufficient_evidence','cap_not_exercised':'insufficient_evidence',
                     'budget_exhausted':'not_covered' if status in ('not_covered','cancelled') else 'insufficient_evidence','prerequisite_failed':'insufficient_evidence',
                     'auto_no_tool_selected':'not_covered','cache_not_observed':'insufficient_evidence','cache_context_too_small':'insufficient_evidence','cache_scale_not_reached':'insufficient_evidence','cancelled':'not_covered'}.get(reason_code)
@@ -1124,16 +1152,21 @@ def _explain_check(check):
         elif check.get("applicable") is False or status == "skipped": category = "not_applicable"
         elif status == "not_covered": category = "not_covered"
         elif status == "passed": category = "passed"
-        elif re.search(r"(?:HTTP[\s=:]*)?\b(401|403)\b|authentication_error|unauthorized|invalid.api.key", text, re.I): category = "authentication"
-        elif re.search(r"(?:HTTP[\s=:]*)?\b429\b|rate.limit|quota.exceeded|限流|额度不足", text, re.I): category = "rate_limit"
+        elif re.search(r"\bHTTP(?:\s+status)?[\s=:]*\b(401|403)\b|authentication_error|unauthorized|invalid.api.key", text, re.I): category = "authentication"
+        elif re.search(r"\bHTTP(?:\s+status)?[\s=:]*\b429\b|rate.limit|quota.exceeded|限流|额度不足", text, re.I): category = "rate_limit"
         elif re.search(r"timeout|timed.out|network_error|connection.error|超时|网络中断", text, re.I): category = "timeout"
-        elif re.search(r"\b(?:500|502|503|504)\b|DNS|TLS|SSL", text, re.I): category = "infrastructure"
+        elif re.search(r"\bHTTP(?:\s+status)?[\s=:]*\b(?:500|502|503|504|529)\b|overloaded_error|DNS|TLS|SSL", text, re.I): category = "infrastructure"
         elif re.search(r"unsupported|not.supported|不支持", text, re.I): category = "unsupported"
         elif status == "failed": category = "capability_failure"
         else: category = "insufficient_evidence"
     if status == 'passed' and check.get('score_applicable') is False and category == 'passed': category = 'control'
     check["evidence_category"] = category
     check["evidence_category_label"] = REASON_LABELS[category]
+    # A historical raw "failed" request may represent a measurement blocked
+    # by 429/529, transport or missing evidence. Retain the raw assertion but
+    # do not convert it into a capability score deduction.
+    if not assertion_failure and (category in BLOCKED_CATEGORIES or reason_code in BLOCKED_REASONS):
+        check['score_applicable'] = False
     advice = {"authentication": "检查当前请求格式对应的鉴权头、API Key 权限与模型授权；修复后重复原参数。",
               "rate_limit": "降低并发，检查配额及 Retry-After；保留本轮限流次数，在配额恢复后复测。",
               "timeout": "按请求 ID 核对连接、首字节与读超时；修复网络或调整合理时限后复测，勿把超时当能力不支持。",
@@ -1163,6 +1196,15 @@ def build_report_data(result):
     """Describe stored results without changing status or making new requests."""
     from report_brief import build_summary
     data = _build_report_data(result)
+    if result.get('suite') in ('claude', 'claude_acceptance'):
+        version = _dict(result.get('configuration')).get('test_contract_version')
+        data['test_contract'] = {
+            'version': version,
+            'legacy': not version,
+            'label': 'Claude 官方接口约定 · 2026-09-29' if version == 'claude-2026-09-29' else '测试规则：' + str(version) if version else '旧版测试记录 · 建议按新规则重测',
+            'detail': ('按模型版本选择参数；合法零输出、参数适用范围、限流和能力断言分别判读。规则依据来自官方文档，本报告不是 Anthropic 官方认证。'
+                       if version else '本轮使用旧版请求与断言，可能包含已修复的参数组合或严格字符串误判。重新导出只更新展示，不会重跑请求；请使用新版 Claude 专项重新测试后比较。'),
+        }
     data['executive_summary'] = build_summary(_dict(result), data['checks'], data['score'])
     from channel_admission import evaluate
     if result.get('suite')=='batch_acceptance':

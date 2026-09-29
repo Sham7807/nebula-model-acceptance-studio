@@ -49,7 +49,7 @@ class ProductionTests(unittest.TestCase):
         all_text = json.dumps(body["messages"])
         if body.get("tools"):
             has_results = '"tool_result"' in all_text or any(m["role"] == "tool" for m in body["messages"])
-            final = body.get("tool_choice") == "none" or body.get("tool_choice") == {"type": "auto"}
+            final = body.get("tool_choice") == "none" or body.get("tool_choice") == {"type": "none"}
             if final: return reply(body, text="27283641", fmt=fmt)
             expression = "27271296 + 12345" if has_results else "3456 * 7891"
             response = reply(body, tools=[{"id": "calc-second" if has_results else "calc-first", "name": "Calculator", "input": {"expr": expression}}], fmt=fmt)
@@ -67,7 +67,7 @@ class ProductionTests(unittest.TestCase):
             return reply(body, text=text, fmt=fmt)
         if isinstance(prompt, str) and "HEAD_MARKER=" in prompt:
             return reply(body, text=" ".join(re.findall(r"(?:HEAD|MIDDLE|TAIL)_MARKER=([A-Z0-9-]+)", prompt)), fmt=fmt)
-        if body.get("thinking") or body.get("reasoning_effort"): return reply(body, text="27283641", fmt=fmt)
+        if body.get("thinking", {}).get("type") in ("adaptive", "enabled") or body.get("reasoning_effort"): return reply(body, text="27283641", fmt=fmt)
         if isinstance(prompt, list): return reply(body, text="3", fmt=fmt)
         return reply(body, text="custom-ok", fmt=fmt)
 
@@ -341,6 +341,160 @@ class ProductionTests(unittest.TestCase):
         starts = [e for e in events if e["type"] == "request_start"]
         self.assertEqual(len(starts), result["metrics"]["attempted_requests"])
         self.assertEqual(len({e["sample_id"] for e in starts}), len(starts))
+
+    def test_builtin_numeric_answers_allow_presentation_without_hiding_wrong_answers(self):
+        expected = {"numeric_answer": "27283641"}
+        for text in ("27,283,641", "**27,283,641**", "```text\n27283641\n```", "`27283641`"):
+            with self.subTest(text=text): self.assertTrue(p._text_check(text, expected)[0])
+        for text in ("27,283,642", "2,7283,641", "27283641 or 27283642", "The answer is 0, not 27283641"):
+            with self.subTest(text=text): self.assertFalse(p._text_check(text, expected)[0])
+        self.assertFalse(p._text_check("**ok**", {"exact_text": "ok"})[0])
+
+    def test_formatted_unique_marker_keeps_baseline_and_other_markers_do_not_pass(self):
+        def handler(request):
+            response = self.handler(request)
+            if response.status_code != 200: return response
+            body = json.loads(request.content)
+            marker = body["messages"][-1]["content"].split("\n", 1)[1]
+            return reply(body, text="```\n" + marker + "\n```")
+        result = self.run_fixture(self.config(max_requests=3), handler)
+        self.assertEqual(result["metrics"]["business_success_rate"], 1)
+        self.assertFalse(result["samples"][0]["evidence"]["exact_output_format"])
+        self.assertFalse(p._text_check("PRODUCTION-EXPECTED PRODUCTION-OTHER", {"unique_marker": "PRODUCTION-EXPECTED"})[0])
+
+    def test_known_thinking_profiles_and_regular_output_budget(self):
+        for model, mode in (("claude-sonnet-4-5", "enabled"), ("claude-opus-4-6", "adaptive"), ("claude-opus-4-7", "adaptive")):
+            config = self.config(workloads=["thinking", "long_context", "vision"], output_tokens=3072)
+            config["model"] = model
+            plan = p.build_plan(config)
+            bodies = {row["id"]: row["example"]["body"] for row in plan["workloads"]}
+            self.assertEqual(bodies["thinking"]["thinking"]["type"], mode)
+            self.assertEqual(bodies["long_context"]["max_tokens"], 3072)
+            self.assertEqual(bodies["vision"]["max_tokens"], 3072)
+            if mode == "enabled": self.assertLess(bodies["thinking"]["thinking"]["budget_tokens"], bodies["thinking"]["max_tokens"])
+
+    def test_auto_tool_flow_accepts_equivalent_reviewed_expression_and_preserves_history(self):
+        calls = []
+        def handler(request):
+            body = json.loads(request.content); calls.append(body)
+            response = self.handler(request)
+            if response.status_code != 200 or not body.get("tools"): return response
+            payload = json.loads(response.content)
+            for block in payload.get("content", []):
+                if block.get("type") == "tool_use":
+                    block["input"]["expr"] = "(7891 * 3456)" if block["id"] == "calc-first" else "12345 + 27271296"
+            return httpx.Response(200, json=payload)
+        result = self.run_fixture(self.config(workloads=["tools"], max_requests=5), handler)
+        self.assertEqual(result["metrics"]["business_success_rate"], 1)
+        tools = [body for body in calls if body.get("tools")]
+        self.assertEqual([body["tool_choice"] for body in tools], [{"type": "auto"}, {"type": "auto"}, {"type": "none"}])
+        self.assertIn("preserve-exact-signature", json.dumps(tools[-1]["messages"]))
+
+    def test_auto_no_tool_is_unverified_not_unsupported(self):
+        def handler(request):
+            body = json.loads(request.content)
+            return reply(body, text="27271296") if body.get("tools") else self.handler(request)
+        result = self.run_fixture(self.config(workloads=["tools"], max_requests=3), handler)
+        self.assertEqual(result["samples"][-1]["status"], "inconclusive")
+        self.assertEqual(result["samples"][-1]["evidence"]["failure_category"], "auto_no_tool_selected")
+        self.assertEqual(next(c for c in result["cases"] if c["id"] == "production-workload-tools")["status"], "inconclusive")
+        self.assertEqual(result["metrics"]["business_successful"], 0)
+
+    def test_infrastructure_errors_do_not_become_capability_assertion_failures(self):
+        for status in (429, 500, 529):
+            count = 0
+            def handler(request):
+                nonlocal count
+                count += 1
+                return self.handler(request) if count <= 2 else httpx.Response(status, json={"type": "error", "error": {"type": "overloaded_error", "message": "service unavailable"}})
+            result = self.run_fixture(self.config(max_requests=3, recovery_retries=0), handler)
+            with self.subTest(status=status):
+                self.assertEqual(result["samples"][-1]["status"], "inconclusive")
+                self.assertEqual(result["samples"][-1]["assessments"][0]["status"], "inconclusive")
+                self.assertEqual(result["metrics"]["business_successful"], 0)
+                self.assertEqual(result["metrics"]["http_status_counts"][str(status)], 1)
+                self.assertEqual(next(c for c in result["cases"] if c["id"] == "production-workload-short")["status"], "inconclusive")
+
+    def test_budget_exhaustion_and_refusal_keep_unsuccessful_metrics_without_capability_failure(self):
+        for reason in ("max_tokens", "refusal"):
+            def handler(request):
+                body = json.loads(request.content)
+                if "HEAD_MARKER=" not in json.dumps(body): return self.handler(request)
+                payload = json.loads(reply(body, text="Partial answer").content)
+                payload["stop_reason"] = reason
+                payload["usage"]["output_tokens_details"] = {"thinking_tokens": 128}
+                return httpx.Response(200, json=payload)
+            result = self.run_fixture(self.config(workloads=["long_context"], max_requests=3), handler)
+            with self.subTest(reason=reason):
+                self.assertEqual(result["samples"][-1]["status"], "inconclusive")
+                self.assertEqual(result["metrics"]["business_success_rate"], 0)
+                self.assertEqual(next(c for c in result["cases"] if c["id"] == "production-workload-long_context")["status"], "inconclusive")
+
+    def test_auth_negative_control_transient_error_is_not_accepted_key(self):
+        def handler(request):
+            if "production-invalid-" in request.headers.get("x-api-key", ""):
+                return httpx.Response(529, json={"error": {"type": "overloaded_error"}})
+            return self.handler(request)
+        result = self.run_fixture(self.config(), handler)
+        self.assertEqual(len(result["samples"]), 2)
+        self.assertEqual(next(c for c in result["cases"] if c["id"] == "production-authentication")["status"], "inconclusive")
+
+    def test_alias_thinking_compatibility_is_budgeted_and_separate_from_transient_recovery(self):
+        def handler(request):
+            body = json.loads(request.content)
+            if body.get("thinking", {}).get("type") == "adaptive":
+                return httpx.Response(400, json={"error": {"type": "invalid_request_error", "message": "adaptive thinking is not supported; use enabled"}})
+            return self.handler(request)
+        result = self.run_fixture(self.config(workloads=["thinking"], max_requests=4), handler)
+        self.assertEqual(len(result["samples"]), 4)
+        self.assertEqual(result["samples"][2]["status"], "inconclusive")
+        self.assertEqual(result["samples"][3]["request"]["body"]["thinking"], {"type": "enabled", "budget_tokens": 1024})
+        self.assertEqual(result["samples"][3]["attempt_kind"], "compatibility")
+        self.assertEqual(result["metrics"]["business_successful"], 1)
+        self.assertEqual(result["metrics"]["first_attempt_successful"], 0)
+        self.assertEqual(result["metrics"]["compatibility_attempts"], 1)
+        self.assertEqual(result["metrics"]["retry_attempts"], 0)
+        self.assertEqual(next(c for c in result["cases"] if c["id"] == "production-recovery")["status"], "not_covered")
+        capped = self.run_fixture(self.config(workloads=["thinking"], max_requests=3), handler)
+        self.assertEqual(len(capped["samples"]), 3)
+        self.assertEqual(capped["metrics"]["business_successful"], 0)
+
+    def test_known_adaptive_model_is_not_sent_invalid_manual_fallback(self):
+        config = self.config(workloads=["thinking"], max_requests=4)
+        config["model"] = "claude-opus-4-7"
+        def handler(request):
+            body = json.loads(request.content)
+            if body.get("thinking", {}).get("type") == "adaptive":
+                return httpx.Response(400, json={"error": {"message": "adaptive thinking is not supported"}})
+            return self.handler(request)
+        result = self.run_fixture(config, handler)
+        self.assertEqual(result["metrics"]["compatibility_attempts"], 0)
+        self.assertFalse(any(s["request"]["body"].get("thinking", {}).get("type") == "enabled" for s in result["samples"]))
+
+    def test_wrong_math_and_broken_success_response_still_fail(self):
+        for malformed in (False, True):
+            def handler(request):
+                body = json.loads(request.content)
+                if not body.get("thinking"): return self.handler(request)
+                return httpx.Response(200, json={"not_a_message": True}) if malformed else reply(body, text="27283642")
+            result = self.run_fixture(self.config(workloads=["thinking"], max_requests=3), handler)
+            self.assertEqual(result["samples"][-1]["status"], "failed")
+            self.assertEqual(next(c for c in result["cases"] if c["id"] == "production-workload-thinking")["status"], "failed")
+
+    def test_overload_sse_before_content_can_recover_without_faking_success(self):
+        count = 0
+        def handler(request):
+            nonlocal count
+            count += 1
+            if count == 3:
+                return httpx.Response(200, content=b'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n')
+            return self.handler(request)
+        result = self.run_fixture(self.config(workloads=["stream"], max_requests=4), handler)
+        self.assertEqual(result["samples"][2]["status"], "inconclusive")
+        self.assertEqual(result["samples"][2]["evidence"]["failure_category"], "upstream_stream_error")
+        self.assertEqual(result["metrics"]["retry_attempts"], 1)
+        self.assertEqual(result["metrics"]["business_successful"], 1)
+        self.assertEqual(result["metrics"]["first_attempt_successful"], 0)
 
 
 if __name__ == "__main__": unittest.main()

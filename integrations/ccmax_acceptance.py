@@ -428,25 +428,30 @@ class SSEAnalysis:
 
 
 def _interrupt_stream(stream):
-    # shutdown wakes a thread blocked in recv; close alone does not on all OSes.
+    # Wake the owner thread without invalidating its descriptor. On macOS,
+    # shutdown followed immediately by close can remove the descriptor from
+    # the pending select/poll before it sees EOF, leaving recv blocked until
+    # its old timeout. The request owner's finally/context closes the stream.
     try:
         sock = stream.get_extra_info("socket") if stream is not None else None
         if sock is not None:
             try:
                 sock.shutdown(socket.SHUT_RDWR)
+                return True
             except OSError:
                 pass
         if stream is not None:
             stream.close()
     except Exception:
         pass
+    return False
 
 
-def _interrupt_response(response):
+def _interrupt_response(response, fallback_stream=None):
     try:
         # network_stream is an httpx response extension provided by httpcore.
-        _interrupt_stream(response.extensions.get("network_stream"))
-        response.close()
+        if not _interrupt_stream(response.extensions.get("network_stream") or fallback_stream):
+            response.close()
     except Exception:
         pass
 
@@ -548,10 +553,9 @@ def _collect_sample(spec, settings, key, transport, cancelled):
                 response = state["response"]
                 if response is not None:
                     # Some transports omit response.extensions.network_stream.
-                    # Shut down the trace-captured socket before response.close,
-                    # which can otherwise wait behind the blocked response read.
-                    _interrupt_stream(state["network_stream"])
-                    _interrupt_response(response)
+                    # A trace-captured socket still lets its reader wake and
+                    # perform response.close() on the owning thread.
+                    _interrupt_response(response, state["network_stream"])
                 else:
                     _interrupt_stream(state["network_stream"])
                 return

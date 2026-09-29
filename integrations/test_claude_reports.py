@@ -28,6 +28,61 @@ def report(cases=None, **changes):
 
 
 class ClaudeReportTests(unittest.TestCase):
+    def test_contract_version_is_visible_and_old_results_are_not_retested(self):
+        value = report(); before = deepcopy(value)
+        data = build_report_data(value)
+        self.assertTrue(data['test_contract']['legacy'])
+        self.assertIn('旧版测试记录', render_report(value).decode())
+        self.assertEqual(value, before)
+        value['configuration']['test_contract_version'] = 'claude-2026-09-29'
+        data = build_report_data(value)
+        self.assertFalse(data['test_contract']['legacy'])
+        html = render_report(value).decode()
+        self.assertIn('Claude 官方接口约定 · 2026-09-29', html)
+        self.assertNotIn('旧版测试记录', html)
+
+    def test_overloaded_and_rate_limited_are_not_zero_capability_scores(self):
+        value = report([
+            {'id':'tools', 'status':'passed', 'dimensions':['tools']},
+            {'id':'tools-overload', 'status':'failed', 'dimensions':['tools'], 'observed':'HTTP 529 overloaded_error'},
+            {'id':'tools-limit', 'status':'failed', 'dimensions':['tools'], 'observed':'HTTP 429 rate_limit_error'},
+        ])
+        data = build_report_data(value)
+        tools = next(d for d in data['score']['dimensions'] if d['id'] == 'tools')
+        self.assertEqual(tools['score'],100)
+        self.assertEqual(tools['scored_failed'],0)
+        self.assertEqual(tools['status'],'inconclusive')
+        self.assertEqual(tools['resolution_percent'],33)
+        self.assertEqual(value['cases'][1]['status'],'failed')
+
+    def test_token_count_529_is_not_an_http_error(self):
+        data = build_report_data(report([
+            {'id':'cap-ok','status':'passed','dimensions':['max_tokens']},
+            {'id':'cap-bad','status':'failed','dimensions':['max_tokens'],
+             'observed':'请求 max_tokens=512，实际输出529，end_turn，超过上限'},
+        ]))
+        caps = next(d for d in data['score']['dimensions'] if d['id'] == 'max_tokens')
+        self.assertEqual(caps['score'],50)
+        self.assertEqual(caps['scored_failed'],1)
+
+    def test_mixed_rate_limit_does_not_hide_true_assertion_failure(self):
+        value = report([{'id':'tools','status':'failed','dimensions':['tools'],
+                         'observed':'HTTP 429；另一请求工具 Schema 不符',
+                         'reason_codes':['rate_limited','assertion_failed']}])
+        data = build_report_data(value)
+        tools = next(d for d in data['score']['dimensions'] if d['id'] == 'tools')
+        self.assertEqual(tools['score'],0)
+        self.assertEqual(tools['scored_failed'],1)
+
+    def test_metadata_unscored_failure_remains_pending(self):
+        value = report([{'id':'tool-ok','status':'passed','dimensions':['tools']},
+                        {'id':'tool-pending','status':'failed','dimensions':['tools'],
+                         'metadata':{'score_applicable':False}}])
+        data = build_report_data(value)
+        tools = next(d for d in data['score']['dimensions'] if d['id'] == 'tools')
+        self.assertEqual(tools['score'],100)
+        self.assertEqual(tools['status'],'inconclusive')
+
     def test_claude_cases_preserve_exact_methods_and_dont_invent_missing_probes(self):
         value = report(); before = deepcopy(value)
         result = build_report_data(value)

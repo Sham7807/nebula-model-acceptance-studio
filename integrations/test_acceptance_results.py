@@ -117,5 +117,48 @@ class VerdictTests(unittest.TestCase):
         self.assertIs(decorate(value), value)
         self.assertEqual({k: v for k, v in value.items() if k != 'verdict'}, old)
 
+    def test_blocked_measurement_does_not_count_as_capability_failure(self):
+        for code, category in [('rate_limited', 'infrastructure'), ('http_error', 'infrastructure'),
+                               ('budget_exhausted', None), ('model_parameter_incompatible', None)]:
+            blocked = dict(entry('failed', 'blocked'), reason_code=code, evidence_category=category)
+            value = result([entry(), blocked]); before = copy.deepcopy(value)
+            verdict = decorate(value)['verdict']
+            self.assertEqual(verdict['status'], 'inconclusive')
+            self.assertEqual(verdict['counts']['failed'], 0)
+            self.assertEqual(verdict['counts']['inconclusive'], 1)
+            self.assertEqual(value['cases'], before['cases'])
+
+    def test_aggregate_stress_rows_do_not_duplicate_independent_failures(self):
+        value = result([entry('failed', 'load-1'), dict(entry('failed', 'stage-1'), evidence_category='aggregate'),
+                        dict(entry('passed', 'positive-control'), evidence_category='control')])
+        verdict = self.verdict(value)
+        self.assertEqual(verdict['counts']['failed'], 1)
+        self.assertEqual(verdict['counts']['passed'], 0)
+        self.assertEqual(verdict['ancillary'], 2)
+
+    def test_mixed_blocked_and_true_failure_keeps_failure(self):
+        row = dict(entry('failed'), reason_code='rate_limited',
+                   reason_codes=['rate_limited','assertion_failed'])
+        self.assertEqual(self.verdict(result([row]))['status'], 'failed')
+
+    def test_legacy_aggregate_only_duplicate_id_finding_is_preserved(self):
+        value = result([entry(), dict(entry('failed', 'stage-1'), evidence_category='aggregate',
+                                     metrics={'duplicate_response_ids':['duplicated-id']})])
+        self.assertEqual(self.verdict(value)['status'], 'failed')
+
+    def test_not_applicable_cells_are_handled_without_false_unfinished_count(self):
+        value = result([entry()], native_summary={'total':1, 'completed':1}, matrix_validation={
+            'cases':[dict(entry('not_covered', 'native-video'), applicable=False, reason_code='protocol_not_applicable')],
+            'summary':{'total':1, 'completed':0}})
+        self.assertEqual(self.verdict(value)['status'], 'passed')
+        self.assertEqual(self.verdict(value)['untested'], 0)
+
+    def test_old_upstream_prompt_observations_cannot_fail_claude_capabilities(self):
+        value = result(suite='claude_acceptance', checks=[entry(), entry('failed', 'prompt_exfiltration')],
+                       summary={'total':2,'completed':2})
+        verdict = self.verdict(value)
+        self.assertEqual(verdict['status'], 'passed')
+        self.assertEqual(verdict['observational'], 1)
+
 
 if __name__ == '__main__': unittest.main()

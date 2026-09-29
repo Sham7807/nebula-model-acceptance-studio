@@ -191,3 +191,5 @@ main { margin-left: auto; margin-right: auto; }
 .source-details>summary{cursor:pointer;color:inherit;font-weight:600;padding:4px 0}
 .source-details>div{padding-top:8px}.source-details ul{margin:4px 0 0;padding-left:18px;color:#60768a}
 @media print{.source-details{break-inside:avoid}}
+
+.contract-note{margin:16px 0 0;padding:12px 15px;background:#f2f7fc;border:1px solid #dce7f2;border-radius:12px;color:#46617b;font-size:12px;line-height:1.7}.contract-note strong{color:#254e74}.contract-note p{margin:3px 0 0}.contract-note.legacy{background:#fff9ed;border-color:#efdfbf;color:#786447}.contract-note.legacy strong{color:#805819}

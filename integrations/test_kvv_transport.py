@@ -154,6 +154,18 @@ class RecorderTests(unittest.TestCase):
         self.assertTrue(self.last()['infrastructure_error']); self.assertIn('partial', self.last()['body'])
         self.assertEqual(rec.summary()['completed_requests'], 1); self.assertEqual(rec.summary()['active_requests'], 0)
 
+    def test_deadline_closes_response_on_reading_thread_without_context_manager(self):
+        self.install(timeout=.20)
+        with httpx.Client(trust_env=False) as client:
+            response = client.send(client.build_request('POST', self.base + '/chat/completions', json={'mode': 'stall', 'stream': True}), stream=True)
+            sock = response.extensions['network_stream'].get_extra_info('socket')
+            start = time.monotonic()
+            with self.assertRaises(httpx.ReadTimeout): list(response.iter_bytes())
+            self.assertLess(time.monotonic() - start, 1)
+            self.assertTrue(response.is_closed)
+            self.assertEqual(sock.fileno(), -1)
+        self.assertEqual(self.last()['termination'], 'total_timeout')
+
     def test_old_deadline_cannot_close_reused_connection(self):
         self.install(timeout=.30); Handler.ports.clear()
         with httpx.Client(trust_env=False) as client:
@@ -218,6 +230,7 @@ class RecorderTests(unittest.TestCase):
             self.assertNotEqual(usage['prompt_tokens'], 100, 'fixture has a concrete token-count mismatch')
             self.assertEqual(rec.summary()['completed_requests'], 0)
             rec.uninstall()
+            self.assertTrue(response.is_closed, 'paused SDK iterators must still release their response during cleanup')
         row = rec.summary()['requests'][0]
         self.assertEqual(row['http_status'], 200)
         self.assertEqual(row['termination'], 'recorder_closed')

@@ -51,17 +51,21 @@ def _origin(url):
 
 
 def _interrupt_stream(stream):
+    # Closing immediately after shutdown can race a blocked select/poll on
+    # macOS. Successful shutdown wakes the reader; its cleanup owns close.
     try:
         sock = stream.get_extra_info('socket') if stream is not None else None
         if sock is not None:
             try:
                 sock.shutdown(socket.SHUT_RDWR)
+                return True
             except OSError:
                 pass
         if stream is not None:
             stream.close()
     except Exception:
         pass
+    return False
 
 
 class _SSE:
@@ -185,6 +189,7 @@ class _Request:
         self.reason = None
         self.error = None
         self.finished = False
+        self.reading = False
         self.bytes = self.decoded_bytes = self.wire_requests = 0
         self.body, self.body_length = [], 0
         self.truncated = False
@@ -278,11 +283,11 @@ class _Request:
             # Keep completion/socket release serialized with shutdown. Otherwise a
             # near-deadline watchdog could close a socket already returned to its pool.
             if response is not None:
-                _interrupt_stream(response.extensions.get('network_stream') or stream)
-                try:
-                    response.close()
-                except Exception:
-                    pass
+                if not _interrupt_stream(response.extensions.get('network_stream') or stream) or not self.reading:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
             else:
                 _interrupt_stream(stream)
 
@@ -416,7 +421,19 @@ class _RecordingStream(httpx.SyncByteStream):
 
     def __iter__(self):
         try:
-            for data in self.stream:
+            iterator = iter(self.stream)
+            while True:
+                with self.record.lock:
+                    if self.record.reason == 'total_timeout':
+                        raise self.record.timeout_error()
+                    self.record.reading = True
+                try:
+                    data = next(iterator)
+                except StopIteration:
+                    break
+                finally:
+                    with self.record.lock:
+                        self.record.reading = False
                 if self.record.reason == 'total_timeout':
                     raise self.record.timeout_error()
                 self.record.receive(data)
@@ -426,6 +443,14 @@ class _RecordingStream(httpx.SyncByteStream):
             self.record.complete()
         except Exception as exc:
             self.record.complete('network_error', exc)
+            # Socket shutdown only wakes the reader. Finish descriptor release
+            # here on that reader, even if the caller used iter_bytes directly
+            # without a response context manager.
+            if self.record.response is not None:
+                try:
+                    self.record.response.close()
+                except Exception:
+                    pass
             if self.record.reason == 'total_timeout' and not isinstance(exc, httpx.ReadTimeout):
                 raise self.record.timeout_error() from exc
             raise

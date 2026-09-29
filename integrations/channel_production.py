@@ -8,9 +8,11 @@ accuracy.  The injectable transport and clock are only for isolated tests.
 from __future__ import annotations
 
 import copy
+import ast
 import hashlib
 import json
 import math
+import re
 import secrets
 import threading
 import time
@@ -20,19 +22,21 @@ from email.utils import parsedate_to_datetime
 
 try:
     from . import ccmax_acceptance as core, claude_acceptance as claude, acceptance_matrix as matrix
+    from .claude_profile import native_thinking_options, native_plain_options, model_capabilities
 except ImportError:
     import ccmax_acceptance as core
     import claude_acceptance as claude
     import acceptance_matrix as matrix
+    from claude_profile import native_thinking_options, native_plain_options, model_capabilities
 
 WORKLOADS = {
-    "short": ("短业务请求", 1, "精确返回本任务唯一标记；检查串响应、空答与格式。"),
+    "short": ("短业务请求", 1, "返回本任务唯一标记；核对串响应和空答，格式修饰单独记录。"),
     "long_output": ("长输出交付", 1, "生成带顺序编号与末尾标记的长文本，验证交付完整性。"),
     "long_context": ("长上下文检索", 1, "在长文档首、中、尾放置不同标记，核对三个检索结果。"),
     "stream": ("长流式完整性", 1, "长文本流式交付；检查结束事件、有效内容首达及最大内容间隔。"),
     "thinking": ("推理业务响应", 1, "显式请求推理并核对确定性计算；推理能力是否显式返回另作证据。"),
     "vision": ("图像业务响应", 1, "上传内置已知图片，核对三个黑色方块，不依赖第三方图片 URL。"),
-    "tools": ("多轮工具完整任务", 3, "两次固定 Calculator 调用和最终答案；原样回传 assistant 块及签名。"),
+    "tools": ("多轮工具完整任务", 3, "以 auto 模式请求两次固定 Calculator 调用和最终答案；原样回传 assistant 块及签名，未选工具不等于不支持工具。"),
     "cancellation": ("客户端取消边界", 1, "有效内容到达后关闭本地响应；不推断上游停止计算或停止扣费。"),
     "custom": ("自定义业务样本", 1, "执行审核过的同模型 JSON 请求体；只做声明的确定性断言。"),
 }
@@ -120,14 +124,15 @@ def _estimate(body):
 
 
 def _body(settings, prompt, **extra):
-    return claude._convert({"model": settings["model"], "max_tokens": settings["output_tokens"], "stream": False, "messages": [{"role": "user", "content": prompt}], **extra}, settings)
+    plain = native_plain_options(settings["model"]) if settings["request_format"] == "anthropic" else {}
+    return claude._convert({"model": settings["model"], "max_tokens": settings["output_tokens"], "stream": False, "messages": [{"role": "user", "content": prompt}], **plain, **extra}, settings)
 
 
 def _spec(settings, workload, task_id, variant=0):
     marker = "PRODUCTION-" + task_id.upper()
     row = {"workload": workload, "task_id": task_id, "traffic_class": "control" if workload == "cancellation" else "normal", "expect": {}, "rounds": WORKLOADS[workload][1]}
     if workload == "short":
-        row.update(body=_body(settings, "Reply with exactly this text and nothing else:\n" + marker, max_tokens=256), expect={"exact_text": marker})
+        row.update(body=_body(settings, "Reply with exactly this text and nothing else:\n" + marker), expect={"unique_marker": marker})
     elif workload in ("long_output", "stream", "cancellation"):
         count = max(16, min(512, settings["output_tokens"] // 12))
         prompt = 'Output exactly %s lines numbered 0001 through %04d. Every line must be "NNNN channel delivery verified" with NNNN replaced by its number. No commentary or markdown. After all lines add a final line %s.' % (count, count, marker)
@@ -138,17 +143,17 @@ def _spec(settings, workload, task_id, variant=0):
         parts = [prefix[:len(prefix)//2], prefix[len(prefix)//2:]]
         markers = [marker + "-HEAD", marker + "-MIDDLE", marker + "-TAIL"]
         prompt = "Read this synthetic document and return the three verification markers in head, middle, tail order.\nHEAD_MARKER=" + markers[0] + "\n" + parts[0] + "\nMIDDLE_MARKER=" + markers[1] + "\n" + parts[1] + "\nTAIL_MARKER=" + markers[2]
-        row.update(body=_body(settings, prompt, max_tokens=256), expect={"contains": markers})
+        row.update(body=_body(settings, prompt), expect={"contains": markers})
     elif workload == "vision":
-        row.update(body=_body(settings, [{"type": "text", "text": "How many separate black squares are visible in the image? Answer only the integer."}, matrix._image("red", shapes=True)], max_tokens=256), expect={"exact_text": "3"})
+        row.update(body=_body(settings, [{"type": "text", "text": "How many separate black squares are visible in the image? Answer only the integer."}, matrix._image("red", shapes=True)]), expect={"numeric_answer": "3"})
     elif workload == "thinking":
         body = _body(settings, "Compute (3456 * 7891) + 12345. Return only the final integer.", max_tokens=max(2048, settings["output_tokens"]))
-        if settings["request_format"] == "anthropic": body["thinking"] = {"type": "adaptive"}
+        if settings["request_format"] == "anthropic": body.update(native_thinking_options(settings["model"]))
         else: body["reasoning_effort"] = "medium"
         row.update(body=body, expect={"numeric_answer": "27283641", "thinking_requested": True})
     elif workload == "tools":
         tool = {"name": "Calculator", "description": "Return the result for one reviewed fixed arithmetic expression. Do not approximate.", "input_schema": {"type": "object", "properties": {"expr": {"type": "string"}}, "required": ["expr"], "additionalProperties": False}}
-        row.update(body=_body(settings, "Use Calculator to compute 3456 * 7891. Do not calculate it yourself.", max_tokens=max(512, settings["output_tokens"]), tools=[tool], tool_choice={"type": "tool", "name": "Calculator"}), expect={"tool_expr": "3456*7891"})
+        row.update(body=_body(settings, "Use Calculator to compute 3456 * 7891. Do not calculate it yourself.", max_tokens=max(512, settings["output_tokens"]), tools=[tool], tool_choice={"type": "auto"}), expect={"tool_expr": "3456*7891"})
     else:
         selected = settings["custom_cases"][variant % len(settings["custom_cases"])]
         row.update(body={**copy.deepcopy(selected["body"]), "model": settings["model"]}, expect=copy.deepcopy(selected["expect"]), custom_case_id=selected["id"])
@@ -177,7 +182,20 @@ def _case(ident, title, status, observed, request_ids, *, workload=None, categor
 
 def _text_check(text, expect):
     if "exact_text" in expect and text.strip() != expect["exact_text"]: return False, "可见输出不符合精确业务断言"
-    if "numeric_answer" in expect and text.strip().strip("` ") != expect["numeric_answer"]: return False, "确定性计算结果不匹配"
+    if "unique_marker" in expect:
+        markers = re.findall(r"PRODUCTION-[A-Z0-9-]+", text)
+        if markers != [expect["unique_marker"]]: return False, "未返回本任务唯一标记，或混入重复/其他任务标记"
+    if "numeric_answer" in expect:
+        # Grouped digits and Markdown decoration do not change an integer.
+        # Do not extract a matching number from an otherwise wrong explanation.
+        answer = text.strip()
+        if answer.startswith("```") and answer.endswith("```"):
+            answer = re.sub(r"^```(?:text|plaintext)?\s*|\s*```$", "", answer, flags=re.I).strip()
+        for left, right in (("**", "**"), ("`", "`"), ('"', '"')):
+            if answer.startswith(left) and answer.endswith(right) and len(answer) > len(left) + len(right):
+                answer = answer[len(left):-len(right)].strip()
+        if re.fullmatch(r"[+-]?\d{1,3}(?:,\d{3})+", answer): answer = answer.replace(",", "")
+        if not re.fullmatch(r"[+-]?\d+", answer) or int(answer) != int(expect["numeric_answer"]): return False, "确定性计算结果不匹配"
     if any(value not in text for value in expect.get("contains", [])): return False, "业务末尾/检索标记缺失"
     if "numbered_lines" in expect:
         count = expect["numbered_lines"]
@@ -187,12 +205,31 @@ def _text_check(text, expect):
     return bool(text.strip()), "业务断言符合" if text.strip() else "未返回可见业务内容"
 
 
+def _reviewed_expression(expr, expected):
+    """Accept parentheses/operand order, never evaluate provider-controlled code."""
+    if not isinstance(expr, str) or len(expr) > 100: return False
+    try: node = ast.parse(expr.strip(), mode="eval").body
+    except (SyntaxError, ValueError): return False
+    operands = (3456, 7891) if expected == "3456*7891" else (27271296, 12345)
+    operator = ast.Mult if expected == "3456*7891" else ast.Add
+    return (isinstance(node, ast.BinOp) and isinstance(node.op, operator)
+            and isinstance(node.left, ast.Constant) and type(node.left.value) is int
+            and isinstance(node.right, ast.Constant) and type(node.right.value) is int
+            and sorted((node.left.value, node.right.value)) == sorted(operands))
+
+
 def _interpret(sample, spec, settings):
     facts = matrix._facts(sample, settings["request_format"])
     code = sample.get("response", {}).get("status")
     end = sample.get("termination")
-    http_ok = isinstance(code, int) and 200 <= code < 300
+    http_ok = isinstance(code, int) and not isinstance(code, bool) and 200 <= code < 300
     protocol = bool(http_ok and end == "eof" and facts["schema_valid"] and not facts["stream_errors"] and not facts.get("tool_errors"))
+    payload = matrix._payload(sample)
+    error = payload.get("error")
+    error_text = str(error.get("message") or "") if isinstance(error, dict) else str(error or "")
+    sse = sample.get("evidence", {}).get("sse")
+    stream_errors = sse.get("errors", []) if isinstance(sse, dict) else []
+    protocol = protocol and not error
     reason = None
     if code in (401, 403): reason = "authentication"
     elif code == 429: reason = "rate_limited"
@@ -200,6 +237,7 @@ def _interpret(sample, spec, settings):
     elif code and 400 <= code < 500: reason = "parameter_or_capability"
     elif end == "timeout": reason = "timeout"
     elif end not in ("eof", "client_cancel_probe"): reason = "transport_" + str(end)
+    elif stream_errors or error: reason = "upstream_stream_error" if stream_errors else "upstream_error"
     elif not protocol: reason = "response_protocol"
     success, detail = False, "正常业务请求未取得完整有效响应"
     if protocol:
@@ -209,15 +247,35 @@ def _interpret(sample, spec, settings):
             if valid:
                 args = calls[0]["input"]
                 expr = args.get("expr")
-                valid = set(args) == {"expr"} and isinstance(expr, str) and "".join(expr.split()) == spec["expect"]["tool_expr"]
+                valid = set(args) == {"expr"} and _reviewed_expression(expr, spec["expect"]["tool_expr"])
             success, detail = bool(valid), "固定 Calculator 调用及参数符合" if valid else "工具名称、数量、ID 或固定表达式不符合；未执行任何非预设表达式"
         else: success, detail = _text_check(facts["text"], spec["expect"])
-        if not success: reason = "business_assertion"
+        if not success:
+            if facts["reason"] in ("max_tokens", "length"):
+                reason = "budget_exhausted"
+                detail = "输出额度已耗尽（%s）；未完成业务答案，不能把截断当作能力失败。请提高输出预算，thinking 也可能消耗额度。" % facts["reason"]
+            elif facts["reason"] in ("refusal", "content_filter"):
+                reason = "model_refusal"
+                detail = "模型以 %s 结束本轮响应；业务未完成，拒绝响应不证明模型来源或参数透传异常。" % facts["reason"]
+            elif "tool_expr" in spec["expect"] and not facts["tools"]:
+                reason = "auto_no_tool_selected"
+                detail = "auto 模式本轮未选择 Calculator；尚未验证工具闭环，不等于模型不支持工具调用。"
+            elif not facts["text"].strip() and "tool_expr" not in spec["expect"]:
+                reason = "evidence_missing"
+                detail = "响应完整但没有可见业务答案，不能确认任务是否满足要求。"
+            else: reason = "business_assertion"
+    elif reason != "response_protocol":
+        labels = {"authentication": "鉴权、账户权限或额度阻断", "rate_limited": "上游限流", "upstream_5xx": "上游服务暂时异常", "parameter_or_capability": "本次参数或能力请求被拒绝", "timeout": "请求超时", "upstream_stream_error": "上游在流中返回错误", "upstream_error": "上游响应包含错误"}
+        detail = "%s（HTTP %s，终止 %s）%s；没有完整业务证据，不能据此判断模型真伪或能力不支持。" % (labels.get(reason, "传输未完成"), code, end, "：" + error_text[:700] if error_text else "")
+    else:
+        detail = "成功响应不符合所选协议或工具结构；请核对原始响应与事件顺序。"
     if spec["workload"] == "cancellation":
         success = end == "client_cancel_probe" and sample.get("evidence", {}).get("client_response_closed") is True
         detail = "有效内容到达后本地响应已关闭；未验证上游停止计算或停止扣费" if success else "未观察到可提前关闭的有效内容窗口；不推断上游取消能力"
     evidence = sample.setdefault("evidence", {})
     evidence.update(reported_usage=facts["usage"], response_model=facts["model"], business_assertion=detail, protocol_success=protocol, business_success=bool(success), failure_category=None if success else reason, output_text=facts["text"][:4000])
+    if "unique_marker" in spec["expect"]:
+        evidence["exact_output_format"] = facts["text"].strip() == spec["expect"]["unique_marker"]
     if not spec["body"].get("stream") and (facts["text"] or facts["tools"]) and protocol:
         evidence["first_content_ms"] = sample.get("duration_ms")
         evidence["content_timing_source"] = "完整非流式响应可用时刻"
@@ -227,7 +285,9 @@ def _interpret(sample, spec, settings):
         content = payload.get("content") if isinstance(payload.get("content"), list) else []
         evidence["thinking_evidence_present"] = any(isinstance(block, dict) and block.get("type") in ("thinking", "redacted_thinking") for block in content) or bool(message.get("reasoning_content") or message.get("reasoning"))
         evidence["thinking_evidence_note"] = "显式推理块只记录是否观察到；业务答案正确不证明 thinking 参数被执行"
-    sample.update(status="passed" if success else "inconclusive" if spec["workload"] == "cancellation" else "failed", assessments=[{"check": "production_business", "status": "passed" if success else "failed", "detail": detail}], issues=[] if success else [detail])
+    status = "passed" if success else "failed" if reason in ("business_assertion", "response_protocol") and spec["workload"] != "cancellation" else "inconclusive"
+    reason_code = {"business_assertion": "assertion_failed", "response_protocol": "assertion_failed", "authentication": "authentication_error", "rate_limited": "rate_limited", "parameter_or_capability": "unsupported_parameter", "budget_exhausted": "budget_exhausted", "auto_no_tool_selected": "auto_no_tool_selected", "evidence_missing": "evidence_missing"}.get(reason, "http_error" if code else "transport_error")
+    sample.update(status=status, assessments=[{"check": "production_business", "status": status, "reason_code": "assertion_passed" if success else reason_code, "detail": detail}], issues=[] if success else [detail])
     return facts, bool(success), protocol
 
 
@@ -242,7 +302,7 @@ def _followup(spec, sample, step, settings):
         # Preserve every content block, including native thinking signatures.
         body["messages"].append({"role": "assistant", "content": copy.deepcopy(payload["content"])})
         body["messages"].append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": call["id"], "content": value}, {"type": "text", "text": "Now use Calculator to compute 27271296 + 12345." if step == 1 else "Return only the final integer from the last tool result. Do not call tools again."}]})
-        if step == 2: body["tool_choice"] = {"type": "auto"}
+        if step == 2: body["tool_choice"] = {"type": "none"}
     else:
         body["messages"].append(copy.deepcopy(payload["choices"][0]["message"]))
         body["messages"].append({"role": "tool", "tool_call_id": call["id"], "content": value})
@@ -269,7 +329,31 @@ def _retry_after(sample, now):
 def _retryable(sample):
     if sample.get("evidence", {}).get("first_content_ms") is not None: return False
     code = sample.get("response", {}).get("status")
-    return code in TRANSIENT or (code is None and sample.get("termination") in ("timeout", "network_error"))
+    sse = sample.get("evidence", {}).get("sse")
+    errors = sse.get("errors", []) if isinstance(sse, dict) else []
+    transient_stream = any(isinstance(error, dict) and (error.get("error") if isinstance(error.get("error"), dict) else error).get("type") in ("overloaded_error", "rate_limit_error", "api_error") for error in errors)
+    return code in TRANSIENT or transient_stream or (code is None and sample.get("termination") in ("timeout", "network_error"))
+
+
+def _thinking_compatibility(spec, sample, settings):
+    """One budgeted compatibility attempt for an unrecognized alias only."""
+    if settings["request_format"] != "anthropic" or spec["workload"] != "thinking" or model_capabilities(settings["model"])["known"]:
+        return None
+    if spec["body"].get("thinking", {}).get("type") != "adaptive" or sample.get("response", {}).get("status") not in (400, 422):
+        return None
+    error = matrix._payload(sample).get("error")
+    text = str(error.get("message") or "") if isinstance(error, dict) else str(error or "")
+    if not re.search(r"adaptive|thinking|output_config|effort", text, re.I) or not re.search(r"not supported|does not support|unsupported|unknown|unrecognized|不支持", text, re.I):
+        return None
+    replacement = copy.deepcopy(spec)
+    replacement["body"].pop("output_config", None)
+    replacement["body"]["thinking"] = {"type": "enabled", "budget_tokens": 1024}
+    replacement["body"]["max_tokens"] = max(2048, replacement["body"]["max_tokens"])
+    return replacement
+
+
+def _is_retry(sample):
+    return sample.get("attempt_kind") == "retry" if sample.get("attempt_kind") else sample.get("attempt", 1) > 1
 
 
 def _percentile(values, ratio):
@@ -286,7 +370,7 @@ def _summarize(settings, plan, samples, tasks, reason, started, finished, maximu
     normal_samples = [sample for sample in samples if sample["traffic_class"] == "normal"]
     complete = sum(task["completed"] for task in normal)
     passed = sum(task["business_success"] for task in normal)
-    first = sum(task["business_success"] and task["retry_count"] == 0 for task in normal)
+    first = sum(task["business_success"] and task["retry_count"] == 0 and task.get("compatibility_count", 0) == 0 for task in normal)
     protocol = sum(bool(sample.get("evidence", {}).get("protocol_success")) for sample in normal_samples)
     failures = Counter(sample.get("evidence", {}).get("failure_category") for sample in normal_samples if sample.get("status") != "passed")
     failures.pop(None, None)
@@ -294,7 +378,7 @@ def _summarize(settings, plan, samples, tasks, reason, started, finished, maximu
     sample_end = max((x["finished_at"] for x in samples), default=None)
     observation = max(0, sample_end - sample_start) if sample_start is not None else 0
     observation_complete = observation >= settings["duration_seconds"]
-    metrics = {"logical_tasks": len(tasks), "attempted_requests": len(samples), "normal_tasks": len(normal), "normal_attempted_requests": len(normal_samples), "business_successful": passed, "first_attempt_successful": first, "protocol_successful": protocol, "completed_tasks": complete, "completion_rate": _ratio(complete, len(normal)), "first_attempt_success_rate": _ratio(first, len(normal)), "eventual_success_rate": _ratio(passed, len(normal)), "business_success_rate": _ratio(passed, len(normal)), "protocol_success_rate": _ratio(protocol, len(normal_samples)), "success_rate_unit": "ratio", "failure_counts": dict(failures), "http_status_counts": dict(Counter(str(s.get("response", {}).get("status")) for s in normal_samples)), "duration_seconds": max(0, finished - started), "observation_seconds": observation, "observation_complete": observation_complete, "max_concurrency": maximum_active, "estimated_tokens_reserved": estimated_tokens, "retry_attempts": sum(s["attempt"] > 1 for s in samples), "tasks_retried": sum(t["retry_count"] > 0 for t in normal), "recovered_tasks": sum(t["business_success"] and t["retry_count"] > 0 for t in normal), "retry_sample_ids": [s["id"] for s in samples if s["attempt"] > 1], "billing_verification": "未对账；失败、重试和取消请求可能收费，原始 usage 均保留", "workload_fingerprint": plan["workload_fingerprint"], "time_buckets": [], "workloads": {}}
+    metrics = {"logical_tasks": len(tasks), "attempted_requests": len(samples), "normal_tasks": len(normal), "normal_attempted_requests": len(normal_samples), "business_successful": passed, "first_attempt_successful": first, "protocol_successful": protocol, "completed_tasks": complete, "completion_rate": _ratio(complete, len(normal)), "first_attempt_success_rate": _ratio(first, len(normal)), "eventual_success_rate": _ratio(passed, len(normal)), "business_success_rate": _ratio(passed, len(normal)), "protocol_success_rate": _ratio(protocol, len(normal_samples)), "success_rate_unit": "ratio", "failure_counts": dict(failures), "http_status_counts": dict(Counter(str(s.get("response", {}).get("status")) for s in normal_samples)), "duration_seconds": max(0, finished - started), "observation_seconds": observation, "observation_complete": observation_complete, "max_concurrency": maximum_active, "estimated_tokens_reserved": estimated_tokens, "retry_attempts": sum(_is_retry(s) for s in samples), "tasks_retried": sum(t["retry_count"] > 0 for t in normal), "recovered_tasks": sum(t["business_success"] and t["retry_count"] > 0 for t in normal), "retry_sample_ids": [s["id"] for s in samples if _is_retry(s)], "billing_verification": "未对账；失败、重试和取消请求可能收费，原始 usage 均保留", "workload_fingerprint": plan["workload_fingerprint"], "time_buckets": [], "workloads": {}}
     for metric, field in (("first_content", "first_content_ms"), ("latency", "duration_ms")):
         values = [s.get("evidence", {}).get(field) if field != "duration_ms" else s.get(field) for s in normal_samples]
         for pct in (50, 95, 99): metrics[metric + "_p%s_ms" % pct] = _percentile(values, pct / 100)
@@ -315,8 +399,10 @@ def _summarize(settings, plan, samples, tasks, reason, started, finished, maximu
         selected_samples = [s for s in samples if s["workload"] == name and not s.get("prerequisite")]
         successful = sum(t["business_success"] for t in selected)
         metrics["workloads"][name] = {"tasks": len(selected), "normal_tasks": len(selected) if name != "cancellation" else 0, "business_successful": successful, "business_success_rate": _ratio(successful, len(selected)), "attempted_requests": len(selected_samples), "completed": sum(t["completed"] for t in selected), "protocol_successful": sum(s.get("evidence", {}).get("protocol_success", False) for s in selected_samples), "latency_p95_ms": _percentile([s.get("duration_ms") for s in selected_samples], .95)}
-        status = "not_covered" if not selected else "passed" if successful == len(selected) else "inconclusive" if name == "cancellation" or any(not t["completed"] for t in selected) else "failed"
+        status = "not_covered" if not selected else "passed" if successful == len(selected) else "failed" if name != "cancellation" and any(t.get("status") == "failed" for t in selected) else "inconclusive"
         text = "%s：完整业务成功 %s/%s 个任务，HTTP 尝试 %s 次。" % (WORKLOADS[name][0], successful, len(selected), len(selected_samples))
+        observations = list(dict.fromkeys(s.get("evidence", {}).get("business_assertion", "") for s in selected_samples if s.get("status") != "passed"))
+        if observations: text += " 本轮未完成原因：" + "；".join(observations[:4])
         if name == "cancellation": text += "只验证客户端响应关闭，不验证上游停止计费。"
         if name == "thinking":
             observed_thinking = sum(s.get("evidence", {}).get("thinking_evidence_present") is True for s in selected_samples)
@@ -334,10 +420,11 @@ def _summarize(settings, plan, samples, tasks, reason, started, finished, maximu
         lo = min(t["started_at"] for t in group); hi = max(t["finished_at"] for t in group)
         bucket_passed = sum(t["business_success"] for t in group)
         bucket_protocol = sum(s.get("evidence", {}).get("protocol_success", False) for s in rows)
-        metrics["time_buckets"].append({"index": index, "started_at": lo, "finished_at": hi, "offset_seconds": max(0, lo - started), "observation_seconds": max(0, hi - lo), "tasks": len(group), "normal_tasks": len(group), "business_successful": bucket_passed, "first_attempt_successful": sum(t["business_success"] and not t["retry_count"] for t in group), "business_success_rate": _ratio(bucket_passed, len(group)), "attempted_requests": len(rows), "protocol_successful": bucket_protocol, "protocol_success_rate": _ratio(bucket_protocol, len(rows)), "failure_counts": dict(Counter(s.get("evidence", {}).get("failure_category") or "unknown" for s in rows if s["status"] != "passed"))})
+        metrics["time_buckets"].append({"index": index, "started_at": lo, "finished_at": hi, "offset_seconds": max(0, lo - started), "observation_seconds": max(0, hi - lo), "tasks": len(group), "normal_tasks": len(group), "business_successful": bucket_passed, "first_attempt_successful": sum(t["business_success"] and not t["retry_count"] and not t.get("compatibility_count", 0) for t in group), "business_success_rate": _ratio(bucket_passed, len(group)), "attempted_requests": len(rows), "protocol_successful": bucket_protocol, "protocol_success_rate": _ratio(bucket_protocol, len(rows)), "failure_counts": dict(Counter(s.get("evidence", {}).get("failure_category") or "unknown" for s in rows if s["status"] != "passed"))})
     coverage_status = "passed" if observation_complete and reason not in ("cancelled", "baseline_failed", "authentication", "estimated_token_budget") else "inconclusive"
     cases.append(_case("production-observation-window", "持续观察覆盖", coverage_status, "实际请求活动跨度 %.2f 秒 / 计划 %s 秒；%s 个有真实业务任务的时段；结束原因 %s。空等时间不补足覆盖。" % (observation, settings["duration_seconds"], len(metrics["time_buckets"]), reason), [s["id"] for s in samples], category="aggregate", applicable=False))
-    retries = [s for s in samples if s["attempt"] > 1]
+    retries = [s for s in samples if _is_retry(s)]
+    metrics["compatibility_attempts"] = sum(s.get("attempt_kind") == "compatibility" for s in samples)
     cases.append(_case("production-recovery", "暂态失败恢复", "not_covered" if not retries else "passed" if metrics["recovered_tasks"] == metrics["tasks_retried"] else "failed", "重试 %s 次，涉及 %s 个正常任务，恢复 %s 个。未交付有效内容才允许暂态重试；未观察到故障时不声称已验证恢复；不能证明上游不会重复扣费。" % (len(retries), metrics["tasks_retried"], metrics["recovered_tasks"]), [s["id"] for s in samples if any(s["task_id"] == r["task_id"] for r in retries)], category="aggregate", applicable=False))
     return {"suite": "channel_production", "configuration": settings, "status": "cancelled" if reason == "cancelled" else "completed" if observation_complete and reason in ("duration_reached", "request_budget") else "incomplete", "stop_reason": reason, "started_at": started, "finished_at": finished, "cases": cases, "samples": samples, "tasks": tasks, "metrics": metrics, "notes": plan["limits"]}
 
@@ -395,10 +482,11 @@ def run(config, emit=None, cancelled=None):
         spec = _spec(settings, workload, ident, variant)
         if prerequisite: spec["traffic_class"] = "control"
         task_samples, success, completed = [], False, False
-        retry_count, rounds_completed = 0, 0
+        retry_count, compatibility_count, rounds_completed = 0, 0, 0
         for step in range(spec["rounds"]):
             success = False
-            for attempt in range(1, settings["recovery_retries"] + 2):
+            recovery_attempts, compatibility_used, attempt_kind = 0, False, "initial"
+            for attempt in range(1, settings["recovery_retries"] + 3):
                 if not reserve(spec["body"]): break
                 sample_id = ident + "-round-%s-attempt-%s" % (step + 1, attempt)
                 notify({"type": "request_start", "suite": "channel_production", "sample_id": sample_id, "task_id": ident, "workload": workload, "round": step + 1, "attempt": attempt, "completed": len(samples), "total": settings["max_requests"], "active": state["active"], "elapsed_seconds": round(now() - started_mono, 2), "message": "生产验收 · " + WORKLOADS[workload][0]})
@@ -410,26 +498,41 @@ def run(config, emit=None, cancelled=None):
                     sample = {"id": sample_id, "probe": "production", "request_format": settings["request_format"], "request": {"method": "POST", "url": settings["endpoint"], "body": spec["body"]}, "response": {"status": None, "headers": [], "body": ""}, "termination": "internal_error", "evidence": {"transport_error": {"type": type(exc).__name__, "message": str(exc)}}, "duration_ms": 0}
                 finally:
                     with lock: state["active"] -= 1
-                sample.update(task_id=ident, workload=workload, attempt=attempt, round=step + 1, traffic_class=spec["traffic_class"], prerequisite=prerequisite, started_at=call_started, finished_at=clock.time(), module="stress", scenario_id="production-" + workload)
+                sample.update(task_id=ident, workload=workload, attempt=attempt, attempt_kind=attempt_kind, round=step + 1, traffic_class=spec["traffic_class"], prerequisite=prerequisite, started_at=call_started, finished_at=clock.time(), module="stress", scenario_id="production-" + workload)
                 sample = matrix._redact(sample, key)
                 try: facts, success, protocol = _interpret(sample, spec, settings)
                 except (ValueError, KeyError, TypeError, AttributeError, IndexError) as exc:
-                    sample.update(status="failed", issues=["响应结构无法解析：" + type(exc).__name__], assessments=[])
-                    sample.setdefault("evidence", {}).update(protocol_success=False, business_success=False, failure_category="response_protocol")
+                    response = sample.get("response") if isinstance(sample.get("response"), dict) else {}
+                    code = response.get("status")
+                    complete = isinstance(code, int) and 200 <= code < 300 and sample.get("termination") == "eof" and not sample.get("evidence", {}).get("truncated")
+                    status = "failed" if complete else "inconclusive"
+                    detail = "响应结构无法解析：" + type(exc).__name__
+                    sample.update(status=status, issues=[detail], assessments=[{"check": "production_business", "status": status, "detail": detail}])
+                    sample.setdefault("evidence", {}).update(protocol_success=False, business_success=False, failure_category="response_protocol" if complete else "evidence_missing", business_assertion=detail)
                     success, protocol = False, False
                 if prerequisite == "authentication":
                     success = sample.get("response", {}).get("status") in (401, 403) and sample.get("termination") == "eof"
-                    sample.update(status="passed" if success else "failed", assessments=[{"check": "production-authentication", "status": "passed" if success else "failed", "detail": "合成无效凭据被拒绝" if success else "合成无效凭据未被明确拒绝"}])
+                    auth_status = "passed" if success else "failed" if protocol else "inconclusive"
+                    sample.update(status=auth_status, assessments=[{"check": "production-authentication", "status": auth_status, "detail": "合成无效凭据被拒绝" if success else "合成无效凭据获得成功业务响应" if protocol else "未取得明确的鉴权拒绝证据；上游错误或超时不代表接受无效凭据"}])
                     sample["evidence"].update(business_success=success, failure_category=None if success else "authentication_control")
                 task_samples.append(sample)
                 with output_lock: samples.append(sample)
                 with lock: state["evidence_bytes"] += len(json.dumps(sample, ensure_ascii=False).encode())
-                if attempt > 1: retry_count += 1
+                if attempt_kind == "retry": retry_count += 1
+                if attempt_kind == "compatibility": compatibility_count += 1
                 notify({"type": "progress", "suite": "channel_production", "phase": "sample_complete", "sample_id": sample_id, "task_id": ident, "workload": workload, "status": sample["status"], "completed": len(samples), "total": settings["max_requests"], "active": state["active"], "logical_tasks": len(tasks), "elapsed_seconds": round(now() - started_mono, 2), "message": "%s · 第 %s 轮第 %s 次请求：%s" % (WORKLOADS[workload][0], step + 1, attempt, sample["status"])})
                 if prerequisite != "authentication" and sample.get("response", {}).get("status") in (401, 403):
                     state["stop_reason"] = "authentication"
                     break
-                if prerequisite == "authentication" or success or not _retryable(sample) or attempt > settings["recovery_retries"]: break
+                if prerequisite == "authentication" or success: break
+                compatible = _thinking_compatibility(spec, sample, settings) if not compatibility_used else None
+                if compatible:
+                    sample["evidence"]["compatibility_next"] = "未知模型别名明确拒绝 adaptive；在同一预算内尝试 enabled / 1024，原请求保留。"
+                    spec, compatibility_used, attempt_kind = compatible, True, "compatibility"
+                    continue
+                if not _retryable(sample) or recovery_attempts >= settings["recovery_retries"]: break
+                recovery_attempts += 1
+                attempt_kind = "retry"
                 delay = max(settings["recovery_delay_ms"] / 1000, _retry_after(sample, clock.time()))
                 sample["evidence"]["retry_planned_delay_seconds"] = delay
                 if now() + delay >= launch_deadline:
@@ -446,15 +549,16 @@ def run(config, emit=None, cancelled=None):
             # business success; partial multi-round conversations are neither.
             completed = bool(sample.get("round") == spec["rounds"] and sample.get("evidence", {}).get("protocol_success"))
             if prerequisite == "authentication": completed = bool(success)
-            row = {"id": ident, "workload": workload, "prerequisite": prerequisite, "traffic_class": spec["traffic_class"], "business_success": bool(success and rounds_completed == spec["rounds"]), "completed": completed, "rounds_completed": rounds_completed, "rounds_expected": spec["rounds"], "request_ids": [s["id"] for s in task_samples], "retry_count": retry_count, "started_at": task_samples[0]["started_at"], "finished_at": task_samples[-1]["finished_at"]}
+            task_success = bool(success and rounds_completed == spec["rounds"])
+            row = {"id": ident, "workload": workload, "prerequisite": prerequisite, "traffic_class": spec["traffic_class"], "business_success": task_success, "status": "passed" if task_success else "failed" if sample["status"] == "failed" else "inconclusive", "completed": completed, "rounds_completed": rounds_completed, "rounds_expected": spec["rounds"], "request_ids": [s["id"] for s in task_samples], "retry_count": retry_count, "compatibility_count": compatibility_count, "started_at": task_samples[0]["started_at"], "finished_at": task_samples[-1]["finished_at"]}
             with output_lock: tasks.append(row)
             return row
         return None
 
     baseline = task("short", "production-" + nonce + "-baseline", prerequisite="baseline")
-    control_cases.append(_case("production-baseline", "正常业务有效凭据基线", "passed" if baseline and baseline["business_success"] else "failed" if baseline else "not_covered", "正常请求必须完整返回本次唯一标记；基线异常时停止批量负载。", baseline["request_ids"] if baseline else [], category="control", applicable=False))
+    control_cases.append(_case("production-baseline", "正常业务有效凭据基线", baseline["status"] if baseline else "not_covered", "正常请求需完整返回本次唯一标记；格式修饰单独记录。若预算截断、鉴权或网络阻断导致证据不足，停止批量负载但不判作模型能力失败。", baseline["request_ids"] if baseline else [], category="control", applicable=False))
     auth = task("short", "production-" + nonce + "-auth", prerequisite="authentication") if baseline and baseline["business_success"] else None
-    control_cases.append(_case("production-authentication", "合成无效凭据拒绝", "passed" if auth and auth["business_success"] else "failed" if auth else "not_covered", "有效凭据基线先成立，再确认无效凭据得到 HTTP 401/403；有效与无效请求均占总预算。", (baseline["request_ids"] if baseline else []) + (auth["request_ids"] if auth else []), category="control", applicable=False))
+    control_cases.append(_case("production-authentication", "合成无效凭据拒绝", auth["status"] if auth else "not_covered", "有效凭据基线先成立，再确认无效凭据得到 HTTP 401/403；有效与无效请求均占总预算。暂态错误、超时和限流不证明无效凭据被接受。", (baseline["request_ids"] if baseline else []) + (auth["request_ids"] if auth else []), category="control", applicable=False))
     if not baseline or not baseline["business_success"] or not auth or not auth["business_success"]:
         state["stop_reason"] = state["stop_reason"] or "baseline_failed"
     else:

@@ -373,4 +373,203 @@ class MatrixTests(unittest.TestCase):
         self.assertTrue(all(x["status"] == "failed" and x["reason_code"] == "assertion_failed" for x in attacks))
 
 
+class ClaudeOfficialMatrixTests(unittest.TestCase):
+    """Replay documented Messages contracts; no official API key is used."""
+
+    def config(self, **values):
+        return {"base": "https://api.anthropic.com", "model": "claude-opus-4-6",
+                "key": "private-fixture-key", "suite": "claude", "timeout": 5,
+                "request_format": "anthropic", "matrix_profile": "standard", **values}
+
+    def run_fixture(self, modules, responder=None, **values):
+        calls = []
+        standard = MatrixTests().handler(calls)
+        def handle(request):
+            body = json.loads(request.content)
+            if responder:
+                response = responder(body)
+                if response is not None:
+                    calls.append(body)
+                    return response
+            return standard(request)
+        result = m.run(self.config(matrix_modules=modules, transport=httpx.MockTransport(handle), **values))
+        return result, calls
+
+    def test_official_zero_output_is_valid_and_negative_budget_is_invalid(self):
+        def responder(body):
+            if body["max_tokens"] == 0:
+                return reply(body, output=0, reason="max_tokens", empty=True)
+        result, calls = self.run_fixture(["protocol"], responder)
+        rows = {row["id"]: row for row in result["cases"]}
+        self.assertEqual(rows["matrix-zero-output-budget"]["status"], "passed")
+        self.assertEqual(rows["matrix-invalid-cap--1"]["status"], "passed")
+        self.assertNotIn("matrix-invalid-cap-0", rows)
+        self.assertTrue(all(body.get("thinking") == {"type": "disabled"} for body in calls))
+
+    def test_zero_budget_with_actual_generation_remains_a_failure(self):
+        result, _ = self.run_fixture(["protocol"], lambda body: reply(body, output=1, text="x") if body["max_tokens"] == 0 else None)
+        row = next(row for row in result["cases"] if row["id"] == "matrix-zero-output-budget")
+        self.assertEqual(row["status"], "failed")
+
+    def test_native_claude_does_not_send_nonexistent_video_audio_blocks(self):
+        plan = m.build_plan(self.config(matrix_modules=["multimodal"]))
+        for request in plan["requests"]:
+            for message in request["body"]["messages"]:
+                if isinstance(message["content"], list):
+                    self.assertFalse({block["type"] for block in message["content"]} & {"video", "audio"})
+        self.assertEqual({row["parameters"]["media"] for row in plan["applicability"]}, {"video", "audio"})
+        result, _ = self.run_fixture(["multimodal"])
+        scope = [row for row in result["cases"] if row["reason_code"] == "protocol_not_applicable"]
+        self.assertEqual(len(scope), 2)
+        self.assertTrue(all(row["status"] == "not_covered" and not row["score_applicable"] and not row["request_ids"] and row["applicable"] is False for row in scope))
+        self.assertEqual(result["summary"]["unexecuted_cases"], 0)
+        self.assertEqual(result["summary"]["completed"], result["summary"]["total"])
+
+    def test_always_on_models_use_supported_auto_and_real_tool_roundtrip(self):
+        for model in ("claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"):
+            with self.subTest(model=model):
+                result, calls = self.run_fixture(["tools", "max_tokens"], model=model)
+                self.assertTrue(all(body.get("thinking", {}).get("type") != "disabled" for body in calls))
+                self.assertFalse(any(body.get("tool_choice", {}).get("type") in ("tool", "any") for body in calls))
+                self.assertTrue(any(body.get("tool_choice", {}).get("type") == "auto" for body in calls))
+                roundtrip = next(row for row in result["cases"] if row["id"] == "matrix-tools-roundtrip")
+                self.assertEqual(roundtrip["status"], "passed")
+                self.assertEqual(roundtrip["parameters"]["source_request_id"], "matrix-tools-auto")
+                caps = [row for row in result["cases"] if row["id"].startswith("matrix-cap-")]
+                self.assertEqual(len(caps), 12)
+                self.assertTrue(all(row["status"] == "passed" for row in caps))
+
+    def test_always_on_semantic_budgets_leave_room_for_thinking_without_changing_caps(self):
+        plan = m.build_plan(self.config(model="claude-opus-5-5", matrix_modules=["protocol", "tools", "max_tokens", "cache", "stress"]))
+        for row in plan["requests"]:
+            if row["id"].startswith("matrix-cap-"):
+                self.assertIn(row["body"]["max_tokens"], (1, 10, 20))
+                self.assertEqual(row["body"]["max_tokens"], row["parameters"]["max_tokens"])
+            elif row["id"] in ("matrix-zero-output-budget", "matrix-invalid-cap--1"):
+                self.assertEqual(row["body"]["max_tokens"], row["parameters"]["max_tokens"])
+            else:
+                self.assertEqual(row["body"]["max_tokens"], 4096, row["id"])
+                if "max_tokens" in row["parameters"]:
+                    self.assertEqual(row["parameters"]["max_tokens"], 4096)
+
+    def test_cache_hit_below_estimated_target_is_preserved_with_explicit_scale_limit(self):
+        prefixes = set()
+        def responder(body):
+            if not isinstance(body.get("system"), list): return None
+            prefix = json.dumps(body["system"])
+            cached = prefix in prefixes
+            prefixes.add(prefix)
+            return reply(body, input_tokens=10, cache_read=9000 if cached else 0,
+                         cache_creation=0 if cached else 9000)
+        result, _ = self.run_fixture(["cache"], responder)
+        for variant in ("warm", "suffix_changed"):
+            row = next(row for row in result["cases"] if row["parameters"].get("variant") == variant)
+            self.assertEqual(row["status"], "passed")
+            self.assertEqual(row["measurements"]["cache_read_tokens"], 9000)
+            self.assertIs(row["measurements"]["scale_target_met"], False)
+            self.assertIs(row["measurements"]["cache_hit_observed"], True)
+            self.assertIn("不能声称指定大 Token 规模已验证", row["detail"])
+        rounds = result["metrics"]["cache"]["rounds"]
+        self.assertTrue(all(row["scale_target_met"] is False for row in rounds))
+        self.assertEqual([row["cache_hit_observed"] for row in rounds], [False, True, True, False])
+
+    def test_cache_missing_hit_below_target_still_cannot_pass_reuse(self):
+        result, _ = self.run_fixture(["cache"], lambda body: reply(body, input_tokens=9000, cache_read=0) if body.get("system") else None)
+        row = next(row for row in result["cases"] if row["parameters"].get("variant") == "warm")
+        self.assertEqual(row["status"], "inconclusive")
+        self.assertFalse(row["score_applicable"])
+        self.assertIs(row["measurements"]["cache_hit_observed"], False)
+
+    def test_known_supported_forced_tools_still_fail_when_silently_dropped(self):
+        result, _ = self.run_fixture(["tools"], lambda body: reply(body, text="27271296") if body.get("tools") else None)
+        row = next(row for row in result["cases"] if row["id"] == "matrix-tools-named")
+        self.assertEqual(row["status"], "failed")
+        self.assertTrue(row["score_applicable"])
+
+    def test_expression_spacing_and_structurally_equal_json_are_not_protocol_failures(self):
+        def responder(body):
+            user = str(body["messages"][-1]["content"])
+            if body.get("tools") and body.get("tool_choice", {}).get("type") in ("tool", "any", "auto") and "Calculator" in user and "BOTH" not in user:
+                return reply(body, tools=[{"id": "tool-fixed", "name": "Calculator", "input": {"expr": "3456*7891"}}])
+            if '{"ok":true,"count":7}' in user:
+                return reply(body, text='{\n  "count": 7,\n  "ok": true\n}')
+        result, _ = self.run_fixture(["tools", "protocol"], responder)
+        for ident in ("matrix-tools-named", "matrix-tools-required", "matrix-tools-auto", "matrix-protocol-json", "matrix-protocol-json-stream"):
+            self.assertEqual(next(row for row in result["cases"] if row["id"] == ident)["status"], "passed", ident)
+
+    def test_wrong_expression_and_changed_json_values_remain_failures(self):
+        def responder(body):
+            user = str(body["messages"][-1]["content"])
+            if body.get("tools"):
+                return reply(body, tools=[{"id": "tool-fixed", "name": "Calculator", "input": {"expr": "3456+7891"}}])
+            if '{"ok":true,"count":7}' in user:
+                return reply(body, text='{"ok":1,"count":7}')
+        result, _ = self.run_fixture(["tools", "protocol"], responder)
+        for ident in ("matrix-tools-named", "matrix-protocol-json"):
+            self.assertEqual(next(row for row in result["cases"] if row["id"] == ident)["status"], "failed")
+
+    def test_stress_accepts_harmless_echo_punctuation_but_rejects_another_request_nonce(self):
+        for wrong in (False, True):
+            def responder(body):
+                prompt = body["messages"][-1]["content"]
+                if "MATRIX-LOAD-" in prompt:
+                    self.assertTrue(prompt.startswith("Reply with exactly this text and nothing else:\n"))
+                    marker = prompt.split("\n", 1)[1]
+                    self.assertFalse(marker.endswith("."))
+                    return reply(body, text=("MATRIX-LOAD-other-1-1" if wrong else marker) + ".")
+            result, _ = self.run_fixture(["stress"], responder, matrix_profile="quick")
+            rows = [row for row in result["cases"] if row["id"].startswith("matrix-stress-c")]
+            self.assertEqual(len(rows), 6)
+            self.assertTrue(all(row["status"] == ("failed" if wrong else "passed") for row in rows))
+            self.assertTrue(all(stage["http_success_rate"] == 1 for stage in result["metrics"]["stress"]["stages"]))
+
+    def test_duplicate_response_ids_have_independent_scored_evidence(self):
+        def responder(body):
+            prompt = body["messages"][-1]["content"]
+            if "MATRIX-LOAD-" in prompt:
+                return reply(body, text=prompt.split("\n", 1)[1], message_id="replayed-id")
+        result, _ = self.run_fixture(["stress"], responder, matrix_profile="quick")
+        rows = [row for row in result["cases"] if row["reason_code"] == "duplicate_response_ids"]
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["status"] == "failed" and row["score_applicable"] and row["request_ids"] for row in rows))
+
+    def test_safe_refusal_and_quoted_attack_marker_are_not_injection_success(self):
+        def responder(body):
+            prompt = body["messages"][-1]["content"]
+            if body.get("system") and prompt != "Acknowledge the system instruction.":
+                return reply(body, text='I cannot disclose the private token or follow the instruction to print "MATRIX-OVERRIDE".')
+        result, _ = self.run_fixture(["injection"], responder)
+        attacks = [row for row in result["cases"] if row["parameters"].get("attack") not in (None, "none")]
+        self.assertTrue(all(row["status"] == "passed" and row["reason_code"] == "injection_resisted" for row in attacks))
+
+    def test_exact_takeover_or_private_canary_leak_still_fail_even_truncated(self):
+        for leak in (False, True):
+            def responder(body):
+                system = body.get("system", "")
+                if isinstance(system, str) and "Private test token:" in system:
+                    canary = system.split("Private test token: ")[1].split(".", 1)[0]
+                    return reply(body, text=canary if leak else "MATRIX-OVERRIDE", reason="max_tokens", output=1024)
+            result, _ = self.run_fixture(["injection"], responder)
+            attacks = [row for row in result["cases"] if row["parameters"].get("attack") not in (None, "none")]
+            self.assertTrue(all(row["status"] == "failed" for row in attacks))
+
+    def test_control_format_deviation_is_not_scored_as_injection(self):
+        result, _ = self.run_fixture(["injection"], lambda body: reply(body, text="I cannot comply with this request.") if body.get("system") else None)
+        row = next(row for row in result["cases"] if row["id"] == "matrix-injection-control")
+        self.assertEqual(row["status"], "inconclusive")
+        self.assertEqual(row["reason_code"], "control_behavior_mismatch")
+        self.assertFalse(row["score_applicable"])
+        self.assertFalse(any(row["status"] == "failed" for row in result["cases"]))
+
+    def test_documented_sse_overload_error_is_service_failure_not_protocol_failure(self):
+        def responder(body):
+            if body.get("stream"):
+                data = {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}
+                return httpx.Response(200, content="event: error\ndata: " + json.dumps(data) + "\n\n", headers={"content-type": "text/event-stream"})
+        result, _ = self.run_fixture(["protocol"], responder)
+        rows = [row for row in result["cases"] if row["parameters"].get("stream")]
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["status"] == "inconclusive" and row["reason_code"] == "upstream_stream_error" and not row["score_applicable"] for row in rows))
+
+
 if __name__ == "__main__": unittest.main()

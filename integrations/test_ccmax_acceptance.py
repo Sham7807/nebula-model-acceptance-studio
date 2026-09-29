@@ -226,6 +226,7 @@ class AcceptanceTests(unittest.TestCase):
     def test_grace_uses_trace_socket_when_response_omits_network_extension(self):
         reader, peer = socket.socketpair()
         read_finished = threading.Event()
+        closed_by = []
 
         class NetworkStream:
             def get_extra_info(self, name):
@@ -247,6 +248,8 @@ class AcceptanceTests(unittest.TestCase):
                 # Model a close that cannot proceed until the pending read ends.
                 # Calling only Response.close() would wait for the socket timeout.
                 read_finished.wait(2)
+                closed_by.append(threading.current_thread().name)
+                reader.close()
 
         def handler(request):
             request.extensions["trace"]("connection.connect_tcp.complete", {"return_value": NetworkStream()})
@@ -259,6 +262,8 @@ class AcceptanceTests(unittest.TestCase):
             sample = acceptance._collect_sample(spec, settings, key, httpx.MockTransport(handler), lambda: False)
             self.assertLess(time.monotonic() - started, 0.8)
             self.assertTrue(read_finished.is_set())
+            self.assertEqual(closed_by, [threading.current_thread().name])
+            self.assertEqual(reader.fileno(), -1)
             self.assertEqual(sample["termination"], "connection_grace_exceeded")
             self.assertEqual(self.check(sample, "connection")["status"], "failed")
             self.assertEqual(self.check(sample, "message_stop")["status"], "passed")
