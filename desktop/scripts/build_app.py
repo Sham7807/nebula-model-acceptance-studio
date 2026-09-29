@@ -97,6 +97,7 @@ def build(dmg=True):
     iconset = DIST / 'AppIcon.iconset'
     run('swift', DESKTOP / 'scripts/make_icon.swift', iconset)
     run('iconutil', '-c', 'icns', iconset, '-o', resources / 'AppIcon.icns')
+    shutil.copy2(iconset / 'icon_512x512@2x.png', resources / 'BrandIcon.png')
     # Remove extended attributes copied from local caches before signing.
     run('xattr', '-cr', APP)
     run(resources / 'Python/bin/python3.12', '-I', '-c', 'import httpx,openai,jsonschema,PIL,pytest; print("Bundled runtime: imports OK")')

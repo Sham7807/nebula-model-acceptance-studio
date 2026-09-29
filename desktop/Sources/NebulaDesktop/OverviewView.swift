@@ -19,10 +19,8 @@ struct OverviewView: View {
                     Spacer(minLength:16)
                     ZStack {
                         RoundedRectangle(cornerRadius:36,style:.continuous).fill(DesktopTheme.surface).frame(width:190,height:166)
-                        RoundedRectangle(cornerRadius:26,style:.continuous).fill(.white).frame(width:112,height:112)
-                            .shadow(color:DesktopTheme.accent.opacity(0.09),radius:18,y:8)
-                            .overlay(RoundedRectangle(cornerRadius:26,style:.continuous).stroke(DesktopTheme.line))
-                        Image(systemName:"point.3.connected.trianglepath.dotted").font(.system(size:49,weight:.light)).foregroundStyle(DesktopTheme.accent)
+                        BrandIcon(size:144)
+                            .shadow(color:DesktopTheme.accent.opacity(0.07),radius:18,y:8)
                         Image(systemName:"checkmark").font(.system(size:12,weight:.semibold)).foregroundStyle(DesktopTheme.accent)
                             .frame(width:32,height:32).background(.white,in:Circle()).overlay(Circle().stroke(DesktopTheme.line)).offset(x:59,y:49)
                     }.accessibilityHidden(true)

@@ -39,13 +39,12 @@ struct MainWindow: View {
         NavigationSplitView {
             VStack(spacing:0) {
                 HStack(spacing:11) {
-                    ZStack { RoundedRectangle(cornerRadius:12,style:.continuous).fill(DesktopTheme.accent.opacity(0.08)).frame(width:38,height:38); Image(systemName:"point.3.connected.trianglepath.dotted").foregroundStyle(DesktopTheme.accent).font(.system(size:21,weight:.medium)) }
+                    BrandIcon(size:44)
                     VStack(alignment:.leading,spacing:4) {
-                        HStack(alignment:.firstTextBaseline, spacing:7) {
-                            Text(AppVersion.name).font(.system(size:14,weight:.semibold))
-                            Text(AppVersion.label).font(.system(size:9,weight:.medium,design:.rounded)).foregroundStyle(DesktopTheme.accent)
-                        }
-                        Text("CHANNEL TEST SYSTEM").font(.system(size:8,weight:.medium)).tracking(1.1).foregroundStyle(.secondary)
+                        Text(AppVersion.name)
+                            .font(.system(size:14,weight:.semibold))
+                            .lineLimit(1).fixedSize(horizontal:true,vertical:false)
+                        Text("CHANNEL TEST SYSTEM").font(.system(size:8,weight:.medium)).tracking(1.1).foregroundStyle(.secondary).lineLimit(1)
                     }
                     Spacer(minLength:0)
                 }.padding(.horizontal,18).padding(.top,20).padding(.bottom,22)
@@ -63,6 +62,11 @@ struct MainWindow: View {
                         Spacer()
                         if model.hasRunningTasks { Text("\(model.runningTasks.count) 个运行中").font(.system(size:10)).foregroundStyle(DesktopTheme.accent) }
                     }.foregroundStyle(.secondary)
+                    Text(AppVersion.label)
+                        .font(.system(size:11,weight:.medium,design:.rounded))
+                        .monospacedDigit().foregroundStyle(.secondary)
+                        .lineLimit(1).textSelection(.enabled)
+                        .accessibilityLabel("当前版本 \(AppVersion.label)")
                     Text("历史记录保存在这台 Mac").font(.system(size:10)).foregroundStyle(.tertiary)
                 }.padding(18)
             }.background(DesktopTheme.sidebar).navigationSplitViewColumnWidth(min:215,ideal:235,max:270)

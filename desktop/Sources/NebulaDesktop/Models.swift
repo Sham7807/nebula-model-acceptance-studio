@@ -9,6 +9,15 @@ enum AppVersion {
     static var label: String { "v\(current) · build \(build)" }
 }
 
+struct BrandIcon: View {
+    var size: CGFloat
+    var body: some View {
+        Image(nsImage: NSImage(contentsOf: Bundle.main.url(forResource:"BrandIcon",withExtension:"png") ?? URL(fileURLWithPath:"")) ?? NSApp.applicationIconImage)
+            .resizable().interpolation(.high).scaledToFit().frame(width:size,height:size)
+            .accessibilityHidden(true)
+    }
+}
+
 enum Destination: String, CaseIterable, Identifiable {
     case overview, tasks, text, image, video, audio, general, ccmax, claude, kimi, gpt, apiStress, history
     var isTest: Bool { ![.overview, .tasks, .history, .apiStress].contains(self) }
