@@ -611,6 +611,79 @@ def cache_summary(result, checks):
     return presentation(result_item, '有复用 · 部分异常' if failures else '部分样本已复用' if len(valid) < len(pairs) else '已观察到复用', 'attention' if failures or len(valid) < len(pairs) else 'passed')
 
 
+def injection_defense_summary(checks):
+    """Keep synthetic adversarial prompts separate from upstream-prompt probes.
+
+    A leaked test canary demonstrates a failed protection assertion, but does
+    not establish that the relay added an undisclosed system prompt. Token
+    accounting and hidden-prompt side channels answer a different question.
+    """
+    synthetic = []
+    for check in checks:
+        if not dimensions(check).intersection(('security', 'injection')):
+            continue
+        if check.get('local_only') or check.get('applicable') is False:
+            continue
+        raw = raw_check(check)
+        identity = ' '.join(str(value or '') for value in (
+            check.get('id'), check.get('source_id'), raw.get('id'),
+            check.get('title'), raw.get('probe'))).lower()
+        if any(value in identity for value in ('prompt_exfiltration', 'prompt_sidechannel', 'token_accounting',
+                'reference_exfiltration', 'reference_sidechannel', '上游', '侧信道', 'token 线性')):
+            continue
+        if any(value in identity for value in ('injection', 'hierarchy', 'canary', '注入', '指令层级', '金丝雀', '越权')):
+            synthetic.append(check)
+    summary = item('injection', '抗注入防护', synthetic)
+    if summary['counts']['failed']:
+        summary['conclusion'] = '抗注入防护：检查存在异常，需核对证据'
+        label, tone = '检查存在异常', 'attention'
+    elif summary['counts']['pending'] or summary['counts']['missing']:
+        summary['conclusion'] = '抗注入防护：证据不足，不能确认'
+        label, tone = '证据不足', 'neutral'
+    elif summary['counts']['passed']:
+        summary['conclusion'] = '抗注入防护：本轮未观察到泄露或越权'
+        label, tone = '本轮未见异常', 'passed'
+    else:
+        summary['conclusion'] = '抗注入防护：本轮未测试'
+        label, tone = '本轮未测', 'neutral'
+    summary['detail'] = '通过 %s 项、异常 %s 项、待判定 %s 项、未执行 %s 项。' % tuple(
+        summary['counts'][key] for key in ('passed', 'failed', 'pending', 'missing'))
+    summary['detail'] += ' 检查合成系统提示词泄露、越权覆盖与不可信内容影响；传输或解析错误不能当作泄露，只有完整响应中的具体泄露或越权内容才是防护异常证据。这些结果不能证明上游是否暗加提示词。'
+    return presentation(summary, label, tone)
+
+
+def upstream_prompt_summary(result, checks):
+    """Present hidden upstream prompts as evidence, never a pass percentage."""
+    assessment = obj(result.get('upstream_prompt_assessment'))
+    if assessment.get('verdict') not in ('suspected', 'no_signal', 'inconclusive', 'not_tested'):
+        try:
+            from .prompt_audit import build_upstream_prompt_assessment
+        except ImportError:
+            from prompt_audit import build_upstream_prompt_assessment
+        assessment = build_upstream_prompt_assessment(result)
+    verdict = assessment.get('verdict', 'not_tested')
+    label, status, tone = {
+        'suspected': ('疑似加词', 'inconclusive', 'attention'),
+        'no_signal': ('未发现加词迹象', 'passed', 'passed'),
+        'inconclusive': ('证据不足', 'inconclusive', 'neutral'),
+        'not_tested': ('本轮未测', 'not_covered', 'neutral'),
+    }[verdict]
+    relevant = [check for check in checks if 'upstream_prompt' in dimensions(check) or any(
+        value in str(check.get('id') or '') for value in ('prompt_exfiltration', 'prompt_sidechannel', 'token_accounting'))]
+    detail = str(assessment.get('detail') or '按未添加本地 system 的请求观察上游是否额外加入提示词；黑盒输出不能单独证明上游内部配置。')
+    counts = obj(assessment.get('counts'))
+    if counts:
+        detail += ' 疑似线索 %s 项、未见线索 %s 项、待判定 %s 项、对照 %s 项。' % tuple(
+            counts.get(key, 0) for key in ('candidate', 'clear', 'inconclusive', 'controls'))
+    return presentation({
+        'id': 'upstream_prompt', 'label': '上游加词检测', 'status': status,
+        'conclusion': '上游加词检测：' + label, 'detail': detail,
+        'rate': None, 'assessment': assessment,
+        'check_ids': [check['id'] for check in relevant if check.get('id')],
+        'request_ids': rows(assessment.get('request_ids')),
+    }, label, tone)
+
+
 def build_summary(result, checks, score):
     selected = lambda *keys: [c for c in checks if dimensions(c).intersection(keys) and not c.get('local_only') and c.get('applicable') is not False]
     basic = item('basic', '基础协议', selected('protocol'))
@@ -630,11 +703,8 @@ def build_summary(result, checks, score):
     elif limit['status'] == 'failed':
         limit = item('max_tokens', '输出限长', caps, '限长检查有 %s 项需核查' % limit['counts']['failed'], '请按异常参数核对；非法 0/-1 上限被接受不等于所有正常截断失效。')
         presentation(limit, '参数待核查', 'attention')
-    security = [c for c in selected('security', 'injection') if any(x in ' '.join(str(v or '') for v in (c.get('id'), c.get('source_id'), raw_check(c).get('id'), c.get('title'))).lower() for x in ('injection', 'hierarchy', 'canary', '注入', '指令层级', '金丝雀')) or 'injection' in dimensions(c)]
-    injection = item('injection', '指令隔离', security)
-    if injection['status'] == 'failed': injection['conclusion'] = '指令隔离存在风险'
-    injection['detail'] += ' 合成注入用例不能证明上游暗加提示词；本轮未验证上游是否添加提示词。'
-    presentation(injection, '隔离风险待核查' if injection['counts']['failed'] else injection['status_label'], injection['tone'])
+    injection = injection_defense_summary(checks)
+    upstream_prompt = upstream_prompt_summary(result, checks)
     cache = cache_summary(result, selected('cache'))
     pressure = item('pressure', '压测与稳定性', selected('stress', 'reliability'))
     timing = build_timing(result, checks)
@@ -664,13 +734,13 @@ def build_summary(result, checks, score):
                 pressure['conclusion'] = '已测负载阶段表现正常'
         pressure['detail'] = text + '。各阶段耗时见上方，详细指标见下方证据；短时样本不代表长期 SLA。'
         presentation(pressure, pressure['status_label'], pressure['tone'])
-    items = [basic, tools, media, limit, injection, cache, pressure]
+    items = [upstream_prompt, basic, tools, media, limit, injection, cache, pressure]
     # Batch conclusions must not pretend pooled requests describe one model.
     models = rows(obj(result.get('configuration')).get('models'))
     batch = result.get('suite') == 'batch_acceptance' or len(models) > 1
     if batch:
         items = [item('batch', '多模型结果', checks, '各模型独立判读', '本报告包含多个模型，失败和缓存率请按对应模型的检查证据阅读；不以跨模型汇总证明单个模型能力。')]
-    headline_items = sorted(items, key=lambda x: (0 if x['status'] == 'failed' else 1 if x.get('cache') else 2 if x['id'] == 'basic' else 3))
+    headline_items = sorted(items, key=lambda x: (0 if x['id'] == 'upstream_prompt' and x['status'] != 'not_covered' else 1 if x['status'] == 'failed' else 2 if x.get('cache') else 3 if x['id'] == 'basic' else 4))
     headline = '；'.join(x['conclusion'] for x in headline_items if x['status'] != 'not_covered')
     headline = '；'.join(headline.split('；')[:5]) or '本轮缺少可判定证据'
     overall = score.get('weighted_total', score.get('total'))

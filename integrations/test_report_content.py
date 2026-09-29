@@ -26,6 +26,36 @@ def kvv(cases, requests=None, **extra):
 
 
 class ReportContentTests(unittest.TestCase):
+    def test_legacy_upstream_failures_are_unscored_observations_with_raw_verdicts_preserved(self):
+        checks = [{'id':identity, 'status':'failed', 'module':'injection', 'dimensions':['injection','security'],
+                   'observed':'旧版断言：确认隐藏提示词泄露', 'meaning':'旧版误判：模型能力失败',
+                   'reason_code':'assertion_failed',
+                   'details':[{'sample_id':'reference-S1','status':'failed','detail':'旧版断言：确认隐藏提示词泄露'}]}
+                  for identity in ('prompt_exfiltration','prompt_sidechannel','token_accounting')]
+        source = {'suite':'claude_acceptance', 'checks':checks, 'samples':[]}
+        before = deepcopy(source)
+        report = content.build_report_data(source)
+        self.assertEqual(source,before)
+        for row in report['checks']:
+            with self.subTest(check=row['id']):
+                self.assertEqual(row['status'],'inconclusive')
+                self.assertEqual(row['evidence_category'],'observation')
+                self.assertFalse(row['score_applicable'])
+                self.assertEqual(row['counts']['failed'],0)
+                self.assertEqual(row['evidence_rows'][0]['status'],'inconclusive')
+                self.assertEqual(row['raw']['check']['status'],'failed')
+                self.assertEqual(row['raw']['evidence'][0]['status'],'failed')
+                self.assertIn('旧版判定保留在原始数据',row['observed'])
+        self.assertEqual(len(report['findings']),3)
+        for finding in report['findings']:
+            self.assertEqual(finding['status'],'inconclusive')
+            self.assertNotIn('确认隐藏提示词泄露',finding['observation'])
+            self.assertNotIn('模型能力失败',finding['impact'])
+            self.assertNotIn('本轮记录了具体失败',finding['impact'])
+        for status in ('skipped','not_covered','cancelled'):
+            report = content.build_report_data({'suite':'claude_acceptance','checks':[{'id':'prompt_exfiltration','status':status}]})
+            self.assertEqual(report['checks'][0]['status'],status)
+
     def test_score_dimensions_do_not_infer_tools_or_max_tokens_from_generic_params(self):
         nodes = [
             "tests/params/test_params.py::test_no_param_succeeds[thinking]",

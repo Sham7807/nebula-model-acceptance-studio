@@ -174,6 +174,8 @@ class ClaudeAcceptanceTests(unittest.TestCase):
         self.assertEqual(references['X2']['body']['metadata'], {'user_id':'audit-0001'})
         self.assertEqual(references['X3']['body']['temperature'], 0.7)
         self.assertEqual(references['T3']['body']['max_tokens'], 8)
+        self.assertTrue(all(spec['score_applicable'] is False for spec in references.values()))
+        self.assertTrue(all(spec['dimensions'] == ['upstream_prompt'] for spec in references.values()))
 
     def test_reference_safe_controls_and_encoded_leak_are_distinguished(self):
         settings,_=c.configuration(self.config(enabled_modules=['injection']))
@@ -182,9 +184,22 @@ class ClaudeAcceptanceTests(unittest.TestCase):
             return {'id':spec['id'],'probe':spec['probe'],'termination':'eof','response':{'status':200,'body':json.dumps({'type':'message','content':[{'type':'text','text':text}],'stop_reason':'end_turn','usage':usage or {'input_tokens':10,'output_tokens':1}})},'evidence':{},'request':{'body':spec['body']}}
         safe_s1=next(x for x in specs if x.get('reference_id')=='S1')
         safe_s3=next(x for x in specs if x.get('reference_id')=='S3')
-        self.assertEqual(c._judge(safe_s1,sample(safe_s1,'<sys>NONE</sys>'),settings)['status'],'passed')
-        self.assertEqual(c._judge(safe_s3,sample(safe_s3,'Tk9ORQ=='),settings)['status'],'passed')
-        self.assertEqual(c._judge(safe_s3,sample(safe_s3,'U0VDUkVUX1NZU1RFTV9QUk9NUFQ='),settings)['status'],'failed')
+        for spec,text in ((safe_s1,'<sys>NONE</sys>'),(safe_s3,'Tk9ORQ=='),(safe_s3,'U0VDUkVUX1NZU1RFTV9QUk9NUFQ=')):
+            result=c._judge(spec,sample(spec,text),settings)
+            self.assertEqual(result['status'],'inconclusive')
+            self.assertFalse(result['score_applicable'])
+            self.assertEqual(result['evidence_category'],'observation')
+
+    def test_upstream_observations_do_not_inflate_synthetic_defense_score(self):
+        calls=[]
+        result=c.run(self.config(enabled_modules=['injection'],transport=httpx.MockTransport(self.handler(calls))))
+        checks={check['id']:check for check in result['checks']}
+        for check_id in ('prompt_exfiltration','prompt_sidechannel','token_accounting'):
+            self.assertFalse(checks[check_id]['score_applicable'])
+            self.assertEqual(checks[check_id]['dimensions'],['upstream_prompt'])
+        self.assertEqual(checks['injection']['dimensions'],['security'])
+        self.assertIn(result['upstream_prompt_assessment']['verdict'],('no_signal','inconclusive'))
+        self.assertEqual(result['upstream_prompt_assessment']['counts']['candidate'],0)
 
     def test_explicit_outbound_proxy_is_applied_and_secrets_not_reported(self):
         original=httpx.Client; kwargs_seen=[]; calls=[]

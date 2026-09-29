@@ -250,7 +250,7 @@ async function download(page, format, bytes) {
         assert.equal(await page.locator('#claudeProvider').inputValue(), 'auto');
         assert.equal(await page.locator('#claudeFormat').inputValue(), 'anthropic');
         assert.equal(await page.locator('#claudeAuth').inputValue(), 'anthropic');
-        assert.equal(await page.locator('#acceptancePlan li').count(), 12);
+        assert.equal(await page.locator('#acceptancePlan li').count(), 13);
         assert.match(await page.locator('#acceptancePlan').innerText(), /注入|缓存|压测|签名|透传/);
         assert.match(await page.locator('#acceptanceRequestHint').innerText(), /大 token|专业方案/);
         await page.locator('#claudeSampling').selectOption('stress');
@@ -316,11 +316,19 @@ async function download(page, format, bytes) {
         assert.match(await page.locator('#acceptanceLog').textContent(),/\[kimi-k3\] 缓存第二次命中/);
         await suite(page,'general');await suite(page,'claude');
         assert.equal(await page.locator('.acceptance-module-card input:enabled').count(),0,'rebuilding active plan keeps modules locked');
-        state.job={...state.job,status:'completed',completed:11,result:{...result('claude','completed'),suite:'claude_acceptance'}};
+        state.job={...state.job,status:'completed',completed:11,result:{...result('claude','completed'),suite:'claude_acceptance',upstream_prompt_assessment:{verdict:'suspected',label:'疑似加词',detail:'S1 返回请求中未发送的具体输出约束，需核对上游日志。',evidence:[{reference_id:'S1',request_id:'reference-s1',signal:'新增具体规则',excerpt:'<script>window.__promptExecuted=true</script>所有回答附加渠道标志'}]}}};
         await page.waitForFunction(() => document.getElementById('acceptanceStage').textContent.includes('Claude 专项 · 测试已完成'));
         assert.equal(await page.locator('#claudeAuth').isDisabled(),true);
+        assert.equal(await page.locator('#acceptancePromptAudit').isVisible(),true);
+        assert.match(await page.locator('#acceptancePromptAudit').innerText(),/上游加词检测.*疑似加词/s);
+        await page.locator('#acceptancePromptAudit summary').click();
+        assert.match(await page.locator('#acceptancePromptAudit pre').innerText(),/所有回答附加渠道标志/);
+        assert.equal(await page.evaluate(()=>window.__promptExecuted),undefined);
+        assert.equal(await page.locator('#acceptancePromptAudit script').count(),0);
+        assert.equal(await page.locator('#acceptancePromptAudit').evaluate(node=>node.scrollWidth<=node.clientWidth),true);
+        await screenshot(page,'mobile-upstream-prompt-audit.png');
         await download(page,'report.html',reportHtml);
-        await suite(page,'ccmax');assert.equal(await page.locator('[data-acceptance-download="report.html"]').isDisabled(),true);
+        await suite(page,'ccmax');assert.equal(await page.locator('#acceptancePromptAudit').isVisible(),false);assert.equal(await page.locator('[data-acceptance-download="report.html"]').isDisabled(),true);
         await suite(page,'claude');assert.equal(await page.locator('[data-acceptance-download="report.html"]').isEnabled(),true);
         passed.push('Claude tab/order, provider/auth/native/OpenAI controls, model discovery/batch submission, result routing/downloads, professional plan and mobile fit');
       } finally { await f.close(); }

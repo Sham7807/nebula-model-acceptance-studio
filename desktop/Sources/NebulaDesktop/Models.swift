@@ -66,7 +66,7 @@ enum Destination: String, CaseIterable, Identifiable {
         case .audio: return "语音合成、音频转写与播放"
         case .general: return "四种协议，多场景参数与能力验证"
         case .ccmax: return "流式、工具、注入与渠道一致性"
-        case .claude: return "缓存、签名、透传与受控压测"
+        case .claude: return "上游加词、缓存、签名与受控压测"
         case .kimi: return "官方预检、全套验证与参数矩阵"
         case .gpt: return "HTML / SVG 生成质量与 Token 账本"
         case .apiStress: return "并发、吞吐、延迟与错误率全量观测"

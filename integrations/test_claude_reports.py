@@ -103,8 +103,8 @@ class ClaudeReportTests(unittest.TestCase):
         self.assertEqual(modules['injection']['score'], 50)
         self.assertEqual(dimensions['security']['score'], 50)
         injection = next(item for item in data['executive_summary']['items'] if item['id'] == 'injection')
-        self.assertIn('1 项异常', injection['detail'])
-        self.assertIn('另 1 项待确认', injection['detail'])
+        self.assertIn('异常 1 项', injection['detail'])
+        self.assertIn('待判定 1 项', injection['detail'])
 
     def test_render_uses_common_theme_and_exact_request_evidence(self):
         value = report()

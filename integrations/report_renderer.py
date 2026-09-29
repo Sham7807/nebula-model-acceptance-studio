@@ -356,7 +356,19 @@ def render_report(result, directory=None):
             metric_label = ''
             metric_value = ''
         metric_html = '<span class="brief-metric">'+esc(metric_label)+' <b>'+esc(metric_value)+'</b></span>' if metric_label else ''
-        executive_items.append('<article class="brief-item '+item_tone+'"><div class="brief-item-head"><h3>'+esc(item.get('label') or '本轮观察')+'</h3>'+badge(item_status,item_label,item_tone)+'</div>'+metric_html+'<p>'+prose(item.get('text'))+'</p>'+item_links+'</article>')
+        prompt_evidence = ''
+        if item.get('id') == 'upstream_prompt':
+            evidence_rows = [row for row in ((item.get('assessment') or {}).get('evidence') or []) if isinstance(row, dict)]
+            evidence_rows.sort(key=lambda row: {'candidate': 0, 'inconclusive': 1, 'clear': 2, 'controls': 3}.get(row.get('category'), 1))
+            evidence_items = []
+            for row in evidence_rows[:3]:
+                if not isinstance(row, dict):
+                    continue
+                heading = ' · '.join(str(row.get(key) or '') for key in ('reference_id', 'signal') if row.get(key))
+                evidence_items.append('<li><b>'+esc(heading or '实测线索')+'</b><p>'+prose(str(row.get('excerpt') or '')[:600])+'</p></li>')
+            if evidence_items:
+                prompt_evidence = '<details class="brief-evidence"><summary>查看加词线索与响应摘录</summary><ul>'+''.join(evidence_items)+'</ul></details>'
+        executive_items.append('<article class="brief-item '+item_tone+'"><div class="brief-item-head"><h3>'+esc(item.get('label') or '本轮观察')+'</h3>'+badge(item_status,item_label,item_tone)+'</div>'+metric_html+'<p>'+prose(item.get('text'))+'</p>'+prompt_evidence+item_links+'</article>')
     grade=executive.get('resource_grade') or {}
     grade_level=grade.get('level') if grade.get('level') in ('high','medium','low','unknown') else 'unknown'
     grade_label=grade.get('label') or '待评估'

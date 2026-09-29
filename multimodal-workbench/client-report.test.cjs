@@ -128,7 +128,7 @@ test('capability pass ratio excludes inconclusive evidence but exposes the resol
 test('general injection has its own capability dimension and request parameter evidence',async()=>{
   const r=record();r.result.checks=[{id:'injection-canary',name:'合成注入',status:'passed',module:'injection',dimensions:['injection','security'],parameters:{attack:'direct'},request_ids:['one']}];
   const html=await harness().WorkbenchReport.render([r]);
-  assert.match(html,/注入与指令隔离/);assert.match(html,/参数组合 1/);assert.match(html,/<dt>attack<\/dt><dd>direct<\/dd>/);
+  assert.match(html,/抗注入防护/);assert.match(html,/参数组合 1/);assert.match(html,/<dt>attack<\/dt><dd>direct<\/dd>/);
   assert.match(html,/覆盖 1 \/ 7 维/);assert.equal((html.match(/score-dimension not_covered/g)||[]).length,6);
 });
 
@@ -156,7 +156,7 @@ test('illegal max_tokens control failure cannot imply a legal cap was ignored',a
   const r=summaryRecord([check('max_tokens=0',['max_tokens'],'failed',{parameters:{max_tokens:0}}),check('max_tokens=10',['max_tokens'],'passed',{parameters:{max_tokens:10}}),check('isolation',['security'],'failed')]);
   const html=overview(await harness().WorkbenchReport.render([r]));
   assert.match(html,/非法限长参数校验存在异常，不能据此判定合法限长失效/);
-  assert.match(html,/指令隔离存在异常/);
+  assert.match(html,/抗注入防护存在异常/);
   assert.match(html,/不能据此认定上游私自添加提示词/);
   assert.doesNotMatch(html,/限长出现超限|长度控制未遵守|疑似偷偷/);
 });
@@ -404,4 +404,15 @@ test('native storage variants retain the source evidence and missing declaration
   assert.equal((await sourceResult([r])).classification,'official_relay');
   const result=await sourceResult([sourceRecord([],{resource_source:'official_relay'}),sourceRecord([])]);
   assert.equal(result.classification,'unknown');assert.match(result.html,/部分记录未声明/);
+});
+
+test('synthetic defense does not claim upstream prompt inspection',async()=>{
+  const html=overview(await harness().WorkbenchReport.render([summaryRecord([check('injection-canary',['security'],'failed')])]));
+  assert.match(html,/上游加词检测/);assert.match(html,/本轮未测/);
+  assert.match(html,/抗注入防护存在异常/);assert.doesNotMatch(html,/疑似加词|已确认加词/);
+});
+test('legacy hidden-prompt observations cannot lower defense score',async()=>{
+  const html=await harness().WorkbenchReport.render([summaryRecord([check('injection-canary',['security'],'passed'),check('prompt_exfiltration',['injection','security'],'failed')])]);
+  assert.match(overview(html),/<strong>100<\/strong>/);assert.match(overview(html),/未形成独立的上游加词结论/);
+  assert.doesNotMatch(overview(html),/抗注入防护存在异常/);
 });

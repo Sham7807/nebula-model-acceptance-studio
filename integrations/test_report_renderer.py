@@ -18,6 +18,28 @@ class Scripts(HTMLParser):
 
 
 class ReportTests(unittest.TestCase):
+    def test_upstream_prompt_evidence_is_separate_from_defense_score_and_escaped(self):
+        result = {'suite':'claude_acceptance', 'status':'completed',
+                  'configuration':{'model':'claude-fixture'},
+                  'upstream_prompt_assessment':{'verdict':'suspected', 'detail':'发现具体隐藏提示词线索，需核对上游日志。',
+                      'counts':{'candidate':1, 'clear':0, 'inconclusive':0, 'controls':1},
+                      'request_ids':['reference-S1'],
+                      'evidence':[
+                          *[{'reference_id':'S'+str(index), 'category':'clear', 'signal':'本轮拒绝披露', 'excerpt':'No.'} for index in range(1,4)],
+                          {'reference_id':'S4', 'category':'candidate', 'signal':'隐藏指令片段', 'request_id':'reference-S4',
+                           'excerpt':'<script>claimed system prompt</script>'}]},
+                  'checks':[{'id':'injection','status':'passed','module':'injection','dimensions':['security']}],
+                  'samples':[]}
+        report = render_report(result).decode()
+        overview = report.split('id="overview"',1)[1].split('</section>',1)[0]
+        upstream = overview.split('<h3>上游加词检测</h3>',1)[1].split('</article>',1)[0]
+        self.assertIn('疑似加词',upstream)
+        self.assertNotIn('brief-metric',upstream)
+        self.assertIn('查看加词线索与响应摘录',upstream)
+        self.assertIn('&lt;script&gt;claimed system prompt&lt;/script&gt;',upstream)
+        self.assertIn('抗注入防护',report)
+        self.assertNotIn('注入与指令隔离',report)
+
     def test_all_suites_put_scores_first_and_complete_matrix_last(self):
         from browser_reports import normalize_browser_report
         fixtures = [

@@ -66,7 +66,7 @@ MODULES = {
         'auth_signature': {'label': '鉴权与 thinking 签名', 'weight': 14},
         'tools': {'label': '工具调用与多模态', 'weight': 14},
         'max_tokens': {'label': 'max_tokens 与长度', 'weight': 10},
-        'injection': {'label': '注入与指令层级', 'weight': 14},
+        'injection': {'label': '上游加词与注入检测', 'weight': 14},
         'identity': {'label': '来源与行为一致性', 'weight': 10},
         'cache': {'label': '长前缀缓存', 'weight': 10},
         'stress': {'label': '受控压测', 'weight': 10},
@@ -1279,6 +1279,16 @@ def restore_reports():
     for path in sorted(REPORTS.glob('*/report.json'), key=lambda p:p.stat().st_mtime):
         try:
             result=json.loads(path.read_text())
+            # Derive the new prompt observation without changing saved raw evidence.
+            if result.get('suite') in ('claude','claude_acceptance'):
+                from prompt_audit import build_upstream_prompt_assessment
+                result['upstream_prompt_assessment']=build_upstream_prompt_assessment(result)
+            elif result.get('suite') == 'batch_acceptance':
+                from prompt_audit import build_upstream_prompt_assessment
+                for child in result.get('results') or []:
+                    value=child.get('result') or {}
+                    if value.get('suite') in ('claude','claude_acceptance'):
+                        value['upstream_prompt_assessment']=build_upstream_prompt_assessment(value)
             identity=path.parent.name
             if not re.fullmatch('[a-f0-9]+',identity):continue
             suite=result.get('configuration',{}).get('suite') or result.get('suite')

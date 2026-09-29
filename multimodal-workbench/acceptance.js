@@ -31,7 +31,7 @@ const acceptanceModules={
   {id:'auth_signature',title:'鉴权与签名',weight:14,requests:3,desc:'thinking 签名原样回传与篡改对照'},
   {id:'tools',title:'工具调用与多模态',weight:14,requests:4,desc:'tool_use、JSON Schema、图片输入'},
   {id:'max_tokens',title:'max_tokens 与长度',weight:10,requests:2,desc:'上限透传、截断与 stop_reason'},
-  {id:'injection',title:'注入与指令层级',weight:14,requests:3,desc:'合成金丝雀与越权行为观察'},
+  {id:'injection',title:'上游加词与注入检测',weight:14,requests:38,desc:'独立判断上游加词迹象；防护得分另算'},
   {id:'identity',title:'模型来源线索',weight:10,requests:3,desc:'响应标识与路由负对照'},
   {id:'cache',title:'长前缀缓存',weight:10,requests:3,desc:'大 token cache_control 与 usage 观测'},
   {id:'stress',title:'受控压测',weight:10,requests:20,desc:'并发、延迟、错误率与限流观测'}
@@ -39,7 +39,7 @@ const acceptanceModules={
 };
 let enabledModules={kimi:new Set(acceptanceModules.kimi.map(m=>m.id)),ccmax:new Set(acceptanceModules.ccmax.map(m=>m.id)),claude:new Set(acceptanceModules.claude.map(m=>m.id))};
 const statuses={passed:'通过',failed:'未通过',skipped:'已跳过',inconclusive:'无法判定',error:'运行错误',cancelled:'已取消',completed:'测试已完成',running:'运行中',not_covered:'未覆盖'};
-const claudeItems=['基础请求与 SSE 收尾','thinking 签名回传与篡改对照','工具调用与 JSON Schema','图片 / 多模态输入','max_tokens=1 与截断','系统提示词注入金丝雀','指令层级越权覆盖','模型来源线索与路由负对照','长前缀缓存（大 token）','重复请求缓存字段','受控并发压测与延迟','错误状态 / request-id 透传'];
+const claudeItems=['基础请求与 SSE 收尾','thinking 签名回传与篡改对照','工具调用与 JSON Schema','图片 / 多模态输入','max_tokens=1 与截断','上游隐藏提示词检测（S / C / K）','Token 对照与已知提示词排除','抗注入防护（独立计分）','模型来源线索与路由负对照','长前缀缓存（大 token）','重复请求缓存字段','受控并发压测与延迟','错误状态 / request-id 透传'];
 const ccItems=['无效 thinking 签名','message_start 唯一性','message_stop 完整收尾','连接及时关闭','流中错误事件','错误状态与格式','usage / 缓存字段','工具参数 JSON 增量','系统提示词注入与金丝雀泄露','指令层级与越权覆盖','重复行为一致性（蒸馏风险启发式）','非法参数拒绝与错误诊断'];
 const quickItems=['基础请求 · non-thinking','基础请求 · thinking','非法温度 · non-thinking','非法温度 · thinking','Tool Schema · 非流式','Tool Schema · 流式','Dynamic tools','JSON Object 输出','tool_choice required','Prompt Tokens · 基础','Prompt Tokens · 工具'];
 const openaiQuickItems=['非流式基础请求','SSE 收尾与 usage','max_tokens=1 限制','非法 max_tokens 拒绝','强制工具调用','禁止工具调用','多个顶层工具选择','JSON 对象输出','内置样例图片识别','重复前缀缓存观测','Token 计数一致性'];
@@ -119,7 +119,7 @@ function updatePlan(){
  const mp=el('acceptanceMatrixProfile').value;el('acceptanceMatrixHelp').textContent=mp==='off'?'仅执行原有套件。选择标准或完整矩阵可增加多参数证据。':mp==='quick'?'长度上限 1 / 10 / 20，各独立验证；包含基础阶梯压力采样。':mp==='standard'?'长度上限 1 / 10 / 20 × 两种场景 × 流式与非流式，共 12 条长度用例；另外验证工具、图像、注入、缓存与分阶段压力。':'长度上限 1 / 10 / 20 / 64 / 128 / 256 × 三种场景 × 流式与非流式 × 两轮，共 72 条长度用例；扩大各模块样本与压力阶段。';
  const cc=selected==='ccmax',claude=selected==='claude',full=el('acceptanceScope').value==='kvvfull',openai=cc?el('acceptanceFormat').value==='openai':claude?el('claudeFormat').value==='openai':el('acceptanceThinkMode').value==='openai';
  el('acceptanceTitle').textContent=cc?'CCMax渠道验收':claude?'Claude 上游专项验收':'Kimi Vendor Verifier';
- el('acceptanceDescription').textContent=claude?'面向 Anthropic 官方或 AWS Bedrock 上游的 Claude 中转渠道，检查基础能力、长前缀缓存、注入防护、签名和接口透传，保留逐请求证据。':cc?(openai?'使用 OpenAI Chat Completions 请求与响应格式，检查 Claude 兼容渠道的流式、工具、错误及安全行为。':'使用独立的 Anthropic Messages 检测器，检查流式可靠性、参数校验和工具调用，保留每次样本证据。'):(openai?'四个检测层面统一使用 OpenAI 兼容请求。预检运行 11 个兼容用例；全套增加能力探针及 KVV 工具 Schema 矩阵。':'网页通过同一个本地服务自动调用已集成的 MoonshotAI 官方 KVV，提供原生预检和完整 API 验证，无需另开项目。');
+ el('acceptanceDescription').textContent=claude?'面向 Anthropic 官方或 AWS Bedrock 上游的 Claude 中转渠道，检查上游是否额外加词、基础能力、长前缀缓存、抗注入防护、签名和接口透传，保留逐请求证据。':cc?(openai?'使用 OpenAI Chat Completions 请求与响应格式，检查 Claude 兼容渠道的流式、工具、错误及安全行为。':'使用独立的 Anthropic Messages 检测器，检查流式可靠性、参数校验和工具调用，保留每次样本证据。'):(openai?'四个检测层面统一使用 OpenAI 兼容请求。预检运行 11 个兼容用例；全套增加能力探针及 KVV 工具 Schema 矩阵。':'网页通过同一个本地服务自动调用已集成的 MoonshotAI 官方 KVV，提供原生预检和完整 API 验证，无需另开项目。');
  el('acceptanceKimiFields').hidden=cc||claude;el('acceptanceCcFields').hidden=!cc;el('acceptanceClaudeFields').hidden=!claude;
  el('acceptanceAuth').disabled=cc&&openai;
  el('claudeAuth').disabled=claude&&openai;if(claude&&openai)el('claudeAuth').value='bearer';
@@ -168,7 +168,7 @@ function syncDownloads(){
  document.querySelectorAll('[data-acceptance-download]').forEach(b=>b.disabled=!available);
 }
 function hideResults(){
- displayedRunId='';el('acceptanceProgress').hidden=true;el('acceptanceVerdict').hidden=true;el('claudeAdmissionPanel').hidden=true;
+ displayedRunId='';el('acceptanceProgress').hidden=true;el('acceptanceVerdict').hidden=true;el('acceptancePromptAudit').hidden=true;el('claudeAdmissionPanel').hidden=true;
  for(const id of ['acceptanceStage','acceptanceCount','acceptanceElapsed','acceptanceEta','acceptanceSummary','acceptanceVerdict','acceptanceCases','acceptanceLog'])el(id).replaceChildren();
  el('acceptanceBar').value=0;syncDownloads();
 }
@@ -260,7 +260,7 @@ function restoreConfiguration(job){
  }
 }
 function renderCase(item){
- const status=item.applicable===false?'not_covered':(item.status||'inconclusive');
+ const status=item.applicable===false?'not_covered':(item.status||'inconclusive'),observation=item.evidence_category==='observation'||item.metadata?.evidence_category==='observation';
  const row=make('div','acceptance-case '+status);row.dataset.caseId=item.id||item.nodeid||'';
  const title=(item.title||item.label||item.name||item.id||item.probe||'测试项')+(Number.isInteger(item.samples)?`（${item.samples} 样本 / ${item.failures||0} 异常）`:'' );
  const detail=item.skip_reason||item.detail||item.details||item.issues||item.notes||item.observations;
@@ -268,7 +268,7 @@ function renderCase(item){
  let actual=item.actual||item.observed||item.result||detail||statuses[status]||status;
  if(typeof actual!=='string')actual=JSON.stringify(actual,null,2);
  const grid=make('div','acceptance-matrix-row');
- const resultCell=make('div','matrix-result');resultCell.append(make('span','status-dot '+status,item.applicable===false?'—':status==='passed'?'✓':status==='failed'||status==='error'?'×':'!'),make('b','',item.applicable===false?'不适用':statuses[status]||status));
+ const resultCell=make('div','matrix-result');resultCell.append(make('span','status-dot '+status,observation?'·':item.applicable===false?'—':status==='passed'?'✓':status==='failed'||status==='error'?'×':'!'),make('b','',observation?'观察项 · 不计分':item.applicable===false?'不适用':statuses[status]||status));
  grid.append(make('div','matrix-case',title),make('div','matrix-expected',typeof expected==='string'?expected:JSON.stringify(expected,null,2)),make('div','matrix-actual',actual),resultCell);
  row.append(grid);
  if(detail&&(typeof detail==='string'||detail.length)){
@@ -319,6 +319,21 @@ function renderAdmission(data,id){
 function filenamePart(value){return String(value||'未命名模型').trim().replace(/[\\/:*?"<>|\u0000-\u001f]+/g,'-').replace(/\s+/g,' ').slice(0,80)||'未命名模型';}
 function reportStamp(data){const raw=Number(data?.finished_at||data?.started_at||Date.now()/1000);const date=new Date((raw<1e12?raw*1000:raw));const pad=value=>String(value).padStart(2,'0');return `${date.getFullYear()}${pad(date.getMonth()+1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;}
 function reportDownloadName(data,format){const result=data?.result||{},model=result.configuration?.model||data?.model||'未命名模型',base=`测试报告-${filenamePart(model)}-${reportStamp(data)}`;return format==='evidence.zip'?base+'-证据.zip':base+'.'+format.split('.').pop();}
+function renderPromptAudit(result){
+ const panel=el('acceptancePromptAudit');panel.replaceChildren();panel.hidden=true;
+ const entries=Array.isArray(result?.results)?result.results.map(child=>({model:child.model,result:child.result})):result?[{model:result.configuration?.model,result}]:[];
+ for(const entry of entries){
+  const report=entry.result||{},audit=report.upstream_prompt_assessment;
+  if(!audit&&report.suite!=='claude_acceptance')continue;
+  panel.hidden=false;
+  const card=make('article','prompt-audit-card'),verdict=audit?.verdict||'inconclusive';card.dataset.verdict=verdict;
+  const labels={suspected:'疑似加词',no_signal:'未发现加词迹象',inconclusive:'证据不足',not_tested:'本轮未测'};
+  const head=make('div','prompt-audit-head');head.append(make('h3','','上游加词检测'+(entries.length>1?' · '+entry.model:'')),make('b','prompt-audit-label',labels[verdict]||'证据不足'));card.append(head);
+  card.append(make('p','',audit?.detail||'这份旧记录未保存独立的加词结论。请重新下载报告，按已保存请求核对；不能用防护得分判断上游是否加词。'));
+  if(audit?.evidence?.length){const details=make('details'),summary=make('summary','','查看加词线索与请求编号');details.append(summary);for(const item of [...audit.evidence].sort((a,b)=>Number(b.category==='candidate')-Number(a.category==='candidate'))){const row=make('div','prompt-audit-evidence');row.append(make('b','',`${item.reference_id||''} · ${item.request_id||''}`),make('p','',item.signal||''),make('pre','',item.excerpt||''));details.append(row);}card.append(details);}
+  card.append(make('small','','独立于抗注入防护得分。拒答、声称没有提示词或 Token 数偏高，都不能单独证明有没有上游加词。'));panel.append(card);
+ }
+}
 function render(data,id){
  displayedRunId=id;el('acceptanceProgress').hidden=false;
  const done=data.completed||0,total=data.total||0,pct=total?Math.min(100,done/total*100):0;
@@ -330,6 +345,7 @@ function render(data,id){
  const verdict=result?.verdict;el('acceptanceVerdict').hidden=!verdict;if(verdict){el('acceptanceVerdict').className='acceptance-verdict '+verdict.status;el('acceptanceVerdict').replaceChildren(make('b','',verdict.label),make('p','',verdict.detail));}
  el('acceptanceSummary').textContent=summary?`${data.suite==='ccmax'?'请求样本':'用例'}：通过 ${summary.passed||0} · 未通过 ${summary.failed||0} · 跳过 ${summary.skipped||0} · 未覆盖 ${summary.not_covered||0} · 无法判定 ${summary.inconclusive||0}`:'';
  const actualRequests=result?.transport?.request_count??data.request_count;if(actualRequests!==undefined)el('acceptanceSummary').textContent+=` · 实际 API 请求 ${actualRequests} 次`;
+ renderPromptAudit(result);
  if(result?.error)message(result.error,true);
  const current=data.batch&&data.status==='running'?data.current_run_snapshot:null;
  const currentModel=current?.model||'';
